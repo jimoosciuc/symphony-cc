@@ -1,106 +1,217 @@
 # Symphony Service Specification
 
-Status: Draft v2 for Claude Code first implementation
+Status: Draft v2, Claude Code first and GitHub first
 
-Purpose: Define a long-running service that orchestrates coding agents to get
-project work done from issue tracker input.
+Purpose: Define a long-running service that uses Claude Code to complete work
+from GitHub issues and return changes through GitHub pull requests.
 
-This repository is named `symphony-cc`; the project, package, and CLI are still
+This repository is named `symphony-cc`; the product, package, and CLI remain
 named `symphony`.
 
-## 1. Scope
+## 1. Problem Statement
 
-Symphony is a daemon that reads work from an issue tracker, creates a
-deterministic workspace per issue, starts a Claude Code backed coding-agent
-session inside that workspace, streams normalized runtime events, and keeps
-enough state and logs for operators to debug unattended runs.
+Symphony is a daemon that continuously reads eligible GitHub issues, creates a
+deterministic workspace per issue, starts an issue-scoped Claude Code session,
+streams normalized runtime events, and leaves enough GitHub and filesystem
+evidence for operators to review unattended work.
 
-The specification keeps Symphony's core orchestration responsibilities
-provider-neutral. Claude Code is the first and only required provider for this
-repository.
+The service solves these operational problems:
+
+- It turns issue execution into a repeatable daemon workflow.
+- It isolates agent execution in per-issue workspaces.
+- It keeps workflow policy in a versioned `WORKFLOW.md`.
+- It makes Claude Code session continuity explicit and inspectable.
+- It uses GitHub issues, pull requests, labels, comments, and optionally GitHub
+  Projects as the work coordination surface.
+- It provides enough logs and artifacts to debug multiple concurrent runs.
+
+Important boundary:
+
+- Symphony is a scheduler, runner, GitHub reader, and GitHub work coordinator.
+- Code changes, validation, commits, and PR creation may be performed by the
+  Claude Code session, by Symphony helper code, or by a documented hybrid.
+- Symphony MUST preserve enough state to avoid duplicate work and to resume
+  useful operation after restart.
 
 ## 2. Goals
 
-- Poll an issue tracker on a fixed cadence.
+- Poll GitHub issues on a fixed cadence.
 - Dispatch eligible issues with bounded concurrency.
-- Create and reuse deterministic per-issue workspaces.
-- Run one issue-scoped coding-agent session per active worker.
+- Claim issues with labels/comments so humans and future runs can see ownership.
+- Create deterministic per-issue workspaces and preserve them across attempts.
+- Start one Claude Code session per active issue worker.
 - Use Claude Code session continuity instead of isolated one-shot prompts.
-- Stream provider events live to the orchestrator.
-- Detect stalls, timeouts, cancellation, and process crashes.
-- Retry transient failures with bounded exponential backoff.
-- Reconcile active workers against tracker state changes.
-- Load behavior from a repository-owned `WORKFLOW.md`.
-- Persist run artifacts, logs, and provider session metadata.
+- Stream provider events live to orchestrator state and JSONL logs.
+- Detect stalls, timeouts, cancellation, and provider crashes.
+- Retry transient failures with bounded backoff.
+- Reconcile active workers against GitHub issue/PR state changes.
+- Produce or update a GitHub pull request for completed code work.
+- Support tracker/filesystem/session-record restart recovery without requiring a
+  database in the first implementation.
+- Provide a focused test matrix that lets future agents implement issues
+  mechanically.
 
 ## 3. Non-Goals
 
-- Implementing a general workflow engine.
-- Implementing a rich dashboard in the first milestone.
+- Supporting Linear in the first implementation.
 - Supporting Codex in this repository.
-- Requiring a database for the first implementation.
-- Moving ticket write business logic into the orchestrator.
-- Reusing the old Elixir code structure.
+- Implementing a general workflow engine.
+- Requiring GitHub Projects for the first implementation.
+- Building a rich dashboard before the core daemon works.
+- Reusing the old Elixir implementation structure.
+- Providing strong sandbox guarantees beyond the documented Claude Code and host
+  OS controls.
 
-Ticket comments, state transitions, and PR creation are normally performed by
-the coding agent using tools available in its environment or by optional tools
-advertised by Symphony.
+## 4. Architecture
 
-## 4. System Components
+### 4.1 Components
 
 1. `Workflow Loader`
    - Reads `WORKFLOW.md`.
    - Parses YAML front matter and prompt body.
-   - Returns typed config plus prompt template.
+   - Returns typed config and prompt template.
 
 2. `Config Layer`
    - Applies defaults.
    - Resolves `$ENV_VAR` values.
+   - Normalizes paths.
    - Validates settings before dispatch.
 
-3. `Issue Tracker Adapter`
+3. `GitHub Tracker Adapter`
    - Fetches candidate issues.
-   - Refreshes active issue states.
-   - Fetches terminal issues for startup cleanup.
-   - Normalizes tracker payloads into the issue model.
+   - Fetches current issue states for reconciliation.
+   - Claims and releases issues through labels and comments.
+   - Discovers linked PRs.
+   - Optionally reads GitHub Project fields for eligibility and status.
 
 4. `Workspace Manager`
-   - Maps each issue identifier to one workspace path.
+   - Maps each issue to a workspace path.
    - Ensures workspace paths stay under `workspace.root`.
+   - Populates or reuses repositories.
    - Runs lifecycle hooks.
-   - Preserves successful workspaces unless cleanup policy says otherwise.
+   - Cleans terminal workspaces when configured.
 
 5. `Orchestrator`
-   - Owns polling, dispatch, retries, reconciliation, and active worker state.
-   - Receives normalized agent events.
-   - Enforces provider-independent lifecycle rules.
+   - Owns poll ticks, dispatch, active workers, retries, and reconciliation.
+   - Receives normalized provider events.
+   - Maintains in-memory runtime state.
+   - Persists per-run artifacts.
 
 6. `Agent Provider`
    - Owns provider process/session lifecycle.
-   - Sends first prompt and continuation input.
-   - Emits normalized events to the orchestrator.
-   - Implements cancellation, timeout, cleanup, and session persistence.
+   - Sends first and continuation inputs.
+   - Emits normalized events.
+   - Implements interruption, cancellation, cleanup, session persistence, and
+     provider-specific error mapping.
 
-7. `Logging and Artifacts`
-   - Writes structured JSONL logs.
-   - Stores request metadata, provider session metadata, transcripts, stderr,
-     usage, terminal state, and failure details.
+7. `Claude Code Provider`
+   - Implements the provider boundary with Claude Code.
+   - Uses an ongoing Claude Code session with streaming input.
+   - Persists provider session identity and transcript metadata.
 
-## 5. Issue Model
+8. `PR Coordinator`
+   - Defines branch naming, PR discovery, PR creation/update policy, and review
+     handoff.
+   - May be implemented as helper code, prompt instructions, or an advertised
+     tool, but behavior MUST be explicit.
+
+9. `Logging and Artifacts`
+   - Emits structured logs.
+   - Stores request, session, event, usage, terminal, and GitHub metadata.
+
+### 4.2 Layers
+
+Symphony is easiest to implement when kept in these layers:
+
+1. Policy: `WORKFLOW.md` prompt body and workflow settings.
+2. Configuration: typed config and validation.
+3. Coordination: polling, dispatch, retries, reconciliation.
+4. Execution: workspace and provider session.
+5. Integration: GitHub API and optional project metadata.
+6. Observability: logs, artifacts, and optional status API.
+
+## 5. Data Models
+
+### 5.1 Issue
 
 A normalized issue MUST include:
 
-- `id`: stable tracker-internal ID.
-- `identifier`: human-readable identifier, for example `ABC-123`.
+- `id`: GitHub node ID or stable issue ID.
+- `number`: repository issue number.
+- `identifier`: stable human-readable identifier, for example `owner/repo#123`.
+- `owner`.
+- `repo`.
 - `title`.
-- `description`.
-- `state`.
+- `body`.
+- `state`: `open` or `closed`.
 - `url`.
-- `updated_at`, if supplied by the tracker.
-- `raw`, optional tracker payload for debugging.
+- `labels`.
+- `assignees`.
+- `updated_at`.
+- `created_at`.
+- `raw`: optional raw payload for debugging.
 
-`id` is used for tracker lookups. `identifier` is used for logs, prompt
-rendering, and workspace naming.
+`identifier` is used for logs, prompt rendering, workspace naming, and
+operator-facing status.
+
+### 5.2 Pull Request
+
+A normalized pull request SHOULD include:
+
+- `id`.
+- `number`.
+- `owner`.
+- `repo`.
+- `title`.
+- `url`.
+- `state`.
+- `head_ref`.
+- `base_ref`.
+- `is_draft`.
+- `mergeable_state`, if available.
+- `linked_issue_identifier`, if known.
+
+### 5.3 Workspace
+
+Workspace record:
+
+- `issue_identifier`.
+- `workspace_key`.
+- `path`.
+- `repo_path`.
+- `created_at`.
+- `reused`.
+
+### 5.4 Session Record
+
+Session record:
+
+- `session_id`.
+- `provider`: `claude_code`.
+- `provider_session_id`, if available.
+- `issue_identifier`.
+- `issue_number`.
+- `workspace_path`.
+- `artifact_dir`.
+- `transcript_path`, if available.
+- `attempt`.
+- `turn_count`.
+- `started_at`.
+- `last_event_at`.
+- `terminal_state`, if ended.
+
+### 5.5 Runtime Event
+
+Runtime event:
+
+- `event`.
+- `timestamp`.
+- `session_id`.
+- `provider`.
+- `provider_session_id`, if available.
+- `issue_identifier`.
+- `attempt`.
+- `payload`.
 
 ## 6. Workflow File
 
@@ -111,8 +222,9 @@ It contains YAML front matter followed by a prompt template:
 ```markdown
 ---
 tracker:
-  kind: linear
-  project_slug: symphony
+  kind: github
+  owner: jimoosciuc
+  repo: symphony-cc
 agent:
   provider: claude_code
 ---
@@ -120,14 +232,13 @@ agent:
 You are working on {{ issue.identifier }}: {{ issue.title }}.
 ```
 
-Unknown top-level keys SHOULD be ignored for forward compatibility.
-
-Required top-level config sections for v2:
+Required top-level sections:
 
 - `tracker`
 - `agent`
 - `workspace`
 - `claude`
+- `github`
 
 Optional sections:
 
@@ -135,6 +246,9 @@ Optional sections:
 - `retry`
 - `logging`
 - `tools`
+- `status`
+
+Unknown top-level keys SHOULD be ignored for forward compatibility.
 
 Prompt rendering MUST fail on unknown variables or unknown filters.
 
@@ -144,18 +258,55 @@ Prompt rendering MUST fail on unknown variables or unknown filters.
 
 ```yaml
 tracker:
-  kind: linear
-  endpoint: https://api.linear.app/graphql
-  api_key: $LINEAR_API_KEY
-  project_slug: symphony
-  active_states: ["Todo", "In Progress"]
-  terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+  kind: github
+  owner: jimoosciuc
+  repo: symphony-cc
+  token: $GITHUB_TOKEN
+  include_labels: ["symphony-ready"]
+  exclude_labels: ["symphony-running", "symphony-blocked"]
+  terminal_labels: ["symphony-done", "symphony-wontfix"]
+  active_states: ["open"]
 ```
 
-`tracker.kind: linear` is the only required tracker for the first
-implementation.
+`tracker.kind` MUST be `github` in the first implementation.
 
-### 7.2 Agent
+Candidate issues:
+
+- MUST be open.
+- MUST match `include_labels` when configured.
+- MUST NOT have any `exclude_labels`.
+- MUST NOT already have an active Symphony claim by another live run.
+- MAY be filtered by assignee, milestone, repository, or project fields if
+  configured.
+
+### 7.2 GitHub Coordination
+
+```yaml
+github:
+  claim_label: symphony-running
+  ready_label: symphony-ready
+  blocked_label: symphony-blocked
+  done_label: symphony-done
+  branch_prefix: symphony
+  base_branch: main
+  draft_pr: true
+  claim_comment: true
+  pr_link_comment: true
+  close_issue_on_done: false
+  project:
+    enabled: false
+    owner: null
+    number: null
+    status_field: Status
+    ready_values: ["Ready"]
+    running_value: "In Progress"
+    review_value: "Review"
+```
+
+GitHub Projects are OPTIONAL. The first implementation SHOULD work with issues,
+labels, comments, and PRs only.
+
+### 7.3 Agent
 
 ```yaml
 agent:
@@ -164,16 +315,17 @@ agent:
   max_turns: 3
 ```
 
-`agent.provider` MUST be `claude_code` for this repository until additional
-providers are explicitly added.
+`agent.provider` MUST be `claude_code`.
 
 `max_turns` limits back-to-back continuation turns inside one worker lifetime.
 
-### 7.3 Workspace
+### 7.4 Workspace
 
 ```yaml
 workspace:
   root: .symphony/workspaces
+  populate: git
+  remote: origin
   after_create: null
   before_run: null
   after_run: null
@@ -181,10 +333,13 @@ workspace:
   hook_timeout_ms: 300000
 ```
 
-Relative `workspace.root` resolves relative to the directory containing the
-selected workflow file.
+Relative paths resolve relative to the workflow file directory.
 
-### 7.4 Claude
+`populate: git` means the implementation prepares a git checkout suitable for
+the issue. Exact clone/fetch behavior is implementation-defined but MUST be
+documented.
+
+### 7.5 Claude
 
 ```yaml
 claude:
@@ -200,54 +355,152 @@ claude:
 ```
 
 The implementation MUST document the exact Claude Code SDK version and option
-names it targets. If SDK option names differ from this configuration, the
-implementation MUST map Symphony config names to SDK options in one place.
+names it targets.
 
 `retry_resume_policy` values:
 
 - `resume_same_session`: retry by resuming the persisted Claude session.
-- `new_session_with_summary`: create a new session and include an explicit
-  retry summary.
-- `fail_closed`: do not retry after a provider failure.
+- `new_session_with_summary`: create a new session and include a retry summary.
+- `fail_closed`: do not retry after provider failure.
 
-The default SHOULD be `resume_same_session`.
+### 7.6 Polling And Retry
 
-## 8. Workspace Rules
+```yaml
+polling:
+  interval_ms: 60000
+  reconcile_interval_ms: 30000
+
+retry:
+  max_attempts: 3
+  initial_backoff_ms: 60000
+  max_backoff_ms: 900000
+  multiplier: 2.0
+```
+
+### 7.7 Logging
+
+```yaml
+logging:
+  level: info
+  jsonl_path: .symphony/logs/symphony.jsonl
+  redact_keys: ["token", "authorization", "api_key", "password"]
+```
+
+## 8. Workspace Contract
 
 Per-issue workspace path:
 
 ```text
-<workspace.root>/<sanitized_issue_identifier>
+<workspace.root>/<sanitized_owner>_<sanitized_repo>_<issue_number>
 ```
 
 Invariants:
 
-- Agent execution cwd MUST equal the per-issue workspace path.
+- Agent execution cwd MUST equal the per-issue workspace path or configured
+  repository subdirectory inside it.
 - Workspace path MUST stay inside `workspace.root`.
-- Workspace directory names MUST only contain `[A-Za-z0-9._-]`; other
-  characters are replaced with `_`.
+- Workspace names MUST only contain `[A-Za-z0-9._-]`; other characters are
+  replaced with `_`.
 - Existing workspaces are reused.
-- Successful runs do not delete workspaces.
+- Successful workspaces are preserved by default.
 
-## 9. Agent Provider Contract
+Workspace preparation:
 
-The provider contract is the boundary between Symphony orchestration and a
-coding-agent implementation.
+- Ensure directory exists.
+- Populate or update repository checkout.
+- Create or update the issue branch.
+- Run `after_create` only for new workspace directories.
+- Run `before_run` before provider start.
+- Run `after_run` after provider terminal state.
+- Run `before_delete` before cleanup.
 
-The orchestrator MUST NOT depend on raw Claude Code SDK event shapes. Providers
-MUST translate provider-specific activity into normalized Symphony events.
-
-### 9.1 Provider Interface
-
-An implementation MUST provide the equivalent of:
+Branch naming SHOULD default to:
 
 ```text
-start_session(issue, workspace_path, initial_prompt, config) -> session
-send_input(session, message) -> event_stream
-interrupt(session) -> terminal_event
-cancel(session) -> terminal_event
-close(session) -> void
-restore(session_record) -> session
+<github.branch_prefix>/<owner>-<repo>-<issue_number>
+```
+
+## 9. GitHub Tracker Contract
+
+### 9.1 Required Operations
+
+The tracker adapter MUST support:
+
+1. `fetch_candidate_issues(config) -> list[Issue]`
+2. `fetch_issues_by_numbers(numbers) -> list[Issue]`
+3. `claim_issue(issue, run_metadata) -> claim_result`
+4. `release_issue(issue, reason) -> release_result`
+5. `mark_issue_blocked(issue, reason) -> result`
+6. `find_linked_pull_requests(issue) -> list[PullRequest]`
+7. `create_or_update_progress_comment(issue, body) -> result`
+8. `create_or_update_pr_link_comment(issue, pr) -> result`
+
+The PR coordinator or Claude session MUST support:
+
+1. `ensure_branch(issue, workspace) -> branch`
+2. `ensure_pull_request(issue, branch, summary) -> PullRequest`
+
+### 9.2 Claim Semantics
+
+Before dispatching a worker, Symphony SHOULD claim the issue:
+
+- Add `github.claim_label`.
+- Optionally remove `github.ready_label`.
+- Optionally write a claim comment with run ID, workspace, and timestamp.
+- Optionally update project status to running.
+
+If claim fails because the issue changed or another run owns it, dispatch MUST
+skip the issue.
+
+### 9.3 Release And Completion
+
+On failure:
+
+- Remove `claim_label` when the run has ended.
+- Add `blocked_label` for non-retryable failures when configured.
+- Write a failure comment or artifact link when configured.
+
+On successful PR creation:
+
+- Remove `claim_label`.
+- Add or preserve review/done labels according to workflow config.
+- Comment with PR URL when `pr_link_comment` is true.
+- Optionally update project status to review.
+- Do not close the issue unless `close_issue_on_done` is true.
+
+### 9.4 GitHub API Requirements
+
+The implementation MAY use GitHub REST, GraphQL, or `gh` CLI internally, but the
+adapter boundary MUST expose normalized models and errors.
+
+Required auth:
+
+- `GITHUB_TOKEN` or configured token with access to issues, contents, pull
+  requests, and project metadata when project integration is enabled.
+
+Errors MUST distinguish:
+
+- missing token;
+- permission denied;
+- repository not found;
+- rate limit;
+- transport failure;
+- malformed response;
+- claim conflict.
+
+## 10. Agent Provider Contract
+
+The orchestrator MUST NOT depend on raw Claude Code SDK event shapes.
+
+Provider interface:
+
+```text
+start_session(issue, workspace_path, initial_prompt, config) -> SessionRecord
+send_input(session, message) -> stream[AgentEvent]
+interrupt(session) -> AgentEvent
+cancel(session) -> AgentEvent
+close(session) -> None
+restore(session_record) -> SessionRecord
 ```
 
 `start_session` MUST create or resume an issue-scoped provider session.
@@ -256,49 +509,14 @@ restore(session_record) -> session
 conversation.
 
 `restore` MUST use persisted session metadata when provider support exists. If
-restore cannot be completed, the provider MUST emit a normalized failure reason
-and follow the configured retry policy.
+restore cannot be completed, the provider MUST emit a normalized failure and
+follow `retry_resume_policy`.
 
-### 9.2 Session Identity
-
-Symphony session records MUST include:
-
-- `provider`: `claude_code`.
-- `issue_id`.
-- `issue_identifier`.
-- `workspace_path`.
-- `provider_session_id`, when available.
-- `transcript_path`, when available.
-- `artifact_dir`.
-- `started_at`.
-- `last_event_at`.
-- `turn_count`.
-- `attempt`.
-
-The externally visible `session_id` SHOULD be stable and provider-neutral:
-
-```text
-<provider>:<issue_identifier>:<attempt>
-```
-
-Provider-native identifiers MUST be preserved separately as
-`provider_session_id`.
-
-### 9.3 Continuation Turns
-
-The first turn uses the full rendered prompt.
-
-Continuation turns SHOULD send short continuation guidance to the same provider
-session rather than resending the entire prompt. The continuation guidance MUST
-include current issue state and any orchestrator-observed reason for
-continuing.
-
-### 9.4 Normalized Events
-
-Providers SHOULD emit these events:
+Normalized event names:
 
 - `session_started`
 - `session_restored`
+- `heartbeat`
 - `message_delta`
 - `message_completed`
 - `tool_started`
@@ -306,161 +524,182 @@ Providers SHOULD emit these events:
 - `permission_requested`
 - `permission_resolved`
 - `usage`
-- `heartbeat`
 - `turn_completed`
 - `turn_failed`
 - `turn_cancelled`
 - `session_closed`
 - `malformed`
 
-Each event SHOULD include:
+Events MUST be streamed live enough for stall detection.
 
-- `event`
-- `timestamp`
-- `session_id`
-- `provider`
-- `provider_session_id`, if available
-- `issue_id`
-- `issue_identifier`
-- `payload`
+## 11. Claude Code Provider
 
-Events MUST be streamed live enough to keep stall detection meaningful.
+The Claude provider SHOULD use the Claude Code Agent SDK client mode that
+supports ongoing sessions and streaming input.
 
-## 10. Claude Code Provider
-
-Claude Code is the first provider for this repository.
-
-### 10.1 Required Strategy
-
-The Claude provider SHOULD use the Claude Code Agent SDK client model that
-supports an ongoing session and streaming input.
-
-The default architecture is:
+Default architecture:
 
 ```text
 Symphony worker
-  -> Claude provider sidecar/client
+  -> ClaudeCodeProvider
       -> one Claude Code session per issue workspace
       -> streaming input for first and continuation turns
-      -> streaming output normalized into Symphony events
+      -> normalized event stream
+      -> persisted provider session metadata
 ```
 
 The provider MUST NOT treat isolated one-shot CLI calls as the primary
-architecture. One-shot CLI invocation MAY be used only as a spike or fallback,
-and that fallback MUST be documented as degraded behavior.
+architecture. One-shot CLI MAY be a degraded fallback only when documented.
 
-### 10.2 Session Persistence
+Required behavior:
 
-For each issue, the provider MUST persist enough metadata to resume a Claude
-Code session when supported:
+- Start Claude in the issue workspace.
+- Send the rendered first prompt.
+- Send continuation guidance on the same session.
+- Persist provider-native session identity when available.
+- Record transcript location or copy transcript artifacts.
+- Emit usage when available.
+- Handle permission requests according to documented policy.
+- Support best-effort interrupt/cancel.
+- Emit terminal events for timeout, cancellation, crash, and provider failure.
 
-- Claude-native session id.
-- Transcript location.
-- Symphony session record.
-- Last successful turn metadata.
-- Retry and terminal status.
+Permission behavior is implementation-defined but MUST NOT stall indefinitely.
 
-If the SDK supports a configurable session store, Symphony SHOULD configure it
-under `claude.session_store`.
+## 12. Prompt Contract
 
-If Claude Code stores transcripts in a provider-owned default location, Symphony
-MUST record the resolved transcript location or copy a redacted artifact into
-`claude.artifact_store`.
+The first prompt SHOULD include:
 
-### 10.3 Permissions
+- issue identifier, title, body, labels, and URL;
+- repository owner/name;
+- workspace path;
+- expected branch name;
+- PR expectations;
+- validation expectations;
+- GitHub coordination rules;
+- reminder that the run is unattended.
 
-Permission behavior is implementation-defined but MUST be documented.
+Continuation prompts SHOULD be short and include:
 
-The first implementation targets trusted local automation and MAY use a
-high-trust permission mode. Permission requests MUST NOT leave a run stalled
-indefinitely.
+- current issue state;
+- previous turn outcome;
+- reason for continuation;
+- remaining turn budget.
 
-Allowed outcomes:
+## 13. PR Delivery Contract
 
-- auto-approve according to documented policy;
-- deny and continue when the provider supports it;
-- fail the turn with `permission_required`;
-- surface to an operator channel, if implemented.
+The first implementation MAY choose one of two strategies:
 
-### 10.4 Cancellation And Interrupts
+1. `agent_managed_pr`: prompt Claude to commit, push, and open/update the PR.
+2. `symphony_managed_pr`: Symphony inspects workspace changes and creates or
+   updates the PR after Claude finishes.
 
-The provider MUST support best-effort cancellation.
+The chosen strategy MUST be documented. The default SHOULD be
+`agent_managed_pr` for MVP speed, with tests around prompt expectations and
+artifact capture.
 
-On cancellation, timeout, process crash, or non-zero provider exit, the provider
-MUST emit a terminal normalized event:
+PR requirements:
 
-- `turn_cancelled`
-- `turn_failed`
-- `session_closed`
+- Branch name follows configured prefix.
+- PR title includes issue identifier or `Fixes #<number>` style reference.
+- PR body includes summary, validation, artifacts/limitations, and linked issue.
+- Existing open PR for the issue/branch is updated rather than duplicated.
+- Failed or partial runs MUST NOT silently create misleading PRs.
 
-The provider MUST clean up child processes it owns. If Claude Code creates
-descendant processes that cannot be controlled directly, that limitation MUST be
-documented and tested with a fake provider at minimum.
+## 14. Orchestrator Lifecycle
 
-### 10.5 Usage
-
-When Claude Code exposes token or cost data, the provider SHOULD emit `usage`
-events and a final usage summary.
-
-Usage absence MUST NOT fail the run.
-
-## 11. Orchestrator Lifecycle
-
-On startup:
+Startup:
 
 1. Load workflow config.
-2. Validate tracker credentials and workspace config.
-3. Create required artifact directories.
-4. Clean workspaces for terminal issues when configured.
-5. Start poll loop.
+2. Validate GitHub credentials and repository access.
+3. Normalize workspace and artifact paths.
+4. Recover persisted session/run records.
+5. Clean terminal workspaces when configured.
+6. Start poll loop.
 
-On each poll:
+Poll cycle:
 
 1. Fetch candidate issues.
-2. Skip issues already running.
-3. Respect `agent.max_concurrency`.
-4. Dispatch eligible issues.
-5. Reconcile active workers against tracker state.
-6. Retry due failures whose backoff has expired.
+2. Reconcile active workers.
+3. Dispatch eligible issues up to `agent.max_concurrency`.
+4. Enqueue due retries.
+5. Emit runtime snapshot logs.
 
-Worker lifecycle:
+Worker attempt:
 
-1. Create or reuse workspace.
-2. Run `after_create` for new workspaces.
-3. Render first prompt from issue and workflow.
-4. Run `before_run`.
-5. Start or restore Claude session.
-6. Stream events until turn terminal state.
-7. Refresh issue state.
-8. Continue on same session while active and under `agent.max_turns`.
-9. Run `after_run`.
-10. Preserve workspace unless terminal cleanup applies.
+1. Claim issue.
+2. Create or reuse workspace.
+3. Prepare git branch.
+4. Render prompt.
+5. Run `before_run`.
+6. Start or restore Claude session.
+7. Stream events until terminal turn state.
+8. Refresh issue and PR state.
+9. Continue on same session while active and under `agent.max_turns`.
+10. Ensure PR according to delivery strategy.
+11. Run `after_run`.
+12. Release claim and update issue/PR comments.
 
-## 12. Retry And Recovery
+## 15. Reconciliation
 
-Retryable failures include:
+The orchestrator SHOULD periodically refresh active issue states.
 
-- tracker transport failure;
+If issue is closed:
+
+- cancel active worker;
+- release claim;
+- preserve workspace unless cleanup policy deletes it.
+
+If issue loses required label or gains excluded label:
+
+- cancel active worker;
+- release claim;
+- do not mark failure unless configured.
+
+If linked PR is merged:
+
+- release claim;
+- optionally add done label;
+- optionally clean workspace.
+
+If a run is stalled:
+
+- cancel provider;
+- write terminal artifact;
+- schedule retry if retryable.
+
+## 16. Retry And Recovery
+
+Retryable failures:
+
+- GitHub transport failure;
+- claim comment failure after label claim succeeded;
+- workspace population failure caused by transient git/network errors;
 - provider startup failure;
-- provider process crash;
+- provider crash;
 - turn timeout;
-- stall timeout;
-- transient workspace hook failure when policy allows retry.
+- stall timeout.
 
-Non-retryable failures include:
+Non-retryable failures:
 
 - invalid workflow config;
-- missing required credentials;
+- missing credentials;
+- permission denied;
+- repository not found;
 - workspace path escaping root;
 - unsupported provider;
-- prompt template rendering failure.
+- prompt rendering failure.
 
-Restart recovery is tracker-driven and filesystem-driven. The first
-implementation does not need to recover live in-memory workers after process
-restart. It MUST reuse preserved workspaces and provider session records when
-safe.
+Restart recovery:
 
-## 13. Logging And Artifacts
+- No live worker process is assumed recoverable after daemon restart.
+- Preserved workspaces MUST be reused.
+- Session records SHOULD be inspected.
+- If an issue still has `claim_label` from a dead run, Symphony SHOULD either
+  reclaim it when metadata proves ownership or mark it blocked for operator
+  review.
+- Retry queue may be reconstructed from artifacts and issue labels/comments.
+
+## 17. Logging And Artifacts
 
 Structured logs SHOULD be JSONL.
 
@@ -469,116 +708,150 @@ Required log context:
 - `timestamp`
 - `level`
 - `event`
-- `issue_id`
 - `issue_identifier`
 - `session_id`
 - `provider`
-- `provider_session_id`, if available
+- `provider_session_id`
 - `workspace_path`
 - `attempt`
 
-Per-run artifact directory:
+Per-attempt artifact directory:
 
 ```text
-<claude.artifact_store>/<issue_identifier>/<attempt>/
+<claude.artifact_store>/<owner>_<repo>_<issue_number>/<attempt>/
 ```
 
 Recommended files:
 
 - `request.json`
 - `session.json`
+- `github.json`
 - `events.jsonl`
 - `provider-stderr.log`
 - `provider-stdout.log`, if separate from events
 - `usage.json`
 - `terminal.json`
 
-Secrets MUST be redacted from artifacts.
+Secrets MUST be redacted.
 
-## 14. Optional Tool Extension
+## 18. Optional Tools
 
-Symphony MAY expose client-side tools to the Claude session.
+Symphony MAY expose client-side tools to Claude Code.
 
-The first standardized optional tool is `linear_graphql`.
+First standardized optional tool:
 
-The tool executes one Linear GraphQL operation using Symphony's configured
-tracker credentials for the active session.
+- `github_graphql`
 
-The tool MUST:
+The tool executes one GitHub GraphQL operation using Symphony's configured
+GitHub credentials.
 
-- accept exactly one GraphQL operation;
-- accept optional JSON object variables;
-- return structured success or failure;
-- avoid exposing raw credentials to the model;
-- fail unsupported input without stalling the session.
+Requirements:
 
-## 15. HTTP Status Surface
+- exactly one GraphQL operation per call;
+- optional JSON object variables;
+- structured success/failure output;
+- no raw credential exposure;
+- unsupported input fails without stalling the session.
+
+## 19. Optional Status Surface
 
 A status surface is optional for the first implementation.
 
-If implemented, it MUST be observational/control-plane only and MUST NOT become
-required for the core scheduler.
-
-Useful first endpoints:
+If implemented, useful endpoints are:
 
 - `GET /health`
 - `GET /api/state`
 - `POST /api/refresh`
 
-## 16. Testing Requirements
+The status surface MUST be observational/control-plane only. It MUST NOT become
+required for core scheduling.
 
-The first implementation SHOULD include tests for:
+## 20. Security And Trust
+
+Symphony executes coding agents against repositories and issue content that may
+be adversarial. Implementations MUST document their trust posture.
+
+Minimum controls:
+
+- workspace root containment;
+- path sanitization;
+- secret redaction in logs/artifacts;
+- explicit Claude permission policy;
+- GitHub token scope documentation;
+- no raw token exposure to prompts or tools;
+- opt-in live integration tests;
+- clear behavior for permission prompts and user-input-required states.
+
+Recommended controls:
+
+- use least-privilege GitHub tokens;
+- restrict eligible repositories and labels;
+- run in trusted local environments first;
+- make destructive cleanup opt-in;
+- review PRs before merge.
+
+## 21. Testing Requirements
+
+Required test areas:
 
 - workflow parsing and env var resolution;
-- prompt rendering failures;
+- config defaults and validation;
+- unknown prompt variables failing closed;
 - workspace path sanitization and root containment;
-- fake tracker candidate/state refresh behavior;
-- fake provider start/session/continuation event streams;
-- orchestrator dispatch and max concurrency;
+- lifecycle hook success/failure/timeout;
+- fake GitHub tracker candidate fetch and reconciliation;
+- claim/release conflict behavior;
+- fake provider session start/send/restore/cancel/close;
+- multi-turn continuation on the same session;
+- orchestrator max concurrency;
 - retry backoff;
 - stall timeout;
-- cancellation;
-- startup recovery from existing workspace/session records;
-- artifact redaction.
+- terminal artifact writing and redaction;
+- skipped live GitHub tests;
+- skipped live Claude tests.
 
-Claude real integration tests SHOULD be skipped unless credentials and an
-explicit opt-in environment variable are present.
+Recommended env gates:
 
-## 17. Milestones
+- `SYMPHONY_RUN_GITHUB_INTEGRATION=1`
+- `SYMPHONY_RUN_CLAUDE_INTEGRATION=1`
+- `GITHUB_TOKEN`
 
-### Milestone 0: Design
+Skipped tests MUST report as skipped.
 
-- Adapt this spec.
-- Create implementation issues.
-- Review Claude provider contract before runtime code.
+## 22. Milestones
 
-### Milestone 1: Core Skeleton
+### M0: Design
+
+- Finalize this spec.
+- Document Claude provider architecture.
+- Expand GitHub issues into implementation-ready tickets.
+
+### M1: Core Skeleton
 
 - Python project scaffold.
-- Config and workflow parser.
+- Workflow/config loader.
 - Workspace manager.
-- Fake tracker.
+- Fake GitHub tracker.
 - Fake provider.
 - Orchestrator tests.
 
-### Milestone 2: Linear And Claude Integration
+### M2: GitHub And Claude Integrations
 
-- Linear tracker adapter.
+- GitHub tracker adapter.
 - Claude Code provider.
-- Session persistence.
+- Cancellation, timeout, cleanup.
 - Artifact logging.
-- Skipped real integration tests.
 
-### Milestone 3: Local E2E
+### M3: Local E2E
 
-- Run one real Linear issue.
-- Produce artifact bundle.
-- Document observed limitations.
+- Run one real GitHub issue through Claude Code.
+- Produce PR and artifact bundle.
+- Update runbook.
 
-### Milestone 4: Hardening
+### M4: Hardening
 
-- Cancellation and timeout hardening.
-- Multi-turn and retry contract tests.
-- Optional `linear_graphql` tool.
-- Minimal status API if needed.
+- Provider contract fixtures.
+- Retry/resume fixtures.
+- Optional `github_graphql` tool.
+- Optional status API if needed.
 
