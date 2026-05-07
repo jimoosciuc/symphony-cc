@@ -79,9 +79,6 @@ def _split_front_matter(text: str, *, location: str) -> tuple[str, str]:
             location,
             "workflow file must begin with a '---' YAML front-matter delimiter",
         )
-    # Cut off the leading whitespace we stripped so line numbers in the
-    # closing-delimiter search match the file content.
-    leading = len(text) - len(stripped)
     body = stripped
     # Drop the opening ``---`` line.
     nl = body.find("\n")
@@ -113,9 +110,6 @@ def _split_front_matter(text: str, *, location: str) -> tuple[str, str]:
         tail = tail[2:]
     elif tail.startswith("\n"):
         tail = tail[1:]
-    # Quiet the unused-variable lint without losing intent: ``leading`` was
-    # captured to make this function easy to extend with positional info.
-    _ = leading
     return yaml_text, tail
 
 
@@ -221,12 +215,22 @@ def render_prompt(
     - ``issue`` — the full :class:`Issue` dataclass (attribute access works).
     - ``workspace_path`` and any other key supplied via ``extra``.
 
+    ``extra`` MUST NOT contain the key ``"issue"`` — that key is reserved for
+    the issue argument and silent shadowing would be a footgun. Reserved-key
+    collisions raise :class:`WorkflowError` at location ``"prompt.extra"``.
+
     Unknown variable references and unknown filters fail closed by raising
     :class:`WorkflowError` with location ``"prompt"``. This is enforced by
     :class:`jinja2.StrictUndefined` and by re-raising :class:`TemplateError`.
     """
     context: dict[str, Any] = {"issue": issue}
     if extra:
+        reserved = {"issue"} & extra.keys()
+        if reserved:
+            raise WorkflowError(
+                "prompt.extra",
+                f"reserved key(s) collide with positional arguments: {sorted(reserved)}",
+            )
         context.update(extra)
 
     env = _jinja_env()

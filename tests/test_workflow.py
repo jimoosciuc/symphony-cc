@@ -412,6 +412,19 @@ def test_render_prompt_extra_keys_available(
     assert "ws=/tmp/abc" in out
 
 
+def test_render_prompt_extra_cannot_shadow_issue(
+    sample_issue: Issue, env_with_token: dict[str, str]
+) -> None:
+    """`extra={"issue": ...}` would silently shadow the positional issue arg.
+    The renderer rejects it explicitly so callers get a clear error instead
+    of confusing template output."""
+    workflow = load_workflow(FIXTURES / "valid.md", env=env_with_token)
+    with pytest.raises(WorkflowError) as excinfo:
+        render_prompt(workflow, issue=sample_issue, extra={"issue": "fake"})
+    assert excinfo.value.location == "prompt.extra"
+    assert "issue" in str(excinfo.value)
+
+
 def test_unknown_prompt_variable_fails_closed(
     sample_issue: Issue, env_with_token: dict[str, str]
 ) -> None:
