@@ -199,6 +199,11 @@ Session record:
 - `started_at`.
 - `last_event_at`.
 - `terminal_state`, if ended.
+- `previous_provider_session_ids`: ordered list of provider session ids
+  from prior attempts, appended each time a `new_session_with_summary`
+  retry creates a fresh provider session. Empty by default. Used by the
+  orchestrator's continuation prompt to carry summary handoff between
+  attempts without losing trace of the original session.
 
 ### 5.5 Runtime Event
 
