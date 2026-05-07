@@ -129,7 +129,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
 
     tracker = GitHubTracker(config.tracker, config.github)
-    provider = ClaudeCodeProvider()
+    provider = ClaudeCodeProvider(tool_registry=_build_tool_registry(config, tracker))
     workspace_mgr = WorkspaceManager(config.workspace)
     orchestrator = Orchestrator(
         config,
@@ -199,6 +199,28 @@ async def _run_forever_with_recovery(orchestrator: object) -> None:
     """Recover persisted records once, then enter the long-running loop."""
     await orchestrator.recover()  # type: ignore[union-attr]
     await orchestrator.run_forever()  # type: ignore[union-attr]
+
+
+def _build_tool_registry(config: object, tracker: object) -> object | None:
+    """Construct a :class:`ToolRegistry` honoring ``agent.tools.*`` knobs.
+
+    Returns ``None`` when no tools are enabled so the provider's
+    construction stays a one-liner. Tools share the tracker's
+    :class:`GitHubClient` (one auth context per run) — the raw token
+    only ever lives inside the client; Claude never sees it.
+    """
+    tools_cfg = getattr(getattr(config, "agent", None), "tools", None)
+    if tools_cfg is None:
+        return None
+    gql_cfg = getattr(tools_cfg, "github_graphql", None)
+    if gql_cfg is None or not getattr(gql_cfg, "enabled", False):
+        return None
+    from symphony.provider.claude_code import ToolRegistry
+    from symphony.tools.github_graphql import GitHubGraphQLTool
+
+    registry = ToolRegistry()
+    registry.register_github_graphql(GitHubGraphQLTool(tracker.client))  # type: ignore[attr-defined]
+    return registry
 
 
 def main(argv: Sequence[str] | None = None) -> int:

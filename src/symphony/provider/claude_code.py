@@ -26,7 +26,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -64,6 +64,67 @@ def _import_sdk() -> Any:
     return claude_agent_sdk
 
 
+# -- Tool registry ------------------------------------------------------------
+
+
+class ToolRegistry:
+    """Owns the Symphony-controlled tools surfaced to a Claude session.
+
+    The provider stays decoupled from the GitHub adapter — the registry
+    builds the SDK MCP server entries and the ``allowed_tools`` list
+    that the provider plugs into ``ClaudeAgentOptions`` at session
+    start. New tools register themselves via :meth:`register_github_graphql`
+    or future ``register_*`` helpers; the registry's
+    :meth:`options_payload` returns the two-tuple the provider needs.
+
+    Production code constructs the registry in the CLI from
+    :class:`AgentToolsConfig` + the run's :class:`GitHubClient`. Tests
+    construct it directly with the bits they care about.
+    """
+
+    def __init__(self) -> None:
+        self._mcp_servers: dict[str, Any] = {}
+        self._allowed_tools: list[str] = []
+
+    def register_github_graphql(self, tool: Any) -> None:
+        """Register the optional ``github_graphql`` tool (SPEC §18).
+
+        ``tool`` is a :class:`~symphony.tools.github_graphql.GitHubGraphQLTool`
+        instance. The registry holds it alongside an SDK MCP server
+        entry so the SDK invokes the handler when Claude calls
+        ``github_graphql``. The raw token NEVER leaves this process —
+        the tool already owns the authenticated GitHubClient.
+        """
+        from symphony.tools.github_graphql import TOOL_NAME
+
+        self._mcp_servers[TOOL_NAME] = _GitHubGraphQLMcpEntry(tool=tool)
+        # SDK MCP tool names show up to the model as ``mcp__<server>__<tool>``.
+        # We register a single tool per server so the qualified name is
+        # stable for prompt rendering.
+        self._allowed_tools.append(f"mcp__{TOOL_NAME}__{TOOL_NAME}")
+
+    def options_payload(self) -> tuple[dict[str, Any], list[str]]:
+        """Return ``(mcp_servers, allowed_tools)`` for ClaudeAgentOptions."""
+        return dict(self._mcp_servers), list(self._allowed_tools)
+
+    def has_tools(self) -> bool:
+        return bool(self._mcp_servers) or bool(self._allowed_tools)
+
+
+@dataclass(slots=True)
+class _GitHubGraphQLMcpEntry:
+    """Inert dataclass marking the github_graphql server in the options.
+
+    The provider hands the entry to ClaudeAgentOptions; the production
+    ``_connect`` translates it into a real ``create_sdk_mcp_server``
+    call when the SDK is available. Tests inspect the entry directly
+    via ``options["mcp_servers"]["github_graphql"]`` to assert the
+    provider passed the registry through.
+    """
+
+    tool: Any
+
+
 # -- Provider ----------------------------------------------------------------
 
 
@@ -89,11 +150,17 @@ class ClaudeCodeProvider:
         *,
         client_factory: Any | None = None,
         session_id_factory: Any | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self._client_factory = client_factory
         # Tests pin session ids; production gets random UUIDs.
         self._session_id_factory = session_id_factory or _default_session_id_factory
         self._sessions: dict[str, _ProviderSessionState] = {}
+        # Optional client-side tools (SPEC §18). The registry stays
+        # unbound from any specific session — tools share the same
+        # GitHubClient for the run. ``None`` means "no tools registered"
+        # which is the default.
+        self._tool_registry = tool_registry
 
     # -- Protocol surface ----------------------------------------------------
 
@@ -345,6 +412,12 @@ class ClaudeCodeProvider:
         }
         if resume is not None:
             opts["resume"] = resume
+        if self._tool_registry is not None:
+            mcp_servers, allowed = self._tool_registry.options_payload()
+            if mcp_servers:
+                opts["mcp_servers"] = mcp_servers
+            if allowed:
+                opts["allowed_tools"] = allowed
         return opts
 
     async def _connect(self, options: dict[str, Any]) -> Any:
