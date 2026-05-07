@@ -260,11 +260,43 @@ def test_agent_provider_must_be_claude_code() -> None:
 
 
 @pytest.mark.parametrize("mode", sorted(ALLOWED_PERMISSION_MODES))
-def test_all_documented_permission_modes_accepted(mode: str) -> None:
+def test_all_accepted_permission_modes_pass(mode: str) -> None:
     raw = _minimal_raw()
     raw["claude"]["permission_mode"] = mode
     cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
     assert cfg.claude.permission_mode == mode
+
+
+def test_plan_permission_mode_rejected() -> None:
+    """Plan mode blocks on human confirmation; Symphony has no human in the
+    loop, so the config layer rejects it up front rather than letting the
+    provider stall on the first turn."""
+    raw = _minimal_raw()
+    raw["claude"]["permission_mode"] = "plan"
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "claude.permission_mode"
+    assert "human" in str(excinfo.value).lower() or "unattended" in str(excinfo.value).lower()
+
+
+def test_bypass_permissions_emits_warning() -> None:
+    """`bypassPermissions` is allowed (operator opt-in) but must surface a
+    structured warning the CLI can log once at startup."""
+    raw = _minimal_raw()
+    raw["claude"]["permission_mode"] = "bypassPermissions"
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.claude.permission_mode == "bypassPermissions"
+    assert len(cfg.warnings) == 1
+    w = cfg.warnings[0]
+    assert w.location == "claude.permission_mode"
+    assert "bypassPermissions" in w.message
+
+
+def test_safe_permission_mode_emits_no_warning() -> None:
+    raw = _minimal_raw()
+    raw["claude"]["permission_mode"] = "acceptEdits"
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.warnings == ()
 
 
 def test_unknown_permission_mode_rejected() -> None:

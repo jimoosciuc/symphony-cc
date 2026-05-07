@@ -38,6 +38,20 @@ class ConfigError(ValueError):
         self.message = message
 
 
+@dataclass(frozen=True, slots=True)
+class ConfigWarning:
+    """A non-fatal validation warning attached to a built :class:`WorkflowConfig`.
+
+    Surfaced for settings that the operator may have chosen on purpose
+    (e.g. ``claude.permission_mode = bypassPermissions``) but that
+    Symphony wants to flag as unsafe / explicit-opt-in. The CLI is
+    expected to print these once at startup.
+    """
+
+    location: str
+    message: str
+
+
 # -- Constants -----------------------------------------------------------------
 
 REQUIRED_SECTIONS: tuple[str, ...] = (
@@ -49,8 +63,18 @@ REQUIRED_SECTIONS: tuple[str, ...] = (
 )
 
 ALLOWED_PERMISSION_MODES: frozenset[str] = frozenset(
-    {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
+    # `plan` is intentionally NOT in this set: it blocks on human
+    # confirmation, and Symphony has no human-in-the-loop for provider
+    # turns (per docs/claude-provider.md §7). Reject it at config time
+    # so the failure is clear at the workflow boundary, not at the first
+    # turn. `bypassPermissions` is allowed but emits a warning — see
+    # _build_claude.
+    {"default", "acceptEdits", "bypassPermissions", "dontAsk", "auto"}
 )
+
+REJECTED_PERMISSION_MODES: frozenset[str] = frozenset({"plan"})
+
+WARN_PERMISSION_MODES: frozenset[str] = frozenset({"bypassPermissions"})
 
 ALLOWED_RETRY_RESUME_POLICIES: frozenset[str] = frozenset(
     {"resume_same_session", "new_session_with_summary", "fail_closed"}
@@ -162,6 +186,7 @@ class WorkflowConfig:
     retry: RetryConfig = field(default_factory=RetryConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     workflow_path: Path | None = None
+    warnings: tuple[ConfigWarning, ...] = ()
 
 
 # -- Helpers -------------------------------------------------------------------
@@ -335,15 +360,43 @@ def _build_workspace(raw: dict[str, Any], base_dir: Path) -> WorkspaceConfig:
     )
 
 
-def _build_claude(raw: dict[str, Any], base_dir: Path) -> ClaudeConfig:
+def _build_claude(
+    raw: dict[str, Any],
+    base_dir: Path,
+    *,
+    warnings: list[ConfigWarning],
+) -> ClaudeConfig:
     section = _require_section(raw, "claude")
     location = "claude"
     model = _require_str(section, "model", location)
     permission_mode = _require_str(section, "permission_mode", location)
+    # plan mode is rejected outright (no human-in-the-loop). Other unknown
+    # values land in the same error path. bypassPermissions is allowed but
+    # gets a structured warning the CLI surfaces at startup.
+    if permission_mode in REJECTED_PERMISSION_MODES:
+        raise ConfigError(
+            f"{location}.permission_mode",
+            (
+                f"{permission_mode!r} requires human confirmation and is not "
+                f"supported by Symphony's unattended runtime "
+                f"(see docs/claude-provider.md §7)"
+            ),
+        )
     if permission_mode not in ALLOWED_PERMISSION_MODES:
         raise ConfigError(
             f"{location}.permission_mode",
             f"must be one of {sorted(ALLOWED_PERMISSION_MODES)} (got {permission_mode!r})",
+        )
+    if permission_mode in WARN_PERMISSION_MODES:
+        warnings.append(
+            ConfigWarning(
+                location=f"{location}.permission_mode",
+                message=(
+                    f"{permission_mode!r} disables Claude's interactive permission "
+                    f"prompts; only enable in trusted local environments and review "
+                    f"the workspace contents before granting it"
+                ),
+            )
         )
     session_store = _require_str(section, "session_store", location)
     transcript_store = _require_str(section, "transcript_store", location)
@@ -486,16 +539,18 @@ def build_config(
     if missing:
         raise ConfigError("(root)", f"missing required sections: {', '.join(missing)}")
 
+    warnings: list[ConfigWarning] = []
     config = WorkflowConfig(
         tracker=_build_tracker(raw, env),
         agent=_build_agent(raw),
         workspace=_build_workspace(raw, base_dir),
-        claude=_build_claude(raw, base_dir),
+        claude=_build_claude(raw, base_dir, warnings=warnings),
         github=_build_github(raw),
         polling=_build_polling(raw),
         retry=_build_retry(raw),
         logging=_build_logging(raw, base_dir),
         workflow_path=workflow_path.resolve(),
+        warnings=tuple(warnings),
     )
     return config
 
