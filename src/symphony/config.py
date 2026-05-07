@@ -97,10 +97,36 @@ class TrackerConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class GitHubGraphQLToolConfig:
+    """Workflow knob for the optional ``github_graphql`` tool (SPEC §18).
+
+    When ``enabled`` is true, the Claude provider exposes a ``github_graphql``
+    MCP tool that runs a single GraphQL operation against Symphony's
+    configured ``tracker.token`` (the raw token never enters the model
+    context — see ``src/symphony/tools/github_graphql.py``).
+    """
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolsConfig:
+    """Optional client-side tools surfaced to the Claude session.
+
+    Each tool is gated behind its own subsection so a workflow can enable
+    one without auto-enabling the rest. SPEC §18 says ``MAY``, not
+    ``MUST`` — defaults are off.
+    """
+
+    github_graphql: GitHubGraphQLToolConfig = field(default_factory=GitHubGraphQLToolConfig)
+
+
+@dataclass(frozen=True, slots=True)
 class AgentConfig:
     provider: str = "claude_code"
     max_concurrency: int = 1
     max_turns: int = 3
+    tools: AgentToolsConfig = field(default_factory=AgentToolsConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,10 +357,36 @@ def _build_agent(raw: dict[str, Any]) -> AgentConfig:
     max_turns = _opt_int(section, "max_turns", location, default=3)
     if max_turns < 1:
         raise ConfigError(f"{location}.max_turns", "must be >= 1")
+    tools = _build_agent_tools(section.get("tools") or {}, location=f"{location}.tools")
     return AgentConfig(
         provider=provider,
         max_concurrency=max_concurrency,
         max_turns=max_turns,
+        tools=tools,
+    )
+
+
+def _build_agent_tools(raw: Any, *, location: str) -> AgentToolsConfig:
+    """Build the optional ``agent.tools`` subtree.
+
+    Permissive on absence (the default ``AgentToolsConfig`` has every
+    tool disabled); strict on shape so a typo like ``github_graphq``
+    fails fast at workflow load instead of being silently ignored.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError(location, f"must be a mapping, got {type(raw).__name__}")
+    gql_raw = raw.get("github_graphql") or {}
+    if not isinstance(gql_raw, dict):
+        raise ConfigError(
+            f"{location}.github_graphql",
+            f"must be a mapping, got {type(gql_raw).__name__}",
+        )
+    return AgentToolsConfig(
+        github_graphql=GitHubGraphQLToolConfig(
+            enabled=_opt_bool(
+                gql_raw, "enabled", f"{location}.github_graphql", default=False
+            ),
+        ),
     )
 
 
