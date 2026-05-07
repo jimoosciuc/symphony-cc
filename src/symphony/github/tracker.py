@@ -49,9 +49,72 @@ _LOG = logging.getLogger("symphony.github.tracker")
 class TrackerError(RuntimeError):
     """Generic tracker failure surface.
 
-    Real adapters subclass this with transport / permission / not-found
-    flavors; the fake uses the bare class for scripted failures.
+    Real adapters raise sub-classes that mirror SPEC §9.4 categories so
+    the orchestrator can branch by type without parsing strings:
+    :class:`TrackerMissingToken`, :class:`TrackerPermissionDenied`,
+    :class:`TrackerNotFound`, :class:`TrackerRateLimited`,
+    :class:`TrackerTransportError`, :class:`TrackerMalformedResponse`,
+    :class:`TrackerClaimConflictError`. Generic ``TrackerError`` remains
+    in use for the fake's scripted failures and for any future error
+    that doesn't fit a category.
+
+    All subclasses carry an HTTP-style ``status_code`` (when applicable)
+    so callers can log a single integer alongside the typed branch.
     """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+class TrackerMissingToken(TrackerError):
+    """No / invalid authentication token (401)."""
+
+
+class TrackerPermissionDenied(TrackerError):
+    """403 from the API after auth — token lacks the needed scope."""
+
+
+class TrackerNotFound(TrackerError):
+    """404 — repo, issue, label, or other resource does not exist."""
+
+
+class TrackerRateLimited(TrackerError):
+    """429 or secondary-rate-limit 403; carries ``retry_after`` seconds when known."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message, status_code=status_code)
+        self.retry_after = retry_after
+
+
+class TrackerTransportError(TrackerError):
+    """Connection refused, DNS failure, TLS handshake error, etc."""
+
+
+class TrackerMalformedResponse(TrackerError):
+    """200-class response that wasn't valid JSON or was the wrong shape."""
+
+
+class TrackerClaimConflictError(TrackerError):
+    """422-style claim conflict surfaced as an exception (rare path).
+
+    Most claim conflicts are returned as :class:`ClaimResult(conflict=True)`
+    rather than raised. This exception class exists so the wrapping in
+    :meth:`GitHubTracker._wrap` can preserve the category for callers
+    that drive the tracker without going through ``claim_issue``.
+    """
+
+
+# Mapping from client-side GitHub error classes to tracker-side analogs.
+# Exposed at module scope so tests can pin it.
+_GITHUB_TO_TRACKER_ERROR: dict[type, type] = {}  # populated below to avoid forward-ref issues
 
 
 # -- Result types --------------------------------------------------------------
@@ -292,10 +355,31 @@ class GitHubTracker:
     # -- Internals --------------------------------------------------------
 
     def _wrap(self, exc: GitHubError) -> TrackerError:
-        # Map adapter errors to TrackerError so the protocol stays clean.
-        # Sub-types could be exposed if the orchestrator wants to branch
-        # on rate-limit vs permission-denied later.
-        return TrackerError(str(exc))
+        """Map a typed GitHubError to its TrackerError analog.
+
+        Preserves SPEC §9.4 categories at the tracker boundary so the
+        orchestrator can branch on rate-limit vs permission-denied vs
+        transport without parsing strings or importing httpx-side types.
+        """
+        # RateLimited carries a retry_after field; preserve it.
+        from symphony.github.client import GitHubMalformedResponse
+
+        if isinstance(exc, GitHubRateLimited):
+            return TrackerRateLimited(
+                str(exc),
+                status_code=exc.status_code,
+                retry_after=exc.retry_after,
+            )
+        target = _GITHUB_TO_TRACKER_ERROR.get(type(exc))
+        if target is None:
+            # GitHubMalformedResponse maps to TrackerMalformedResponse;
+            # any other GitHubError → bare TrackerError so callers still
+            # get the status code without losing the original message.
+            if isinstance(exc, GitHubMalformedResponse):
+                target = TrackerMalformedResponse
+            else:
+                return TrackerError(str(exc), status_code=exc.status_code)
+        return target(str(exc), status_code=exc.status_code)
 
 
 # -- Normalization -----------------------------------------------------------
@@ -346,8 +430,18 @@ def _claim_comment_body(run_metadata: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-# Silence unused-import warnings for symbols re-exported via __init__.
-_ = (GitHubMissingToken, GitHubPermissionDenied, GitHubRateLimited, GitHubTransportError)
+# Populate the client-error → tracker-error mapping now that all classes
+# are defined. _wrap consults this for the simple subclass cases;
+# RateLimited needs special handling for its retry_after field.
+_GITHUB_TO_TRACKER_ERROR.update(
+    {
+        GitHubMissingToken: TrackerMissingToken,
+        GitHubPermissionDenied: TrackerPermissionDenied,
+        GitHubNotFound: TrackerNotFound,
+        GitHubTransportError: TrackerTransportError,
+        GitHubClaimConflict: TrackerClaimConflictError,
+    }
+)
 
 
 # -- Fake ---------------------------------------------------------------------

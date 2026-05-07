@@ -202,11 +202,11 @@ class GitHubClient:
                 retry_after=retry_after,
             )
         if status == 401:
-            raise GitHubMissingToken(f"{method} {path}: 401 Unauthorized")
+            raise GitHubMissingToken(f"{method} {path}: 401 Unauthorized", status_code=status)
         if status == 403:
-            raise GitHubPermissionDenied(f"{method} {path}: 403 Forbidden")
+            raise GitHubPermissionDenied(f"{method} {path}: 403 Forbidden", status_code=status)
         if status == 404:
-            raise GitHubNotFound(f"{method} {path}: 404 Not Found")
+            raise GitHubNotFound(f"{method} {path}: 404 Not Found", status_code=status)
         if status == 422:
             raise GitHubClaimConflict(
                 f"{method} {path}: 422 Unprocessable Entity ({_summary(response)})",
