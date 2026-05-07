@@ -1,16 +1,17 @@
 """Typed data models that cross Symphony's layer boundaries.
 
-Only the models needed by the workflow + config layer (issue #5) live here
-today. Other models from `docs/IMPLEMENTATION_PLAYBOOK.md` (`Workspace`,
-`SessionRecord`, `AgentEvent`, `RunArtifact`, `RetryState`) will be added by
-the issues that introduce them, to keep this file from growing into a
-catch-all module.
+Models needed by the workflow + config layer (#5) and the workspace
+manager (#6) live here today. Other models from
+`docs/IMPLEMENTATION_PLAYBOOK.md` (`SessionRecord`, `AgentEvent`,
+`RunArtifact`, `RetryState`) will be added by the issues that introduce
+them, to keep this file from growing into a catch-all module.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 
@@ -61,3 +62,24 @@ class PullRequest:
     mergeable_state: str | None = None
     linked_issue_identifier: str | None = None
     raw: dict[str, Any] | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class Workspace:
+    """A prepared per-issue workspace. See SPEC.md §5.3 and §8.
+
+    `repo_path` defaults to `path` since the first implementation does not
+    yet split repository checkouts into a sub-directory. The field is here
+    so future issues that introduce git population can populate it without
+    breaking callers.
+
+    `reused` is True when the workspace directory already existed before
+    `prepare()` was called. The orchestrator uses it to gate `after_create`.
+    """
+
+    issue_identifier: str
+    workspace_key: str
+    path: Path
+    repo_path: Path
+    created_at: datetime
+    reused: bool
