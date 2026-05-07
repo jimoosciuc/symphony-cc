@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -351,6 +351,18 @@ class Orchestrator:
                 worker.turn_count += 1
                 if terminal in {"turn_failed", "turn_cancelled"}:
                     break
+                if terminal == "no_terminal":
+                    # The provider's send_input stream ended without
+                    # emitting a terminal turn event. Treat it as a
+                    # crash — we cannot safely keep prompting on a
+                    # session whose state is unknown.
+                    worker.error = "provider stream ended without terminal event"
+                    worker.terminal_state = Terminal.CRASHED
+                    self._on_worker_failed(
+                        worker.issue, worker.error, retryable=True
+                    )
+                    result.retries_scheduled.append(worker.issue.identifier)
+                    break
             if worker.terminal_state is None:
                 worker.terminal_state = Terminal.COMPLETED
         except ProviderRetryableError as exc:
@@ -473,7 +485,3 @@ def _session_snapshot(session: SessionRecord) -> dict[str, Any]:
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
-
-
-# Help static analysis: Awaitable is used implicitly by Callable type hints.
-_ = Awaitable
