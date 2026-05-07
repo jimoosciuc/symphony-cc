@@ -1,0 +1,27 @@
+"""Agent provider package.
+
+Symphony depends only on :class:`~symphony.provider.base.AgentProviderProtocol`.
+The fake (#7) lives next to the real Claude Code provider (#9), so test
+imports stay stable when the real one lands.
+"""
+
+from symphony.provider.base import (
+    AgentProviderProtocol,
+    ProviderError,
+    ProviderRestoreError,
+    ProviderRetryableError,
+    SessionRecord,
+    Terminal,
+)
+from symphony.provider.fake import FakeProvider, FakeTurnScript
+
+__all__ = [
+    "AgentProviderProtocol",
+    "FakeProvider",
+    "FakeTurnScript",
+    "ProviderError",
+    "ProviderRestoreError",
+    "ProviderRetryableError",
+    "SessionRecord",
+    "Terminal",
+]
