@@ -208,7 +208,16 @@ class Orchestrator:
 
             try:
                 worker = await self._start_worker(issue, retry=retry)
-            except Exception as exc:  # noqa: BLE001 - we want every failure to release the claim
+            except ProviderRetryableError as exc:
+                # Restore-startup failure under resume_same_session, or any
+                # other startup-time retryable provider error. Schedule a
+                # retry per RetryConfig.
+                _LOG.warning("start_worker retryable failure for %s: %s", issue.identifier, exc)
+                self.tracker.release_issue(issue, "start-failed-retryable")
+                self._on_worker_failed(issue, str(exc), retryable=True)
+                result.retries_scheduled.append(issue.identifier)
+                continue
+            except Exception as exc:  # noqa: BLE001 - every other failure releases the claim
                 _LOG.exception("start_worker failed for %s", issue.identifier)
                 self.tracker.release_issue(issue, "start-failed")
                 self._on_worker_failed(issue, str(exc), retryable=False)
@@ -280,12 +289,39 @@ class Orchestrator:
             try:
                 session = await self.provider.restore(stale.session)
             except ProviderRestoreError as exc:
-                _LOG.warning("restore failed for %s: %s", issue.identifier, exc)
-                # Fall through to start_session as a degraded path.
-                session = await self.provider.start_session(
-                    issue, workspace.path, self.config.claude
+                # Honor claude.retry_resume_policy per docs/claude-provider.md
+                # §5.3. Previous version unconditionally fell back to
+                # start_session, which was wrong for resume_same_session and
+                # fail_closed.
+                policy = self.config.claude.retry_resume_policy
+                _LOG.warning(
+                    "restore failed for %s under policy=%s: %s",
+                    issue.identifier,
+                    policy,
+                    exc,
                 )
-                session.attempt = attempt
+                if policy == "resume_same_session":
+                    # Caller routes ProviderRetryableError to RetryConfig.
+                    raise ProviderRetryableError(
+                        f"restore failed under resume_same_session: {exc}"
+                    ) from exc
+                if policy == "fail_closed":
+                    # Re-raise as a non-retryable provider error.
+                    raise ProviderError(f"restore failed under fail_closed: {exc}") from exc
+                if policy == "new_session_with_summary":
+                    # Only this policy may fall back to start_session.
+                    # Preserve previous_provider_session_ids so #9's
+                    # continuation prompt can carry summary handoff.
+                    prev_ids = list(stale.session.previous_provider_session_ids)
+                    if stale.session.provider_session_id:
+                        prev_ids.append(stale.session.provider_session_id)
+                    session = await self.provider.start_session(
+                        issue, workspace.path, self.config.claude
+                    )
+                    session.attempt = attempt
+                    session.previous_provider_session_ids = prev_ids
+                else:  # pragma: no cover - config validator rejects unknown
+                    raise ProviderError(f"unknown retry_resume_policy: {policy!r}") from exc
         else:
             session = await self.provider.start_session(issue, workspace.path, self.config.claude)
             session.attempt = attempt
