@@ -82,6 +82,12 @@ class SessionRecord:
     last_event_at: datetime | None = None
     terminal_state: Terminal | None = None
     previous_provider_session_ids: list[str] = field(default_factory=list)
+    # Where on disk this record is persisted, per docs/claude-provider.md §5.1
+    # (``<claude.session_store>/<session_id>.json``). Set by the provider's
+    # start_session from `claude.session_store`; the orchestrator carries it
+    # across attempts so restore() knows where to read/write the patched
+    # record.  None when persistence is disabled (e.g. some unit tests).
+    session_store: Path | None = None
 
 
 # -- Protocol -----------------------------------------------------------------

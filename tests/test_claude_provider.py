@@ -377,7 +377,8 @@ async def test_restore_happy_path_emits_session_restored_on_next_send_input(
         started_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
         attempt=1,
         provider_session_id="claude-pid-prior",
-        turn_count=5,  # will reset to 0
+        turn_count=5,
+        session_store=tmp_path / "sessions",
     )
     responses = [
         AssistantMessage(
@@ -389,9 +390,10 @@ async def test_restore_happy_path_emits_session_restored_on_next_send_input(
     ]
     provider, clients = _make_provider(responses=responses)
     restored = await provider.restore(record)
-    # restore() does NOT stream events.
+    # restore() does NOT stream events. turn_count is left to the
+    # orchestrator's max-turns accounting; synthesis is gated on the
+    # per-attempt saw_first_event flag inside _ProviderSessionState.
     assert restored.attempt == 2
-    assert restored.turn_count == 0
     assert "claude-pid-prior" in restored.previous_provider_session_ids
 
     # The single client was constructed with resume= set.
@@ -613,3 +615,150 @@ async def test_send_input_on_unknown_session_raises(tmp_path: Path) -> None:
     with pytest.raises(ProviderError):
         async for _ in provider.send_input(fake, "x"):
             pass
+
+
+# -- Session record persistence (#26 leader F1) ------------------------------
+
+
+async def test_session_record_persisted_after_start_session(tmp_path: Path) -> None:
+    """SPEC §5.4 + docs §5.1 phase 2: provider writes the initial session
+    record at <session_store>/<session_id>.json with provider_session_id
+    null at start_session time, BEFORE any send_input."""
+    import json as _json
+
+    provider, _ = _make_provider(session_ids=["sym-persist-1"])
+    record = await provider.start_session(_issue(), tmp_path / "ws", _claude_config(tmp_path))
+    persisted = tmp_path / "sessions" / "sym-persist-1.json"
+    assert persisted.exists(), "start_session must persist the initial record"
+    snapshot = _json.loads(persisted.read_text())
+    assert snapshot["session_id"] == "sym-persist-1"
+    assert snapshot["provider_session_id"] is None
+    assert snapshot["attempt"] == 1
+    assert record.session_store == tmp_path / "sessions"
+
+
+async def test_session_record_patched_after_first_send_input_captures_pid(
+    tmp_path: Path,
+) -> None:
+    """Phase 3: after the first send_input, the persisted record is
+    patched with the captured provider_session_id. Cross-attempt restore
+    relies on this — the previous test only proves the initial null
+    write."""
+    import json as _json
+
+    responses = [
+        AssistantMessage(
+            content=[TextBlock(text="hi")],
+            session_id="claude-pid-XYZ",
+            model="m",
+        ),
+        ResultMessage(is_error=False, result="ok", session_id="claude-pid-XYZ"),
+    ]
+    provider, _ = _make_provider(responses=responses, session_ids=["sym-persist-2"])
+    record = await provider.start_session(_issue(), tmp_path / "ws", _claude_config(tmp_path))
+    async for _ in provider.send_input(record, "first"):
+        pass
+
+    persisted = tmp_path / "sessions" / "sym-persist-2.json"
+    snapshot = _json.loads(persisted.read_text())
+    assert snapshot["provider_session_id"] == "claude-pid-XYZ"
+    assert snapshot["last_event_at"] is not None
+
+
+async def test_restore_persists_bumped_attempt_and_prior_pid(tmp_path: Path) -> None:
+    """Phase 4: restore() rewrites the persisted record with the bumped
+    attempt and the prior pid appended to previous_provider_session_ids,
+    so a crash before the first send_input doesn't lose the audit trail.
+    """
+    import json as _json
+
+    record = SessionRecord(
+        session_id="sym-restore-persist",
+        provider="claude_code",
+        issue_identifier="acme/proj#1",
+        issue_number=1,
+        workspace_path=tmp_path / "ws",
+        artifact_dir=tmp_path / "artifacts" / "x" / "1",
+        started_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        attempt=1,
+        provider_session_id="claude-pid-prior",
+        session_store=tmp_path / "sessions",
+    )
+    provider, _ = _make_provider(responses=[])
+    restored = await provider.restore(record)
+
+    persisted = tmp_path / "sessions" / "sym-restore-persist.json"
+    assert persisted.exists()
+    snapshot = _json.loads(persisted.read_text())
+    assert snapshot["attempt"] == 2
+    assert snapshot["previous_provider_session_ids"] == ["claude-pid-prior"]
+    # Round-trip a second restore — pid should not duplicate.
+    restored.provider_session_id = "claude-pid-prior"
+    await provider.restore(restored)
+    snapshot2 = _json.loads(persisted.read_text())
+    assert snapshot2["previous_provider_session_ids"] == ["claude-pid-prior"]
+
+
+async def test_persistence_disabled_when_session_store_is_none(tmp_path: Path) -> None:
+    """If a SessionRecord arrives at restore() with session_store=None
+    (e.g. legacy test code), persistence is a no-op rather than raising."""
+    record = SessionRecord(
+        session_id="sym-no-store",
+        provider="claude_code",
+        issue_identifier="acme/proj#1",
+        issue_number=1,
+        workspace_path=tmp_path / "ws",
+        artifact_dir=tmp_path / "artifacts" / "x" / "1",
+        started_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        provider_session_id="claude-pid-prior",
+        session_store=None,
+    )
+    provider, _ = _make_provider(responses=[])
+    # Should not raise.
+    await provider.restore(record)
+    # No file written.
+    assert list((tmp_path).rglob("*.json")) == []
+
+
+async def test_persisted_record_can_drive_restore_after_reload(tmp_path: Path) -> None:
+    """Demonstrate that the on-disk record contains everything needed to
+    restore: load it back from disk and pass to a fresh provider."""
+    import json as _json
+
+    # Phase 1: start + first send_input → persisted record carries pid.
+    responses = [
+        AssistantMessage(
+            content=[TextBlock(text="hi")],
+            session_id="claude-pid-roundtrip",
+            model="m",
+        ),
+        ResultMessage(is_error=False, result="ok", session_id="claude-pid-roundtrip"),
+    ]
+    provider1, _ = _make_provider(responses=responses, session_ids=["sym-roundtrip"])
+    record1 = await provider1.start_session(_issue(), tmp_path / "ws", _claude_config(tmp_path))
+    async for _ in provider1.send_input(record1, "x"):
+        pass
+    await provider1.close(record1)
+
+    # Phase 2: a fresh provider loads the persisted record and restores.
+    persisted_path = tmp_path / "sessions" / "sym-roundtrip.json"
+    snapshot = _json.loads(persisted_path.read_text())
+    reloaded = SessionRecord(
+        session_id=snapshot["session_id"],
+        provider=snapshot["provider"],
+        issue_identifier=snapshot["issue_identifier"],
+        issue_number=snapshot["issue_number"],
+        workspace_path=Path(snapshot["workspace_path"]),
+        artifact_dir=Path(snapshot["artifact_dir"]),
+        started_at=__import__("datetime").datetime.fromisoformat(snapshot["started_at"]),
+        attempt=snapshot["attempt"],
+        provider_session_id=snapshot["provider_session_id"],
+        previous_provider_session_ids=list(snapshot["previous_provider_session_ids"]),
+        session_store=Path(snapshot["session_store"]),
+    )
+    assert reloaded.provider_session_id == "claude-pid-roundtrip"
+
+    provider2, clients2 = _make_provider(responses=[])
+    restored = await provider2.restore(reloaded)
+    assert clients2[0].options["resume"] == "claude-pid-roundtrip"
+    assert restored.attempt == snapshot["attempt"] + 1
