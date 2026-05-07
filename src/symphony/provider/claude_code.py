@@ -26,7 +26,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -90,14 +90,23 @@ class ToolRegistry:
         """Register the optional ``github_graphql`` tool (SPEC §18).
 
         ``tool`` is a :class:`~symphony.tools.github_graphql.GitHubGraphQLTool`
-        instance. The registry holds it alongside an SDK MCP server
-        entry so the SDK invokes the handler when Claude calls
-        ``github_graphql``. The raw token NEVER leaves this process —
-        the tool already owns the authenticated GitHubClient.
-        """
-        from symphony.tools.github_graphql import TOOL_NAME
+        instance. The registry builds a real SDK MCP server config via
+        :func:`~symphony.tools.github_graphql.build_sdk_mcp_server`,
+        which the provider then drops straight into
+        ``ClaudeAgentOptions.mcp_servers``. The raw token NEVER leaves
+        this process — the tool already owns the authenticated
+        GitHubClient.
 
-        self._mcp_servers[TOOL_NAME] = _GitHubGraphQLMcpEntry(tool=tool)
+        Production path lands ``McpSdkServerConfig`` (SDK dict shape:
+        ``{"type": "sdk", "name": ..., "instance": <Server>}``) into the
+        registry. Tests that don't have the SDK available can still
+        construct an empty registry; ``register_github_graphql`` itself
+        requires the SDK because the production caller (the CLI) has
+        the SDK installed at runtime per ``pyproject.toml``.
+        """
+        from symphony.tools.github_graphql import TOOL_NAME, build_sdk_mcp_server
+
+        self._mcp_servers[TOOL_NAME] = build_sdk_mcp_server(tool)
         # SDK MCP tool names show up to the model as ``mcp__<server>__<tool>``.
         # We register a single tool per server so the qualified name is
         # stable for prompt rendering.
@@ -109,20 +118,6 @@ class ToolRegistry:
 
     def has_tools(self) -> bool:
         return bool(self._mcp_servers) or bool(self._allowed_tools)
-
-
-@dataclass(slots=True)
-class _GitHubGraphQLMcpEntry:
-    """Inert dataclass marking the github_graphql server in the options.
-
-    The provider hands the entry to ClaudeAgentOptions; the production
-    ``_connect`` translates it into a real ``create_sdk_mcp_server``
-    call when the SDK is available. Tests inspect the entry directly
-    via ``options["mcp_servers"]["github_graphql"]`` to assert the
-    provider passed the registry through.
-    """
-
-    tool: Any
 
 
 # -- Provider ----------------------------------------------------------------

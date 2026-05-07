@@ -359,13 +359,22 @@ def test_provider_without_registry_emits_no_mcp_options(tmp_path: Path) -> None:
 
 def test_provider_with_registry_passes_mcp_server_and_allowed_tool(tmp_path: Path) -> None:
     """Wiring is end-to-end: register github_graphql, then assert the
-    provider's options carry the SDK-shaped entries."""
+    provider's options carry the real SDK MCP server config (per #36)."""
     registry = ToolRegistry()
     registry.register_github_graphql(GitHubGraphQLTool(_client_with(_ok_response({"data": {}}))))
     provider = ClaudeCodeProvider(tool_registry=registry)
     opts = provider._build_options(_issue(), tmp_path / "ws", _claude_config(tmp_path), resume=None)
     assert TOOL_NAME in opts["mcp_servers"]
     assert f"mcp__{TOOL_NAME}__{TOOL_NAME}" in opts["allowed_tools"]
+    # The registered server is the SDK's McpSdkServerConfig dict shape:
+    # ``{"type": "sdk", "name": ..., "instance": <Server>}`` — proves
+    # we passed it to ``create_sdk_mcp_server`` rather than dropping a
+    # Symphony placeholder dataclass into the options.
+    server = opts["mcp_servers"][TOOL_NAME]
+    assert isinstance(server, dict)
+    assert server.get("type") == "sdk"
+    assert server.get("name") == TOOL_NAME
+    assert server.get("instance") is not None
 
 
 def test_registry_has_tools_flag() -> None:
@@ -488,3 +497,131 @@ _unused = (
     WorkflowConfig,
     WorkspaceConfig,
 )
+
+
+# -- SDK MCP shim (#36) ------------------------------------------------------
+#
+# Drives ``tool_handler`` / ``build_sdk_tool`` / ``build_sdk_mcp_server``
+# directly. The handler lives at module level so we can call it without
+# spinning up a real SDK MCP server transport — every assertion here
+# stays in-process.
+
+
+async def test_handler_returns_mcp_content_envelope_on_success() -> None:
+    """Happy path: handler returns the standard MCP ``content`` shape
+    with the JSON-encoded envelope as text."""
+    from symphony.tools.github_graphql import tool_handler
+
+    body = {"data": {"viewer": {"login": "octocat"}}}
+    tool = GitHubGraphQLTool(_client_with(_ok_response(body)))
+    handler = tool_handler(tool)
+
+    result = await handler({"query": "query { viewer { login } }"})
+    assert "content" in result
+    assert isinstance(result["content"], list) and len(result["content"]) == 1
+    assert result["content"][0]["type"] == "text"
+    envelope = json.loads(result["content"][0]["text"])
+    assert envelope == {
+        "ok": True,
+        "data": {"viewer": {"login": "octocat"}},
+        "errors": None,
+        "validation_error": None,
+        "transport_error": None,
+        "status_code": None,
+    }
+
+
+async def test_handler_passes_variables_through() -> None:
+    """``variables`` from the model reaches the GitHub request body."""
+    from symphony.tools.github_graphql import tool_handler
+
+    captured: dict[str, Any] = {}
+
+    def _h(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": {"x": 1}})
+
+    handler = tool_handler(GitHubGraphQLTool(_client_with(_h)))
+    await handler({"query": "query Q($n: Int!) { x(n: $n) }", "variables": {"n": 7}})
+    assert captured["payload"]["variables"] == {"n": 7}
+
+
+async def test_handler_converts_validation_error_to_envelope() -> None:
+    """A validation failure (multi-op) MUST come back as an ok=false
+    envelope — never raise into the SDK loop (SPEC §18 fail-soft)."""
+    from symphony.tools.github_graphql import tool_handler
+
+    handler = tool_handler(GitHubGraphQLTool(_client_with(_ok_response({"data": {}}))))
+    result = await handler({"query": "query A { x } query B { y }"})
+    envelope = json.loads(result["content"][0]["text"])
+    assert envelope["ok"] is False
+    assert envelope["validation_error"] is not None
+    assert "operations" in envelope["validation_error"]
+
+
+async def test_handler_converts_unexpected_exception_to_envelope() -> None:
+    """A regression in the handler stack (SDK or GitHubClient) must
+    fail soft. Use a tool whose execute() raises a non-GraphQLToolError
+    by handing it a None client surrogate."""
+    from symphony.tools.github_graphql import tool_handler
+
+    class _BoomTool:
+        def execute(self, query, variables=None):  # noqa: ARG002
+            raise RuntimeError("simulated regression")
+
+    handler = tool_handler(_BoomTool())  # type: ignore[arg-type]
+    result = await handler({"query": "query { x }"})
+    envelope = json.loads(result["content"][0]["text"])
+    assert envelope["ok"] is False
+    assert envelope["transport_error"] is not None
+    assert "RuntimeError" in envelope["transport_error"]
+
+
+async def test_handler_handles_missing_query_key() -> None:
+    """Defensive: model sends args without ``query``. The validator
+    catches this and the envelope surfaces a validation_error."""
+    from symphony.tools.github_graphql import tool_handler
+
+    handler = tool_handler(GitHubGraphQLTool(_client_with(_ok_response({"data": {}}))))
+    result = await handler({"variables": {"n": 1}})  # query missing
+    envelope = json.loads(result["content"][0]["text"])
+    assert envelope["ok"] is False
+    assert envelope["validation_error"] is not None
+
+
+def test_build_sdk_tool_metadata_matches_contract() -> None:
+    """``build_sdk_tool`` returns an SdkMcpTool whose name + schema
+    match what we advertise to operators in docs/optional-tools.md."""
+    from symphony.tools.github_graphql import (
+        TOOL_INPUT_SCHEMA,
+        build_sdk_tool,
+    )
+
+    sdk_tool = build_sdk_tool(GitHubGraphQLTool(_client_with(_ok_response({"data": {}}))))
+    assert sdk_tool.name == TOOL_NAME
+    # The schema we ship to Claude must require ``query`` and accept
+    # an optional object ``variables``.
+    schema = sdk_tool.input_schema
+    assert schema == TOOL_INPUT_SCHEMA
+    assert "query" in schema["properties"]
+    assert "variables" in schema["properties"]
+    assert schema["required"] == ["query"]
+    # Handler is the async wrapper from tool_handler(...).
+    assert callable(sdk_tool.handler)
+
+
+def test_build_sdk_mcp_server_returns_sdk_config_dict() -> None:
+    """``build_sdk_mcp_server`` returns the SDK's McpSdkServerConfig
+    dict shape (``{"type": "sdk", "name": ..., "instance": ...}``).
+
+    This is what gets dropped into ``ClaudeAgentOptions.mcp_servers``;
+    if the shape ever drifts, the SDK silently rejects the server and
+    the tool stops working — the smoke we need to lock in here."""
+    from symphony.tools.github_graphql import build_sdk_mcp_server
+
+    cfg = build_sdk_mcp_server(GitHubGraphQLTool(_client_with(_ok_response({"data": {}}))))
+    assert isinstance(cfg, dict)
+    assert cfg["type"] == "sdk"
+    assert cfg["name"] == TOOL_NAME
+    assert cfg["instance"] is not None
+

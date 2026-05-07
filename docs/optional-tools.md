@@ -88,18 +88,26 @@ array. The auxiliary fields surface why a call failed:
 
 ### Limitations (current)
 
-- **SDK MCP wrapper is not yet wired end-to-end.** The handler logic
-  (`GitHubGraphQLTool.execute`) is fully unit-tested, and Symphony's
-  `ToolRegistry` puts a `_GitHubGraphQLMcpEntry` into
-  `ClaudeAgentOptions.mcp_servers` when the tool is enabled. The
-  SDK-side adapter that translates an MCP tool-call from the model
-  into `tool.execute(query, variables)` is the remaining piece.
-  Setting `enabled: true` today advertises the tool name to Claude
-  but tool calls will not execute until #36 ships. Track:
-  [#36](https://github.com/jimoosciuc/symphony-cc/issues/36).
-- No live integration test for this tool yet — coverage stops at the
-  unit-tested handler. The end-to-end smoke test against a real
-  Claude session is part of #36.
+- No live integration test against a real Claude *session* yet —
+  coverage today exercises the SDK-decorated handler directly
+  (handler → GitHubClient → GraphQL endpoint round-trip). The
+  end-to-end smoke through a real Claude turn lives in the M3-style
+  runbook.
+
+### Smoke testing the live wiring
+
+A live integration test sits at
+`tests/test_github_graphql_tool_live.py` and is opt-in:
+
+```bash
+SYMPHONY_RUN_GRAPHQL_TOOL_INTEGRATION=1 GITHUB_TOKEN=ghp_… \
+  pytest tests/test_github_graphql_tool_live.py -q
+```
+
+It exercises the SDK-decorated handler against the real GitHub API
+without booting a full Claude session — proves the
+handler → GitHubClient → graphql endpoint → envelope → MCP content
+pipeline is intact.
 
 ## Adding a new tool
 
