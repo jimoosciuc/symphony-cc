@@ -88,13 +88,19 @@ provider-specific raw payloads under explicit `raw` or `payload` fields.
 The orchestrator should only know this behavior:
 
 ```text
-start_session(issue, workspace_path, initial_prompt, config) -> SessionRecord
+start_session(issue, workspace_path, config) -> SessionRecord
 send_input(session, message) -> stream[AgentEvent]
 interrupt(session) -> AgentEvent
 cancel(session) -> AgentEvent
 close(session) -> None
 restore(session_record) -> SessionRecord
 ```
+
+`start_session` and `restore` create/resume the provider session and return
+a `SessionRecord` only — they do not take the first prompt and do not stream
+events. The orchestrator runs every turn (first and continuation) through
+`send_input`. The first `send_input` after `start_session` emits
+`session_started`; the first after `restore` emits `session_restored`.
 
 The fake provider must implement the same interface before the Claude provider
 exists. Orchestrator tests should use the fake provider by default.
