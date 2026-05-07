@@ -27,7 +27,7 @@ dev = [
 ]
 
 [project.scripts]
-symphony = "symphony.cli:main"
+symphony = "symphony.main:main"
 
 [project.urls]
 Repository = "https://github.com/jimoosciuc/symphony-cc"
