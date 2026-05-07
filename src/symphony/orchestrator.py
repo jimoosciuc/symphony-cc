@@ -59,6 +59,11 @@ class WorkerState:
     Mutable so the orchestrator can update ``turn_count`` and
     ``terminal_state`` as the worker progresses without re-allocating the
     whole record.
+
+    ``timeout_subtype`` is set by the orchestrator's stall/turn-timeout
+    enforcement to ``"stall_timeout"`` or ``"turn_timeout"``; the
+    finally-block uses it to write a richer ``terminal.json`` and to
+    schedule a retry.
     """
 
     issue: Issue
@@ -69,6 +74,7 @@ class WorkerState:
     terminal_state: Terminal | None = None
     last_event: AgentEvent | None = None
     error: str | None = None
+    timeout_subtype: str | None = None
 
 
 @dataclass(slots=True)
@@ -349,6 +355,13 @@ class Orchestrator:
                     break
                 terminal = await self._run_one_turn(worker, message)
                 worker.turn_count += 1
+                if terminal == "turn_cancelled" and worker.timeout_subtype:
+                    # Timeout-induced cancellation is retryable per SPEC §16.
+                    self._on_worker_failed(
+                        worker.issue, worker.error or worker.timeout_subtype, retryable=True
+                    )
+                    result.retries_scheduled.append(worker.issue.identifier)
+                    break
                 if terminal in {"turn_failed", "turn_cancelled"}:
                     break
                 if terminal == "no_terminal":
@@ -378,16 +391,51 @@ class Orchestrator:
                 await self.provider.close(worker.session)
             except ProviderError as exc:
                 _LOG.warning("close failed: %s", exc)
-            self.tracker.release_issue(
-                worker.issue,
-                worker.terminal_state.value if worker.terminal_state else "ended",
+
+            # Outcome routing: non-retryable failures are marked blocked
+            # so a future operator (or run) sees the issue is broken; all
+            # other outcomes (success, retryable failure, timeout, crash,
+            # reconcile-cancel) just release the claim and let the
+            # retry-state machine drive what comes next.
+            outcome_reason = worker.terminal_state.value if worker.terminal_state else "ended"
+            retry = self.retry_states.get(worker.issue.identifier)
+            non_retryable_failure = (
+                worker.terminal_state == Terminal.FAILED
+                and retry is not None
+                and retry.attempts > 0
+                and retry.next_attempt_at is None
             )
+            if non_retryable_failure:
+                try:
+                    self.tracker.mark_issue_blocked(
+                        worker.issue, worker.error or "non-retryable failure"
+                    )
+                except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
+                    _LOG.warning(
+                        "mark_issue_blocked failed for %s: %s",
+                        worker.issue.identifier,
+                        exc,
+                    )
+            else:
+                try:
+                    self.tracker.release_issue(worker.issue, outcome_reason)
+                except Exception as exc:  # noqa: BLE001 - same rationale
+                    _LOG.warning(
+                        "release_issue failed for %s: %s",
+                        worker.issue.identifier,
+                        exc,
+                    )
+
             worker.artifacts.write_json(
                 "terminal.json",
                 {
                     "terminal_state": (
                         worker.terminal_state.value if worker.terminal_state else "ended"
                     ),
+                    "reason": _terminal_reason(worker),
+                    "retryable": _is_retryable(worker, retry),
+                    "subtype": worker.timeout_subtype,
+                    "blocked": non_retryable_failure,
                     "last_event_at": (worker.last_event.timestamp if worker.last_event else None),
                     "provider_session_id": worker.session.provider_session_id,
                     "error": worker.error,
@@ -411,19 +459,120 @@ class Orchestrator:
         ``turn_completed`` does NOT set ``worker.terminal_state`` because
         a successful turn does not end the session — the orchestrator may
         send another continuation prompt.
+
+        Two timeouts are enforced inline (SPEC §11, docs/claude-provider.md §6):
+
+        - ``claude.stall_timeout_ms`` — wallclock since the last
+          *content-bearing* event. On expiry the provider is interrupted
+          and the synthesized ``turn_cancelled`` event carries
+          ``payload.subtype = "stall_timeout"``.
+        - ``claude.turn_timeout_ms`` — wallclock since the call started.
+          Same interrupt path with ``payload.subtype = "turn_timeout"``.
+
+        Both timeouts mark the worker retryable per SPEC §16.
         """
+        stall_ms = self.config.claude.stall_timeout_ms
+        turn_ms = self.config.claude.turn_timeout_ms
+        loop = asyncio.get_running_loop()
+        turn_start = loop.time()
+        last_event_time = turn_start
+
         terminal = "no_terminal"
-        async for event in self.provider.send_input(worker.session, message):
-            self._record_event(worker, event)
-            if event.event in TERMINAL_TURN_EVENTS:
-                terminal = event.event
-                if event.event == "turn_failed":
-                    worker.terminal_state = Terminal.FAILED
-                elif event.event == "turn_cancelled":
-                    worker.terminal_state = Terminal.CANCELLED
-                # turn_completed: leave terminal_state untouched.
-                break
+        iterator = self.provider.send_input(worker.session, message).__aiter__()
+        try:
+            while True:
+                now = loop.time()
+                turn_elapsed_ms = (now - turn_start) * 1000
+                stall_elapsed_ms = (now - last_event_time) * 1000
+
+                # Cap the next await at the smaller of the two remaining
+                # budgets so whichever fires first wins.
+                turn_remaining_s = max(0.0, (turn_ms - turn_elapsed_ms) / 1000)
+                stall_remaining_s = max(0.0, (stall_ms - stall_elapsed_ms) / 1000)
+                wait_s = min(turn_remaining_s, stall_remaining_s)
+                if wait_s <= 0:
+                    # Already over budget before we even tried to read.
+                    subtype = "turn_timeout" if turn_elapsed_ms >= turn_ms else "stall_timeout"
+                    await self._on_turn_timeout(worker, subtype)
+                    terminal = "turn_cancelled"
+                    break
+
+                try:
+                    event = await asyncio.wait_for(iterator.__anext__(), timeout=wait_s)
+                except asyncio.TimeoutError:
+                    # Decide which budget tripped first.
+                    now = loop.time()
+                    if (now - turn_start) * 1000 >= turn_ms:
+                        subtype = "turn_timeout"
+                    else:
+                        subtype = "stall_timeout"
+                    await self._on_turn_timeout(worker, subtype)
+                    terminal = "turn_cancelled"
+                    break
+                except StopAsyncIteration:
+                    # Stream ended without terminal event — caller treats as crash.
+                    break
+
+                self._record_event(worker, event)
+                last_event_time = loop.time()
+
+                if event.event in TERMINAL_TURN_EVENTS:
+                    terminal = event.event
+                    if event.event == "turn_failed":
+                        worker.terminal_state = Terminal.FAILED
+                    elif event.event == "turn_cancelled":
+                        worker.terminal_state = Terminal.CANCELLED
+                    # turn_completed: leave terminal_state untouched.
+                    break
+        finally:
+            # Best-effort generator cleanup so the SDK subprocess (or fake
+            # state) is not left hanging when we time out mid-stream.
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:  # noqa: BLE001 - cleanup must not mask the original outcome
+                    _LOG.debug("generator aclose raised during turn cleanup", exc_info=True)
         return terminal
+
+    async def _on_turn_timeout(self, worker: WorkerState, subtype: str) -> None:
+        """Interrupt the in-flight turn and record a synthesized cancel event.
+
+        Provider interrupt failures are logged; the orchestrator still
+        marks the worker cancelled so the worker loop terminates cleanly.
+        """
+        try:
+            await self.provider.interrupt(worker.session)
+        except ProviderError as exc:
+            _LOG.warning(
+                "interrupt during %s for %s failed: %s",
+                subtype,
+                worker.issue.identifier,
+                exc,
+            )
+        worker.terminal_state = Terminal.CANCELLED
+        worker.timeout_subtype = subtype
+        budget_ms = (
+            self.config.claude.turn_timeout_ms
+            if subtype == "turn_timeout"
+            else self.config.claude.stall_timeout_ms
+        )
+        worker.error = f"{subtype} after {budget_ms}ms"
+        # Synthesize a turn_cancelled event so events.jsonl reflects the
+        # timeout — provider may not get a chance to emit one.
+        self._record_event(
+            worker,
+            AgentEvent(
+                event="turn_cancelled",
+                timestamp=self._clock(),
+                session_id=worker.session.session_id,
+                provider=self.provider.name,
+                issue_identifier=worker.issue.identifier,
+                attempt=worker.session.attempt,
+                payload={"subtype": subtype, "source": "orchestrator"},
+                provider_session_id=worker.session.provider_session_id,
+            ),
+        )
 
     # -- Failure / retry ----------------------------------------------------
 
@@ -462,6 +611,37 @@ def _default_continuation_policy(worker: WorkerState) -> str | None:
     if worker.turn_count == 0:
         return f"first prompt for {worker.issue.identifier}"
     return None
+
+
+def _terminal_reason(worker: WorkerState) -> str:
+    """One-token reason summary for ``terminal.json``.
+
+    Composes ``terminal_state`` with ``timeout_subtype`` so operators can
+    grep for ``"stall_timeout"`` / ``"turn_timeout"`` without parsing the
+    whole record. Falls back to ``"ended"`` if no state was set
+    (shouldn't happen — finally always sets one).
+    """
+    if worker.timeout_subtype:
+        return worker.timeout_subtype
+    if worker.terminal_state is None:
+        return "ended"
+    return worker.terminal_state.value
+
+
+def _is_retryable(worker: WorkerState, retry: RetryState | None) -> bool:
+    """Did the orchestrator schedule another attempt for this worker?
+
+    ``retry.next_attempt_at`` is the source of truth — it's set by
+    ``_on_worker_failed(retryable=True)`` and cleared by the
+    ``fail_closed`` / non-retryable paths. Worker outcomes that are not
+    failures (COMPLETED, reconcile-CANCELLED) are reported as
+    ``retryable=False`` because there's nothing to retry.
+    """
+    if worker.terminal_state == Terminal.COMPLETED:
+        return False
+    if retry is None:
+        return False
+    return retry.next_attempt_at is not None
 
 
 def _session_snapshot(session: SessionRecord) -> dict[str, Any]:

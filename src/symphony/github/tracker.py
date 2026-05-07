@@ -474,6 +474,10 @@ class FakeGitHubTracker:
             if st is None:
                 return ReleaseResult(ok=False, reason="unknown issue")
             st.blocked = True
+            # Mirror the real GitHubTracker: marking an issue blocked
+            # also drops the active claim so reconciliation no longer
+            # treats it as owned by this run.
+            st.claimed_by = None
             st.claim_history.append((_now_iso(), f"blocked:{reason}"))
             return ReleaseResult(ok=True)
 
