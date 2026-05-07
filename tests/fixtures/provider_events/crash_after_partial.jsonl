@@ -1,0 +1,2 @@
+{"event": "message_delta", "payload": {"text": "partial output before crash", "block_index": 0}}
+{"event": "__raise__", "payload": {"error": "ProviderRetryableError", "message": "scripted SDK crash"}}

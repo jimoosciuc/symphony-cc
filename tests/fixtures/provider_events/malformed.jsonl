@@ -1,0 +1,3 @@
+{"event": "malformed", "payload": {"raw": "<UnknownThing object>", "reason": "unknown message class UnknownThing"}}
+{"event": "message_delta", "payload": {"text": "recovered", "block_index": 0}}
+{"event": "turn_completed", "payload": {"duration_ms": 5, "result": "ok"}}
