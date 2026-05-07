@@ -1,14 +1,19 @@
 """Symphony command-line interface.
 
-The CLI surface is intentionally minimal in this milestone. Subcommands are
-registered here, but each command's behavior is implemented by a later issue.
-Until then, commands fail with a clear ``not yet implemented`` message so that
-operators (and dependent issues) can see exactly which boundary is missing.
+The ``symphony`` console script and ``python -m symphony`` both route
+through :func:`main`. Today the only subcommand is ``run``; future
+issues may add ``status``, ``replay``, etc.
+
+``symphony run --workflow PATH`` loads the workflow file, instantiates
+the GitHub tracker / Claude Code provider / workspace manager /
+orchestrator, and drives one or more poll ticks.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
 import sys
 from collections.abc import Sequence
 
@@ -57,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the Symphony daemon against a workflow file.",
         description=(
             "Run the Symphony daemon. Loads the workflow file, validates "
-            "config, and starts the orchestrator. Not yet implemented."
+            "config, and starts the orchestrator."
         ),
     )
     run.add_argument(
@@ -66,16 +71,113 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Path to the workflow file (e.g. WORKFLOW.md).",
     )
+    run.add_argument(
+        "--once",
+        action="store_true",
+        help=(
+            "Run a single poll tick and exit. Useful for smoke tests, the "
+            "M3 E2E run, and CI runbooks. Without this flag the daemon "
+            "polls forever at `polling.interval_ms`."
+        ),
+    )
+    run.add_argument(
+        "--log-level",
+        default="info",
+        choices=["debug", "info", "warning", "error", "critical"],
+        help="Override the workflow file's logging.level for this invocation.",
+    )
     run.set_defaults(func=_cmd_run)
 
     return parser
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    raise NotYetImplementedError(
-        f"`symphony run --workflow {args.workflow}` will be wired up by later "
-        "issues (workflow loader, workspace manager, orchestrator)."
+    """Wire workflow → tracker → provider → workspace → orchestrator.
+
+    Live subcommand: actually starts the orchestrator. Returns 0 on
+    clean exit, 1 on workflow/config errors, raises non-zero exit on
+    KeyboardInterrupt.
+    """
+    # Local imports keep the top-level CLI fast; heavy deps (httpx,
+    # claude-agent-sdk) are only paid for when ``run`` is invoked.
+    from symphony.config import ConfigError
+    from symphony.github import GitHubTracker
+    from symphony.orchestrator import Orchestrator
+    from symphony.provider import ClaudeCodeProvider
+    from symphony.workflow import WorkflowError, load_workflow
+    from symphony.workspace import WorkspaceManager
+
+    _setup_logging(args.log_level)
+    log = logging.getLogger("symphony.cli")
+
+    try:
+        workflow = load_workflow(args.workflow)
+    except (ConfigError, WorkflowError) as exc:
+        print(f"symphony: workflow load failed: {exc}", file=sys.stderr)
+        return 1
+
+    config = workflow.config
+    for warning in config.warnings:
+        log.warning("config warning: %s: %s", warning.location, warning.message)
+
+    log.info(
+        "starting symphony run: workflow=%s tracker=%s/%s provider=%s",
+        workflow.path,
+        config.tracker.owner,
+        config.tracker.repo,
+        config.agent.provider,
     )
+
+    tracker = GitHubTracker(config.tracker, config.github)
+    provider = ClaudeCodeProvider()
+    workspace_mgr = WorkspaceManager(config.workspace)
+    orchestrator = Orchestrator(
+        config,
+        tracker=tracker,
+        provider=provider,
+        workspace_manager=workspace_mgr,
+    )
+
+    try:
+        if args.once:
+            result = asyncio.run(orchestrator.run_once())
+            _print_tick_summary(result)
+        else:
+            asyncio.run(orchestrator.run_forever())
+    except KeyboardInterrupt:
+        log.info("received interrupt, exiting")
+        return 130  # standard SIGINT exit code
+    finally:
+        try:
+            tracker.close()
+        except Exception as exc:  # noqa: BLE001 - cleanup must not mask outcome
+            log.warning("tracker close failed: %s", exc)
+    return 0
+
+
+def _setup_logging(level_name: str) -> None:
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
+    )
+
+
+def _print_tick_summary(result: object) -> None:
+    """Pretty-print a TickResult to stdout for --once invocations.
+
+    Imported lazily so the type isn't required for the help message.
+    """
+    print("symphony tick result:")
+    for field_name in (
+        "dispatched",
+        "finished",
+        "reconciled_cancelled",
+        "skipped_claim_conflict",
+        "retries_scheduled",
+    ):
+        items = getattr(result, field_name, [])
+        print(f"  {field_name}: {list(items)}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

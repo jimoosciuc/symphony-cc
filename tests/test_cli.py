@@ -1,14 +1,15 @@
-"""Smoke tests for the symphony CLI surface.
+"""CLI tests covering both the argparse shape and the wired-up `run` command.
 
-These exercise the argument parser only — no runtime behavior is wired up yet.
-They lock down the CLI shape so later issues that wire real behavior do not
-accidentally rename the entry point or change required flags.
+The wired-up tests exercise failure paths (missing workflow, invalid
+config) without requiring real GitHub/Claude credentials. The success
+path is exercised via the M3 E2E runbook, not unit tests.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -49,40 +50,43 @@ def test_run_requires_workflow_flag(capsys: pytest.CaptureFixture[str]) -> None:
     assert "--workflow" in err
 
 
-def test_run_with_workflow_raises_not_yet_implemented() -> None:
-    with pytest.raises(NotYetImplementedError) as excinfo:
-        main(["run", "--workflow", "WORKFLOW.example.md"])
-    msg = str(excinfo.value)
-    assert "not yet implemented" in msg
-    assert "WORKFLOW.example.md" in msg
+def test_run_help_includes_once_and_log_level_flags(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--once` and `--log-level` are part of the M3 runbook contract."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(["run", "--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "--once" in out
+    assert "--log-level" in out
 
 
-def test_not_yet_implemented_carries_message_as_code() -> None:
-    """Pin the documented exit semantics so CLI behavior cannot drift silently.
-
-    NotYetImplementedError carries its message as SystemExit's ``code``
-    attribute; the Python interpreter prints it to stderr and exits with
-    status 1. The class also exposes ``EXIT_CODE = 1`` for grep-discoverability.
-    """
-    assert NotYetImplementedError.EXIT_CODE == 1
-    err = NotYetImplementedError("anything")
-    assert isinstance(err.code, str)
-    assert err.code.startswith("symphony: not yet implemented:")
+def test_run_missing_workflow_file_exits_1(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    rc = main(["run", "--workflow", str(tmp_path / "missing.md")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "workflow load failed" in err.lower()
 
 
-def test_run_subcommand_exits_one_in_subprocess() -> None:
-    """End-to-end: a real subprocess invocation exits with status 1 and the
-    not-yet-implemented line is on stderr. This catches drift in the
-    code-as-message → exit-1 contract that a pure import-level test cannot.
-    """
+def test_run_invalid_yaml_exits_1(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    bad = tmp_path / "bad.md"
+    bad.write_text("---\nagent: [unterminated\n---\nbody\n", encoding="utf-8")
+    rc = main(["run", "--workflow", str(bad)])
+    assert rc == 1
+
+
+def test_run_subcommand_exits_one_via_subprocess_for_missing_workflow(tmp_path: Path) -> None:
+    """End-to-end subprocess invocation for the failure path. Catches
+    drift in the wired command's exit semantics that an in-process
+    import test can't (e.g. import-time errors)."""
     result = subprocess.run(
-        [sys.executable, "-m", "symphony", "run", "--workflow", "WORKFLOW.example.md"],
+        [sys.executable, "-m", "symphony", "run", "--workflow", str(tmp_path / "nope.md")],
         capture_output=True,
         text=True,
     )
     assert result.returncode == 1
-    assert "not yet implemented" in result.stderr
-    assert "WORKFLOW.example.md" in result.stderr
+    assert "workflow load failed" in result.stderr.lower()
 
 
 def test_unknown_command_is_rejected(capsys: pytest.CaptureFixture[str]) -> None:
@@ -94,6 +98,16 @@ def test_unknown_command_is_rejected(capsys: pytest.CaptureFixture[str]) -> None
 
 
 def test_parser_object_is_constructible() -> None:
-    # Guards against import-time regressions — later issues will extend this.
     parser = build_parser()
     assert parser.prog == "symphony"
+
+
+def test_not_yet_implemented_class_still_exported() -> None:
+    """`NotYetImplementedError` is no longer raised by `run` (which is
+    now wired up), but the class stays exported so future subcommands
+    can use the same convention. Sanity-check the constants don't drift.
+    """
+    assert NotYetImplementedError.EXIT_CODE == 1
+    err = NotYetImplementedError("future subcommand")
+    assert isinstance(err.code, str)
+    assert err.code.startswith("symphony: not yet implemented:")
