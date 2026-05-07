@@ -1,0 +1,2 @@
+{"event": "message_delta", "payload": {"text": "thinking...", "block_index": 0}}
+{"event": "turn_cancelled", "payload": {"subtype": "interrupt", "source": "provider"}}

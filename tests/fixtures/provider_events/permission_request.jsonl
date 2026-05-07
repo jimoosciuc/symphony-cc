@@ -1,0 +1,4 @@
+{"event": "permission_requested", "payload": {"subtype": "permission_request_write", "data": {"path": "/tmp/x"}}}
+{"event": "permission_resolved", "payload": {"subtype": "permission_decision_allow", "data": {"path": "/tmp/x"}}}
+{"event": "message_delta", "payload": {"text": "wrote file", "block_index": 0}}
+{"event": "turn_completed", "payload": {"duration_ms": 50, "result": "ok"}}

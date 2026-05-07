@@ -128,6 +128,14 @@ class FakeProvider:
         self.calls.append(("restore", session_record.session_id))
         if self.restore_should_fail:
             raise ProviderRestoreError("scripted restore failure")
+        # Mirror the real ClaudeCodeProvider contract (#12): restore
+        # without a provider_session_id is a typed restore-startup
+        # failure so the orchestrator can route to retry_resume_policy.
+        if not session_record.provider_session_id:
+            raise ProviderRestoreError(
+                f"cannot restore session {session_record.session_id}: "
+                "no provider_session_id on record"
+            )
         if session_record.provider_session_id:
             session_record.previous_provider_session_ids.append(session_record.provider_session_id)
         # restore() does not stream events; it just bumps the attempt

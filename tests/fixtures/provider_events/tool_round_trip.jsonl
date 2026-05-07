@@ -1,0 +1,4 @@
+{"event": "tool_started", "payload": {"tool_name": "shell", "tool_use_id": "tu_1", "input": {"cmd": "ls"}}}
+{"event": "tool_completed", "payload": {"tool_use_id": "tu_1", "is_error": false, "content": "README.md\n"}}
+{"event": "message_delta", "payload": {"text": "done", "block_index": 0}}
+{"event": "turn_completed", "payload": {"duration_ms": 30, "result": "ok"}}
