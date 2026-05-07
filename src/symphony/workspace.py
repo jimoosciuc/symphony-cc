@@ -59,11 +59,16 @@ class HookResult:
     and ``timed_out`` (subprocess was killed after ``timeout_ms``). The
     method does not raise for non-zero exits — the orchestrator may
     choose to continue past a failed hook depending on the hook stage.
+
+    On timeout, ``returncode`` is ``None`` (the subprocess was killed
+    before it could produce one) and ``timed_out`` is True. Using
+    ``None`` rather than a sentinel int avoids collisions with real
+    Unix signal-derived returncodes (e.g. ``-1`` is ``-SIGHUP``).
     """
 
     name: HookName
     command: str
-    returncode: int
+    returncode: int | None
     stdout: str
     stderr: str
     duration_ms: int
@@ -144,7 +149,7 @@ class WorkspaceManager:
         candidate = (self._root / key).resolve()
         # Defense in depth: even after sanitization, refuse to return a
         # path that is not strictly inside the configured root.
-        if not _is_relative_to(candidate, self._root):
+        if not candidate.is_relative_to(self._root):
             raise WorkspaceError(
                 "workspace.path",
                 f"resolved path {candidate} escapes workspace.root {self._root}",
@@ -202,7 +207,7 @@ class WorkspaceManager:
         idempotency is desired).
         """
         path = workspace.path.resolve()
-        if not _is_relative_to(path, self._root):
+        if not path.is_relative_to(self._root):
             raise WorkspaceError(
                 "workspace.path",
                 f"refuse to delete {path} which is outside workspace.root {self._root}",
@@ -261,7 +266,9 @@ class WorkspaceManager:
             stderr = completed.stderr
         except subprocess.TimeoutExpired as exc:
             timed_out = True
-            returncode = -1
+            # None (not -1, which would collide with -SIGHUP) so callers
+            # can rely on `timed_out` as the source of truth.
+            returncode = None
             stdout = _decode_partial(exc.stdout)
             stderr = _decode_partial(exc.stderr)
         duration_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
@@ -280,19 +287,6 @@ class WorkspaceManager:
 
 
 # -- Module-level helpers -----------------------------------------------------
-
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    """Backport-friendly ``Path.is_relative_to``.
-
-    Python 3.9+ has it, but using ``try/except`` keeps the intent obvious
-    and avoids a typing-stub edge case on some platforms.
-    """
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 def _decode_partial(data: bytes | str | None) -> str:
