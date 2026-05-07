@@ -26,8 +26,15 @@ from symphony.github.tracker import (
     FakeGitHubTracker,
     GitHubTracker,
     ReleaseResult,
+    TrackerClaimConflictError,
     TrackerError,
+    TrackerMalformedResponse,
+    TrackerMissingToken,
+    TrackerNotFound,
+    TrackerPermissionDenied,
     TrackerProtocol,
+    TrackerRateLimited,
+    TrackerTransportError,
 )
 
 __all__ = [
@@ -44,8 +51,15 @@ __all__ = [
     "GitHubTracker",
     "GitHubTransportError",
     "ReleaseResult",
+    "TrackerClaimConflictError",
     "TrackerError",
+    "TrackerMalformedResponse",
+    "TrackerMissingToken",
+    "TrackerNotFound",
+    "TrackerPermissionDenied",
     "TrackerProtocol",
+    "TrackerRateLimited",
+    "TrackerTransportError",
     "expected_branch_name",
     "find_linked_pull_requests",
 ]
