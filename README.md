@@ -42,3 +42,48 @@ The first implementation will be Python, with package and CLI name `symphony`.
 ```bash
 symphony run --workflow WORKFLOW.md
 ```
+
+## Development
+
+Symphony targets Python `>=3.10`. The repo is `symphony-cc`; the package and
+CLI are `symphony`.
+
+### Install
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+### Run the CLI
+
+```bash
+symphony --help
+symphony --version
+symphony run --workflow WORKFLOW.example.md
+```
+
+The `run` subcommand parses arguments today and exits with a clear
+`not yet implemented` message. Behavior will be wired up by the M1 issues
+(workflow loader, workspace manager, orchestrator).
+
+### Tests
+
+```bash
+pytest
+```
+
+Tests live under `tests/` and are pure-unit until later issues add fakes for
+GitHub and Claude Code. Live integration tests (when added) will be skipped
+unless their opt-in environment variables are set:
+
+- `SYMPHONY_RUN_GITHUB_INTEGRATION=1`
+- `SYMPHONY_RUN_CLAUDE_INTEGRATION=1`
+
+### Lint and format
+
+```bash
+ruff check .
+ruff format .
+```

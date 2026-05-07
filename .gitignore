@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Symphony runtime artifacts (per WORKFLOW.md defaults)
+.symphony/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+.claude/
