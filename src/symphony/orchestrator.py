@@ -358,9 +358,7 @@ class Orchestrator:
                     # session whose state is unknown.
                     worker.error = "provider stream ended without terminal event"
                     worker.terminal_state = Terminal.CRASHED
-                    self._on_worker_failed(
-                        worker.issue, worker.error, retryable=True
-                    )
+                    self._on_worker_failed(worker.issue, worker.error, retryable=True)
                     result.retries_scheduled.append(worker.issue.identifier)
                     break
             if worker.terminal_state is None:

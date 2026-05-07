@@ -453,9 +453,7 @@ async def test_provider_stream_without_terminal_event_is_crash(tmp_path: Path) -
     # Script ends after a single message_delta with no terminal event.
     truncated = FakeTurnScript(events=[("message_delta", {"text": "partial"})])
     prov = FakeProvider(default_script=truncated)
-    orch, tracker, _ = _make_orchestrator(
-        tmp_path, issues=[_issue(number=1)], provider=prov
-    )
+    orch, tracker, _ = _make_orchestrator(tmp_path, issues=[_issue(number=1)], provider=prov)
     result = await orch.run_once()
     assert result.dispatched == ["acme/proj#1"]
     assert "acme/proj#1" in result.retries_scheduled
