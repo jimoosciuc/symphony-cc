@@ -176,19 +176,14 @@ async def test_claim_released_after_provider_failure(tmp_path: Path) -> None:
 
 
 async def test_respects_max_concurrency(tmp_path: Path) -> None:
+    """Three eligible issues, max_concurrency=2: exactly 2 must be dispatched
+    in one tick. The previous version asserted `<= 2` which passed vacuously
+    when 0 dispatched — `== 2` locks the cap.
+    """
     issues = [_issue(number=n) for n in (1, 2, 3)]
-    # Use a continuation policy that NEVER returns None so workers stay
-    # active across one tick. Combined with max_turns=1 we still finish a
-    # turn — but the test cares about *during dispatch*. Easier signal:
-    # use a provider that does not finish its first turn within run_once.
-    # We approximate by setting max_concurrency=2 and asserting only 2 of
-    # 3 dispatched in one tick (the third either skips or runs after).
     orch, _, _ = _make_orchestrator(tmp_path, issues=issues, max_concurrency=2)
     result = await orch.run_once()
-    # The serial-per-tick worker model finishes each dispatched worker
-    # before moving on, so within one tick we still expect at most
-    # max_concurrency dispatches.
-    assert len(result.dispatched) <= 2
+    assert len(result.dispatched) == 2
 
 
 # -- Acceptance: multi-turn continuation on the same fake session -----------
@@ -449,6 +444,22 @@ async def test_session_record_attempts_increment_on_restore(tmp_path: Path) -> N
 
 
 # -- restore failure honors claude.retry_resume_policy (#18 review) ----------
+
+
+async def test_provider_stream_without_terminal_event_is_crash(tmp_path: Path) -> None:
+    """If send_input's stream ends without turn_completed/failed/cancelled,
+    the orchestrator MUST treat it as a crash and schedule a retry — not
+    loop the continuation policy on a session of unknown state."""
+    # Script ends after a single message_delta with no terminal event.
+    truncated = FakeTurnScript(events=[("message_delta", {"text": "partial"})])
+    prov = FakeProvider(default_script=truncated)
+    orch, tracker, _ = _make_orchestrator(
+        tmp_path, issues=[_issue(number=1)], provider=prov
+    )
+    result = await orch.run_once()
+    assert result.dispatched == ["acme/proj#1"]
+    assert "acme/proj#1" in result.retries_scheduled
+    assert tracker.states["acme/proj#1"].claimed_by is None
 
 
 async def test_restore_failure_resume_same_session_schedules_retry(tmp_path: Path) -> None:
