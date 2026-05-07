@@ -22,6 +22,7 @@ the SDK delivers them.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -115,6 +116,11 @@ class ClaudeCodeProvider:
             / f"{issue.owner}_{issue.repo}_{issue.number}"
             / "1",
             started_at=_now(),
+            # Pin the session-store path on the record so restore() — which
+            # the orchestrator may call after a process restart with a
+            # record loaded off disk — knows where to read/write without
+            # a config arg.
+            session_store=Path(config.session_store),
         )
         self._sessions[session_id] = _ProviderSessionState(
             client=client,
@@ -124,6 +130,10 @@ class ClaudeCodeProvider:
             saw_first_event=False,
             mode="start_session",
         )
+        # Write the initial record per docs/claude-provider.md §5.1 phase 2:
+        # provider_session_id is None at this point; the patch lands after
+        # the first send_input captures the Claude-native id.
+        _persist_session(record)
         return record
 
     async def restore(self, session_record: SessionRecord) -> SessionRecord:
@@ -158,8 +168,9 @@ class ClaudeCodeProvider:
         session_record.last_event_at = _now()
         if prior_pid and prior_pid not in session_record.previous_provider_session_ids:
             session_record.previous_provider_session_ids.append(prior_pid)
-        # Reset turn_count so the next send_input emits session_restored.
-        session_record.turn_count = 0
+        # turn_count is left to the orchestrator's max-turns accounting;
+        # session_started/restored synthesis is gated on the per-attempt
+        # `_ProviderSessionState.saw_first_event` flag, not on turn_count.
         self._sessions[session_record.session_id] = _ProviderSessionState(
             client=client,
             options=options,
@@ -168,6 +179,10 @@ class ClaudeCodeProvider:
             saw_first_event=False,
             mode="restore",
         )
+        # Persist the bumped attempt + previous_provider_session_ids
+        # immediately so a subsequent crash before the first send_input
+        # doesn't lose the restore audit trail.
+        _persist_session(session_record)
         return session_record
 
     async def send_input(
@@ -218,6 +233,12 @@ class ClaudeCodeProvider:
                     pid = _extract_session_id(raw) or session.provider_session_id
                     if pid:
                         session.provider_session_id = pid
+                        # Patch the persisted record per docs/claude-provider.md
+                        # §5.1 phase 3: as soon as Claude reveals a session id,
+                        # update <session_store>/<session_id>.json so
+                        # cross-attempt restore can find it.
+                        session.last_event_at = _now()
+                        _persist_session(session)
                     if synthesized is not None:
                         yield _envelope(
                             event=synthesized,
@@ -574,6 +595,59 @@ def _now() -> datetime:
 
 def _default_session_id_factory() -> str:
     return f"sym-{uuid.uuid4().hex[:12]}"
+
+
+def _persist_session(record: SessionRecord) -> None:
+    """Write a redacted snapshot of ``record`` to ``<session_store>/<session_id>.json``.
+
+    Per ``docs/claude-provider.md`` §5.1:
+
+    - Phase 2 (start_session): initial write with ``provider_session_id = null``.
+    - Phase 3 (first send_input): patched in place once Claude reveals the
+      session id.
+    - Phase 4 (every event flush / restore): refreshed with bumped attempt
+      and last_event_at.
+
+    No-op when ``record.session_store`` is None — the provider is happy to
+    run without persistence (used by tests that don't care). Errors writing
+    the file are logged but never raised: a missing session record on disk
+    only matters for cross-attempt restore, and the orchestrator already
+    has one source of truth in ``events.jsonl``.
+    """
+    if record.session_store is None:
+        return
+    try:
+        record.session_store.mkdir(parents=True, exist_ok=True)
+        target = record.session_store / f"{record.session_id}.json"
+        snapshot = {
+            "session_id": record.session_id,
+            "provider": record.provider,
+            "provider_session_id": record.provider_session_id,
+            "issue_identifier": record.issue_identifier,
+            "issue_number": record.issue_number,
+            "workspace_path": str(record.workspace_path),
+            "artifact_dir": str(record.artifact_dir),
+            "transcript_path": (str(record.transcript_path) if record.transcript_path else None),
+            "attempt": record.attempt,
+            "turn_count": record.turn_count,
+            "started_at": record.started_at.isoformat() if record.started_at else None,
+            "last_event_at": (record.last_event_at.isoformat() if record.last_event_at else None),
+            "terminal_state": (record.terminal_state.value if record.terminal_state else None),
+            "previous_provider_session_ids": list(record.previous_provider_session_ids),
+            "session_store": str(record.session_store),
+        }
+        # Atomic-ish write: tmp file + rename so a crashed write doesn't
+        # corrupt the prior good record.
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(json.dumps(snapshot, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(target)
+    except OSError as exc:
+        _LOG.warning(
+            "could not persist session record for %s at %s: %s",
+            record.session_id,
+            record.session_store,
+            exc,
+        )
 
 
 __all__ = ["ClaudeCodeProvider"]
