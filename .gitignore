@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Symphony runtime artifacts
+.symphony/
+
+# Session-local Claude Code state
+.claude/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

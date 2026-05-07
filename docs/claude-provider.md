@@ -145,6 +145,12 @@ Fields the provider sets, sourced from `claude:` block in `WORKFLOW.md`
 The provider MUST NOT pass raw `WORKFLOW.md` YAML through to the SDK. Each
 field is read off a typed `ClaudeConfig` after config validation.
 
+`agent.max_turns` is enforced by Symphony's orchestrator (it counts
+`send_input` calls per attempt and stops calling once the limit is
+reached); it is **not** passed to `ClaudeAgentOptions`. The SDK has no
+notion of a Symphony "turn" — to it, every `client.query()` is just
+another input on the same session.
+
 ## 4. Event Normalization
 
 The provider iterates `receive_response()` (which terminates after the
@@ -332,6 +338,11 @@ Symphony's stance:
   the config validator MUST surface a warning when it is used.
 - **`plan` mode is rejected** in the first implementation — it would block on
   user confirmation and Symphony has no human in the loop.
+- **`default`, `dontAsk`, `auto`** are all accepted by the config validator and
+  passed through unchanged to the SDK. Symphony does not interpret them; their
+  semantics are whatever the Claude Code CLI implements at the targeted SDK
+  version. Future hardening may pin a specific Symphony default per SDK release
+  and reject the others, but for MVP we trust the SDK contract.
 - The provider does **not** register a `can_use_tool` callback in MVP. If we
   need fine-grained control later it goes through that hook (which requires
   streaming mode, which we already use).
