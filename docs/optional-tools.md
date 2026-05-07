@@ -86,6 +86,21 @@ array. The auxiliary fields surface why a call failed:
 - It does not auto-retry transient failures. The SDK retry loop is
   per-turn, not per-tool-call.
 
+### Limitations (current)
+
+- **SDK MCP wrapper is not yet wired end-to-end.** The handler logic
+  (`GitHubGraphQLTool.execute`) is fully unit-tested, and Symphony's
+  `ToolRegistry` puts a `_GitHubGraphQLMcpEntry` into
+  `ClaudeAgentOptions.mcp_servers` when the tool is enabled. The
+  SDK-side adapter that translates an MCP tool-call from the model
+  into `tool.execute(query, variables)` is the remaining piece.
+  Setting `enabled: true` today advertises the tool name to Claude
+  but tool calls will not execute until #36 ships. Track:
+  [#36](https://github.com/jimoosciuc/symphony-cc/issues/36).
+- No live integration test for this tool yet — coverage stops at the
+  unit-tested handler. The end-to-end smoke test against a real
+  Claude session is part of #36.
+
 ## Adding a new tool
 
 1. Create `src/symphony/tools/<name>.py` with a pure-Python handler
