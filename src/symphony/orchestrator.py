@@ -362,7 +362,28 @@ class Orchestrator:
                     )
                     result.retries_scheduled.append(worker.issue.identifier)
                     break
-                if terminal in {"turn_failed", "turn_cancelled"}:
+                if terminal == "turn_failed":
+                    # SDK delivered ResultMessage(is_error=True). Per SPEC §16,
+                    # provider failures default to retryable; only specific
+                    # auth/permission subtypes flip to non-retryable. The
+                    # _run_worker finally block then either schedules a
+                    # retry or calls mark_issue_blocked depending on which
+                    # branch _on_worker_failed routes through. See #30.
+                    retryable, reason = _classify_turn_failed(worker.last_event)
+                    worker.error = reason
+                    self._on_worker_failed(worker.issue, reason, retryable=retryable)
+                    if retryable:
+                        result.retries_scheduled.append(worker.issue.identifier)
+                    break
+                if terminal == "turn_cancelled":
+                    # Provider-emitted cancel without timeout context (e.g.
+                    # operator interrupt that already fired before we got
+                    # back to the loop). Treat as retryable so the issue
+                    # can be re-dispatched on the next tick.
+                    self._on_worker_failed(
+                        worker.issue, worker.error or "turn_cancelled", retryable=True
+                    )
+                    result.retries_scheduled.append(worker.issue.identifier)
                     break
                 if terminal == "no_terminal":
                     # The provider's send_input stream ended without
@@ -663,3 +684,52 @@ def _session_snapshot(session: SessionRecord) -> dict[str, Any]:
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# -- turn_failed classification (#30) ---------------------------------------
+
+
+# Subtype values that mean "do not retry — operator must intervene". Matches
+# SPEC §9.3 ``blocked_label`` semantics. Conservative list: only auth/
+# permission/structural-config errors. Everything else (transient API errors,
+# rate limits, timeouts, infrastructure blips) defaults to retryable per
+# SPEC §16.
+_NON_RETRYABLE_TURN_FAILED_SUBTYPES: frozenset[str] = frozenset(
+    {
+        "auth_failed",
+        "authentication_failed",
+        "unauthorized",
+        "permission_denied",
+        "forbidden",
+        "invalid_workflow",
+        "invalid_config",
+        "unrecoverable",
+        "quota_exceeded",
+        "model_unavailable",  # operator must pick a different model
+    }
+)
+
+
+def _classify_turn_failed(event: AgentEvent | None) -> tuple[bool, str]:
+    """Decide whether a ``turn_failed`` event is retryable, with reason text.
+
+    Default: retryable. Only the subtypes in
+    :data:`_NON_RETRYABLE_TURN_FAILED_SUBTYPES` (or substring matches for the
+    most common auth/permission keywords) flip to non-retryable. The reason
+    string lands in ``terminal.json`` and the claim-comment trail.
+
+    Defensive on a None / wrong-shape event so a missing ``last_event`` can
+    never crash the worker — falls back to retryable with a generic reason.
+    """
+    if event is None or event.event != "turn_failed":
+        return True, "turn_failed"
+    payload = event.payload or {}
+    subtype = (payload.get("subtype") or "").lower().strip()
+    error = payload.get("error") or payload.get("result") or ""
+    if subtype in _NON_RETRYABLE_TURN_FAILED_SUBTYPES:
+        return False, f"non-retryable turn_failed: {subtype}"
+    # Substring fallback for SDK-side strings we haven't seen yet.
+    for marker in ("auth_failed", "permission_denied", "forbidden", "unauthorized"):
+        if marker in subtype:
+            return False, f"non-retryable turn_failed: {subtype}"
+    return True, str(error)[:200] if error else f"turn_failed: {subtype or 'unknown'}"

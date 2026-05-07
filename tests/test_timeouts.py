@@ -29,6 +29,7 @@ from symphony.config import (
     WorkflowConfig,
     WorkspaceConfig,
 )
+from symphony.events import AgentEvent
 from symphony.github.tracker import FakeGitHubTracker
 from symphony.models import Issue
 from symphony.orchestrator import Orchestrator, WorkerState
@@ -377,3 +378,126 @@ async def test_secrets_in_event_payload_are_redacted_in_terminal_artifacts(
     blob = events_file.read_text()
     assert secret not in blob
     assert "<redacted>" in blob
+
+
+# -- turn_failed classification (#30) ----------------------------------------
+
+
+async def test_turn_failed_default_is_retryable_and_releases_claim(tmp_path: Path) -> None:
+    """SPEC §16 + #30: a turn_failed event with no auth/permission subtype
+    is retryable. The orchestrator should schedule a retry and release
+    the claim — NOT mark blocked.
+
+    Concrete reproduction: Claude API 503 came back as `subtype="success"`
+    (the SDK uses subtype to indicate stop reason, not retryability), so a
+    plain unrecognized-subtype must default to retryable.
+    """
+    script = FakeTurnScript(
+        events=[
+            ("message_delta", {"text": "API Error 503 ..."}),
+            ("turn_failed", {"subtype": "success", "error": "transient API blip"}),
+        ],
+    )
+    prov = FakeProvider(default_script=script)
+    orch, tracker = _make(tmp_path, provider=prov)
+    result = await orch.run_once()
+
+    assert result.dispatched == ["acme/proj#1"]
+    assert "acme/proj#1" in result.retries_scheduled
+    rs = orch.retry_states["acme/proj#1"]
+    assert rs.next_attempt_at is not None  # retry scheduled
+
+    state = tracker.states["acme/proj#1"]
+    assert state.blocked is False
+    assert state.claimed_by is None  # released, not blocked
+
+    record = _read_terminal(tmp_path)
+    assert record["terminal_state"] == "failed"
+    assert record["retryable"] is True
+    assert record["blocked"] is False
+
+
+async def test_turn_failed_with_non_retryable_subtype_marks_blocked(
+    tmp_path: Path,
+) -> None:
+    """Auth/permission/quota-style subtypes must flip to non-retryable so
+    the issue gets `symphony-blocked` and a future poll won't silently
+    re-dispatch."""
+    script = FakeTurnScript(
+        events=[
+            ("turn_failed", {"subtype": "auth_failed", "error": "401 token expired"}),
+        ],
+    )
+    prov = FakeProvider(default_script=script)
+    orch, tracker = _make(tmp_path, provider=prov)
+    result = await orch.run_once()
+
+    assert "acme/proj#1" not in result.retries_scheduled
+    rs = orch.retry_states["acme/proj#1"]
+    assert rs.next_attempt_at is None  # no retry
+
+    state = tracker.states["acme/proj#1"]
+    assert state.blocked is True  # marked blocked
+    assert state.claimed_by is None
+
+    record = _read_terminal(tmp_path)
+    assert record["retryable"] is False
+    assert record["blocked"] is True
+
+
+async def test_turn_failed_substring_match_for_permission_denied(
+    tmp_path: Path,
+) -> None:
+    """Subtype the SDK might send as `claude_permission_denied` or
+    `tool_permission_denied` should still flip non-retryable via the
+    substring fallback."""
+    script = FakeTurnScript(
+        events=[
+            ("turn_failed", {"subtype": "tool_permission_denied", "error": "."}),
+        ],
+    )
+    prov = FakeProvider(default_script=script)
+    orch, tracker = _make(tmp_path, provider=prov)
+    await orch.run_once()
+    assert tracker.states["acme/proj#1"].blocked is True
+
+
+async def test_provider_emitted_turn_cancelled_is_retryable(tmp_path: Path) -> None:
+    """A provider-emitted turn_cancelled (no orchestrator timeout context)
+    should also schedule a retry so the issue can be picked up next tick."""
+    script = FakeTurnScript(
+        events=[
+            ("turn_cancelled", {"subtype": "interrupt", "source": "provider"}),
+        ],
+    )
+    prov = FakeProvider(default_script=script)
+    orch, tracker = _make(tmp_path, provider=prov)
+    result = await orch.run_once()
+
+    assert "acme/proj#1" in result.retries_scheduled
+    state = tracker.states["acme/proj#1"]
+    assert state.blocked is False
+    assert state.claimed_by is None
+
+
+def test_classify_turn_failed_helper_is_defensive() -> None:
+    """`_classify_turn_failed(None)` and weird-shape events must return a
+    safe default rather than raise — the worker has to terminate cleanly
+    even if the event log got malformed."""
+    from symphony.orchestrator import _classify_turn_failed
+
+    retryable, reason = _classify_turn_failed(None)
+    assert retryable is True
+    assert "turn_failed" in reason
+
+    # Wrong event name → still safe.
+    other = AgentEvent(
+        event="message_delta",
+        timestamp=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        session_id="s",
+        provider="fake",
+        issue_identifier="x",
+        attempt=1,
+    )
+    retryable, _ = _classify_turn_failed(other)
+    assert retryable is True
