@@ -157,8 +157,49 @@ Fill in this template and post as a comment on
 
 - Multi-issue concurrency (`agent.max_concurrency > 1`). Works in
   unit tests; hasn't been exercised end-to-end.
-- Restart recovery (kill the daemon mid-flight, restart, observe
-  resumed session). The `_persist_session` plumbing is in place but
-  no recovery loader has been wired into the orchestrator yet —
-  tracked as a follow-up.
 - `github_graphql` tool exposure to Claude (M4 #13).
+
+## Restart recovery
+
+When the daemon is killed mid-flight (Ctrl-C, crash, OOM), Symphony
+preserves enough state to reconcile on the next `symphony run`:
+
+- The workspace under `workspace.root/<owner>_<repo>_<n>/` is reused.
+- The session record at `claude.session_store/<session_id>.json` is
+  inspected (records with `terminal_state` already set are skipped).
+- The per-attempt artifact dir under `claude.artifact_store/.../<n>/`
+  records what happened.
+
+On startup, before the first poll tick, the orchestrator runs a
+`recover()` pass that — for each in-flight session record — fetches
+the fresh issue state and routes per `claude.retry_resume_policy`:
+
+- **`resume_same_session`** (default): calls `provider.restore()` and
+  drives the resumed worker to a terminal state. If `restore()` fails
+  (no `provider_session_id`, SDK error), the issue is marked
+  `symphony-blocked`.
+- **`new_session_with_summary`**: releases the prior claim and stashes
+  the prior `provider_session_id` chain so the next dispatch tick
+  produces a fresh session whose continuation prompt can reference the
+  prior conversation.
+- **`fail_closed`**: marks the issue blocked unconditionally — operator
+  must clear `symphony-blocked` before the daemon retries.
+
+Issues that became ineligible while the daemon was down (closed, hit an
+exclude label, picked up `symphony-blocked` manually) are released
+without a resume attempt. Issues the tracker no longer knows about
+(deleted, transferred) are discarded.
+
+Every recovery decision is written to
+`claude.artifact_store/<owner>_<repo>_<n>/<attempt>/recovery.json` and
+echoed to the CLI's `--once` output:
+
+```text
+symphony recovery decisions:
+  resumed acme/proj#5 (session=sym-abc123): restored via provider.restore()
+  released acme/proj#7: issue not eligible: issue is 'closed'
+  blocked acme/proj#9: provider restore failed: ...
+```
+
+The on-disk session record is stamped terminal after each decision so a
+second `recover()` call is a no-op.

@@ -19,11 +19,13 @@ method advances the daemon by one tick. Tests drive it tick-by-tick;
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from symphony.artifacts import ArtifactWriter
@@ -38,6 +40,16 @@ from symphony.provider.base import (
     ProviderRetryableError,
     SessionRecord,
     Terminal,
+)
+from symphony.recovery import (
+    ACTION_BLOCKED,
+    ACTION_DISCARDED,
+    ACTION_RELEASED,
+    ACTION_RESUMED,
+    ACTION_SKIPPED,
+    RecoveryDecision,
+    discover_persisted_records,
+    issue_is_actionable,
 )
 from symphony.retry import RetryState, next_backoff_ms
 from symphony.workspace import WorkspaceManager
@@ -118,6 +130,17 @@ class Orchestrator:
         # Mutable state.
         self.active: dict[str, WorkerState] = {}
         self.retry_states: dict[str, RetryState] = {}
+        # Recovery handoff: when restart recovery decides to drop a session
+        # and let normal dispatch start a fresh one (the
+        # ``new_session_with_summary`` policy), it stashes the prior
+        # provider session ids here. ``_start_worker`` consumes the entry
+        # on next claim so the new ``SessionRecord.previous_provider_session_ids``
+        # carries the chain — the continuation prompt can then reference
+        # the prior conversation.
+        self._restart_carryover: dict[str, list[str]] = {}
+        # Decisions made by the most recent ``recover()`` call. Surfaced
+        # for tests + the CLI's startup summary.
+        self.recovery_decisions: list[RecoveryDecision] = []
 
     # -- Public API ---------------------------------------------------------
 
@@ -139,6 +162,327 @@ class Orchestrator:
         while True:
             await self.run_once()
             await asyncio.sleep(interval)
+
+    # -- Restart recovery (#31) ---------------------------------------------
+
+    async def recover(self) -> list[RecoveryDecision]:
+        """Reconcile persisted session records with tracker state at startup.
+
+        Idempotent + safe to call before ``run_once``. Walks every
+        in-flight :class:`SessionRecord` under ``claude.session_store``
+        and, per ``claude.retry_resume_policy``, either resumes the
+        worker, releases the claim for fresh dispatch, marks the issue
+        blocked, or discards the orphan.
+
+        See :mod:`symphony.recovery` for the detailed flow. Returned
+        list is also stashed on ``self.recovery_decisions`` for the CLI's
+        startup summary.
+        """
+        decisions: list[RecoveryDecision] = []
+        store = self.config.claude.session_store
+        records = discover_persisted_records(store)
+        if not records:
+            self.recovery_decisions = decisions
+            return decisions
+
+        policy = self.config.claude.retry_resume_policy
+        _LOG.info(
+            "recovery: found %d in-flight session record(s) under %s (policy=%s)",
+            len(records),
+            store,
+            policy,
+        )
+
+        # Resolve fresh issue state in one batch where possible.
+        numbers = sorted({rec.issue_number for _, rec in records})
+        try:
+            fresh_issues = {
+                i.identifier: i for i in self.tracker.fetch_issues_by_numbers(numbers)
+            }
+        except TrackerError as exc:
+            _LOG.warning(
+                "recovery: tracker fetch failed (%s); treating all records as skipped",
+                exc,
+            )
+            for path, record in records:
+                decisions.append(
+                    self._record_recovery_decision(
+                        record_path=path,
+                        record=record,
+                        action=ACTION_SKIPPED,
+                        reason=f"tracker fetch failed: {exc}",
+                        policy=policy,
+                    )
+                )
+            self.recovery_decisions = decisions
+            return decisions
+
+        for path, record in records:
+            issue = fresh_issues.get(record.issue_identifier)
+            decision = await self._recover_one(
+                path=path,
+                record=record,
+                issue=issue,
+                policy=policy,
+            )
+            decisions.append(decision)
+
+        self.recovery_decisions = decisions
+        return decisions
+
+    async def _recover_one(
+        self,
+        *,
+        path: Path,
+        record: SessionRecord,
+        issue: Issue | None,
+        policy: str,
+    ) -> RecoveryDecision:
+        # Issue vanished entirely → release any stale claim by issue_number is
+        # impossible without an Issue object. Just discard the record so we
+        # do not loop on it forever.
+        if issue is None:
+            return self._record_recovery_decision(
+                record_path=path,
+                record=record,
+                action=ACTION_DISCARDED,
+                reason="issue not retrievable from tracker",
+                policy=policy,
+            )
+
+        actionable, why_not = issue_is_actionable(
+            issue,
+            exclude_labels=self.config.tracker.exclude_labels,
+            blocked_label=self.config.github.blocked_label,
+        )
+        if not actionable:
+            self._best_effort_release(issue, "restart-recovery-ineligible")
+            return self._record_recovery_decision(
+                record_path=path,
+                record=record,
+                action=ACTION_RELEASED,
+                reason=f"issue not eligible: {why_not}",
+                policy=policy,
+            )
+
+        if policy == "fail_closed":
+            self._best_effort_block(issue, "restart-recovery-fail-closed")
+            return self._record_recovery_decision(
+                record_path=path,
+                record=record,
+                action=ACTION_BLOCKED,
+                reason="retry_resume_policy=fail_closed",
+                policy=policy,
+            )
+
+        if policy == "new_session_with_summary":
+            # Release claim so next dispatch tick re-claims cleanly with a
+            # fresh session, and stash the prior provider session id chain
+            # so the new session's continuation prompt can reference it.
+            chain = list(record.previous_provider_session_ids)
+            if record.provider_session_id:
+                chain.append(record.provider_session_id)
+            if chain:
+                self._restart_carryover[issue.identifier] = chain
+            self._best_effort_release(issue, "restart-recovery-new-session")
+            return self._record_recovery_decision(
+                record_path=path,
+                record=record,
+                action=ACTION_RELEASED,
+                reason=(
+                    "retry_resume_policy=new_session_with_summary;"
+                    " fresh dispatch will inherit summary chain"
+                ),
+                policy=policy,
+            )
+
+        # Default policy: resume_same_session.
+        if not record.provider_session_id:
+            # Nothing to resume against. Mark blocked rather than silently
+            # discarding — operator should know the daemon could not
+            # honor the configured policy.
+            self._best_effort_block(
+                issue,
+                "restart-recovery-no-provider-session-id",
+            )
+            return self._record_recovery_decision(
+                record_path=path,
+                record=record,
+                action=ACTION_BLOCKED,
+                reason="resume_same_session requires provider_session_id; record has none",
+                policy=policy,
+            )
+        try:
+            session = await self.provider.restore(record)
+        except ProviderRestoreError as exc:
+            _LOG.warning(
+                "recovery: restore failed for %s (%s); marking blocked",
+                issue.identifier,
+                exc,
+            )
+            self._best_effort_block(issue, f"restart-recovery-restore-failed: {exc}")
+            return self._record_recovery_decision(
+                record_path=path,
+                record=record,
+                action=ACTION_BLOCKED,
+                reason=f"provider restore failed: {exc}",
+                policy=policy,
+            )
+
+        # Restore succeeded. Build a worker, drop into self.active so the
+        # next run_once() doesn't double-dispatch, then drive it inline so
+        # recovery is observable from the same call.
+        workspace = self.workspaces.prepare(issue)
+        self.workspaces.run_hook("before_run", workspace)
+
+        artifacts = ArtifactWriter.for_attempt(
+            self.config.claude.artifact_store,
+            owner=issue.owner,
+            repo=issue.repo,
+            issue_number=issue.number,
+            attempt=session.attempt,
+            redact_keys=self.config.logging.redact_keys,
+        )
+        artifacts.write_json(
+            "request.json",
+            {
+                "issue_identifier": issue.identifier,
+                "workspace_path": str(workspace.path),
+                "attempt": session.attempt,
+                "model": self.config.claude.model,
+                "permission_mode": self.config.claude.permission_mode,
+                "run_id": self.run_id,
+                "recovered_from_session": record.session_id,
+            },
+        )
+        session.artifact_dir = artifacts.root
+        artifacts.write_json("session.json", _session_snapshot(session))
+
+        worker = WorkerState(
+            issue=issue,
+            workspace=workspace,
+            session=session,
+            artifacts=artifacts,
+        )
+        self.active[issue.identifier] = worker
+        decision = self._record_recovery_decision(
+            record_path=path,
+            record=record,
+            action=ACTION_RESUMED,
+            reason="restored via provider.restore()",
+            policy=policy,
+            restored_session_id=session.session_id,
+            artifacts=artifacts,
+        )
+        # Drive the resumed worker inline. Pass a synthetic claim and a
+        # local TickResult — recovery's _run_worker call belongs to the
+        # recovery cycle, not to a dispatch tick, so its retries land on
+        # ``self.retry_states`` regardless of the throwaway result object.
+        await self._run_worker(worker, TickResult(), ClaimResult(ok=True))
+        # Stamp the on-disk record with the resumed worker's final state
+        # so a subsequent recover() does not re-process it. Real-provider
+        # ``_persist_session`` would already have updated the file
+        # mid-run; the fake provider doesn't, and operators may also have
+        # session stores written by older daemons missing the
+        # ``terminal_state`` patch — defensive stamp covers both.
+        try:
+            stamped = worker.terminal_state or Terminal.COMPLETED
+            _stamp_record_terminal(path, record, stamped)
+        except OSError as exc:
+            _LOG.warning(
+                "recovery: post-resume stamp failed for %s: %s",
+                path,
+                exc,
+            )
+        return decision
+
+    def _record_recovery_decision(
+        self,
+        *,
+        record_path: Path,
+        record: SessionRecord,
+        action: str,
+        reason: str,
+        policy: str,
+        restored_session_id: str | None = None,
+        artifacts: ArtifactWriter | None = None,
+    ) -> RecoveryDecision:
+        """Build the decision object, persist a recovery.json artifact, and
+        update the on-disk record so subsequent recover() calls do not
+        re-process it.
+        """
+        decision = RecoveryDecision(
+            record_path=record_path,
+            issue_identifier=record.issue_identifier,
+            issue_number=record.issue_number,
+            action=action,
+            reason=reason,
+            policy=policy,
+            restored_session_id=restored_session_id,
+        )
+
+        # Pick an artifact writer:
+        # - "resumed" path supplies its own (already opened the new attempt dir);
+        # - other actions write under the record's last-known attempt dir so
+        #   operators find the trail next to the prior session.json.
+        if artifacts is None:
+            artifacts = ArtifactWriter(
+                record.artifact_dir,
+                redact_keys=self.config.logging.redact_keys,
+            )
+        try:
+            artifacts.write_json("recovery.json", decision.to_json())
+        except OSError as exc:
+            _LOG.warning(
+                "recovery: could not write recovery.json under %s: %s",
+                artifacts.root,
+                exc,
+            )
+
+        # For terminal actions (released / blocked / discarded / skipped),
+        # stamp the on-disk record so subsequent restarts skip it.
+        if action != ACTION_RESUMED:
+            stamped = Terminal.CANCELLED if action == ACTION_RELEASED else Terminal.FAILED
+            if action == ACTION_DISCARDED:
+                stamped = Terminal.CANCELLED
+            try:
+                _stamp_record_terminal(record_path, record, stamped)
+            except OSError as exc:
+                _LOG.warning(
+                    "recovery: could not stamp record %s as %s: %s",
+                    record_path,
+                    stamped,
+                    exc,
+                )
+
+        _LOG.info(
+            "recovery: %s %s (%s) — %s",
+            action,
+            record.issue_identifier,
+            policy,
+            reason,
+        )
+        return decision
+
+    def _best_effort_release(self, issue: Issue, reason: str) -> None:
+        try:
+            self.tracker.release_issue(issue, reason)
+        except TrackerError as exc:
+            _LOG.warning(
+                "recovery: release_issue failed for %s: %s",
+                issue.identifier,
+                exc,
+            )
+
+    def _best_effort_block(self, issue: Issue, reason: str) -> None:
+        try:
+            self.tracker.mark_issue_blocked(issue, reason)
+        except TrackerError as exc:
+            _LOG.warning(
+                "recovery: mark_issue_blocked failed for %s: %s",
+                issue.identifier,
+                exc,
+            )
 
     # -- Reconciliation -----------------------------------------------------
 
@@ -331,6 +675,15 @@ class Orchestrator:
         else:
             session = await self.provider.start_session(issue, workspace.path, self.config.claude)
             session.attempt = attempt
+            # Restart-recovery handoff: when the prior daemon ran under
+            # ``new_session_with_summary`` and its in-flight session was
+            # released for fresh dispatch, ``recover()`` stashed the prior
+            # provider session id chain. Drain it onto this fresh session
+            # so the next continuation prompt can reference the prior
+            # conversation.
+            carry = self._restart_carryover.pop(issue.identifier, None)
+            if carry:
+                session.previous_provider_session_ids = list(carry)
         session.artifact_dir = artifacts.root
 
         artifacts.write_json("session.json", _session_snapshot(session))
@@ -684,6 +1037,39 @@ def _session_snapshot(session: SessionRecord) -> dict[str, Any]:
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _stamp_record_terminal(path: Path, record: SessionRecord, terminal: Terminal) -> None:
+    """Patch the persisted session record's ``terminal_state`` in place.
+
+    Used by ``Orchestrator.recover()`` so that an issue once decided
+    (released / blocked / discarded) is not re-processed on the next
+    daemon restart. Falls back to writing the full record snapshot if
+    the file is missing — recovery has already loaded the in-memory
+    copy, so we have everything we need.
+
+    Atomic-ish: writes to ``<path>.tmp`` then renames, mirroring
+    :func:`symphony.provider.claude_code._persist_session`.
+    """
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        existing = {
+            "session_id": record.session_id,
+            "provider": record.provider,
+            "issue_identifier": record.issue_identifier,
+            "issue_number": record.issue_number,
+            "workspace_path": str(record.workspace_path),
+            "artifact_dir": str(record.artifact_dir),
+            "attempt": record.attempt,
+            "started_at": record.started_at.isoformat() if record.started_at else None,
+            "previous_provider_session_ids": list(record.previous_provider_session_ids),
+            "session_store": str(record.session_store) if record.session_store else None,
+        }
+    existing["terminal_state"] = terminal.value
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(existing, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
 
 
 # -- turn_failed classification (#30) ---------------------------------------

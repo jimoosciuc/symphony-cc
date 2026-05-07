@@ -140,10 +140,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     try:
         if args.once:
-            result = asyncio.run(orchestrator.run_once())
-            _print_tick_summary(result)
+            result = asyncio.run(_run_once_with_recovery(orchestrator))
+            _print_tick_summary(result, recovery=orchestrator.recovery_decisions)
         else:
-            asyncio.run(orchestrator.run_forever())
+            asyncio.run(_run_forever_with_recovery(orchestrator))
     except KeyboardInterrupt:
         log.info("received interrupt, exiting")
         return 130  # standard SIGINT exit code
@@ -163,11 +163,20 @@ def _setup_logging(level_name: str) -> None:
     )
 
 
-def _print_tick_summary(result: object) -> None:
+def _print_tick_summary(result: object, *, recovery: object = None) -> None:
     """Pretty-print a TickResult to stdout for --once invocations.
 
     Imported lazily so the type isn't required for the help message.
     """
+    if recovery:
+        print("symphony recovery decisions:")
+        for decision in recovery:  # type: ignore[union-attr]
+            action = getattr(decision, "action", "?")
+            ident = getattr(decision, "issue_identifier", "?")
+            reason = getattr(decision, "reason", "")
+            restored = getattr(decision, "restored_session_id", None)
+            extra = f" (session={restored})" if restored else ""
+            print(f"  {action} {ident}{extra}: {reason}")
     print("symphony tick result:")
     for field_name in (
         "dispatched",
@@ -178,6 +187,18 @@ def _print_tick_summary(result: object) -> None:
     ):
         items = getattr(result, field_name, [])
         print(f"  {field_name}: {list(items)}")
+
+
+async def _run_once_with_recovery(orchestrator: object) -> object:
+    """Recover persisted records, then run one poll tick."""
+    await orchestrator.recover()  # type: ignore[union-attr]
+    return await orchestrator.run_once()  # type: ignore[union-attr]
+
+
+async def _run_forever_with_recovery(orchestrator: object) -> None:
+    """Recover persisted records once, then enter the long-running loop."""
+    await orchestrator.recover()  # type: ignore[union-attr]
+    await orchestrator.run_forever()  # type: ignore[union-attr]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
