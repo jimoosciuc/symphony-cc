@@ -495,7 +495,7 @@ The orchestrator MUST NOT depend on raw Claude Code SDK event shapes.
 Provider interface:
 
 ```text
-start_session(issue, workspace_path, initial_prompt, config) -> SessionRecord
+start_session(issue, workspace_path, config) -> SessionRecord
 send_input(session, message) -> stream[AgentEvent]
 interrupt(session) -> AgentEvent
 cancel(session) -> AgentEvent
@@ -503,14 +503,26 @@ close(session) -> None
 restore(session_record) -> SessionRecord
 ```
 
-`start_session` MUST create or resume an issue-scoped provider session.
+`start_session` MUST create an issue-scoped provider session and return a
+`SessionRecord`. It MUST NOT take the first prompt and MUST NOT stream
+agent events. The orchestrator drives the first turn — and every
+continuation turn — through `send_input`.
+
+`restore` MUST use persisted session metadata when provider support exists
+to resume the previous provider session. Like `start_session`, it returns a
+`SessionRecord` and does not stream events; the next `send_input` runs the
+first turn of the resumed session.
 
 `send_input` MUST support continuation input without starting an unrelated
-conversation.
+conversation. The first `send_input` after `start_session` MUST emit a
+`session_started` event before any other event of that turn; the first
+`send_input` after `restore` MUST emit `session_restored`.
 
-`restore` MUST use persisted session metadata when provider support exists. If
-restore cannot be completed, the provider MUST emit a normalized failure and
-follow `retry_resume_policy`.
+If `restore` cannot complete (provider startup fails before any turn), the
+provider MUST raise a typed restore-startup failure that the orchestrator can
+catch and route to `retry_resume_policy`. Failures observed during a turn
+(after `send_input` is called) MUST be reported as a normalized terminal
+event on that turn's stream.
 
 Normalized event names:
 
