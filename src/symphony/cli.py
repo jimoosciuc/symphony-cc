@@ -18,12 +18,24 @@ from symphony import __version__
 class NotYetImplementedError(SystemExit):
     """Raised when a CLI subcommand has no runtime wired up yet.
 
-    Inherits ``SystemExit`` so argparse callers exit with a non-zero status
-    instead of a Python traceback. The exit code is ``2`` to distinguish from
-    argparse's own ``2`` (usage errors, which always print a usage line first).
+    Inherits :class:`SystemExit` so the CLI exits cleanly without a Python
+    traceback. When ``SystemExit.code`` is a non-int, the interpreter prints
+    ``str(code)`` to stderr and exits with status ``1``; that is the behavior
+    we want and rely on. The constant :attr:`EXIT_CODE` documents this so it
+    is easy to find from grep, and is asserted by the CLI tests.
+
+    Note: status ``1`` is intentionally distinct from argparse's ``2``, which
+    argparse uses for usage errors (and which always prints a usage line
+    first). A ``not yet implemented`` failure is a runtime gap, not a usage
+    bug, so it gets the generic-failure code.
     """
 
+    EXIT_CODE = 1
+
     def __init__(self, message: str) -> None:
+        # SystemExit prints str(code) to stderr and exits with status 1
+        # whenever code is not an int. Keeping the message-as-code form
+        # gives us EXIT_CODE == 1 plus a human-readable stderr line for free.
         super().__init__(f"symphony: not yet implemented: {message}")
 
 
