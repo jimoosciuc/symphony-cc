@@ -276,6 +276,158 @@ __all__ = [
     "InvalidVariablesError",
     "MultipleOperationsError",
     "TOOL_NAME",
+    "build_sdk_mcp_server",
+    "build_sdk_tool",
+    "tool_handler",
     "validate_query",
     "validate_variables",
 ]
+
+
+# -- SDK MCP shim (#36) ------------------------------------------------------
+#
+# These helpers wrap the pure-Python ``GitHubGraphQLTool`` into the
+# ``claude_agent_sdk``'s in-process MCP server contract. The SDK invokes
+# ``handler({"query": ..., "variables": ...})`` with whatever the model
+# sent; the wrapper validates, dispatches via ``tool.execute``, and
+# returns the MCP-standard ``{"content": [{"type": "text", "text": ...}]}``
+# shape with the JSON-encoded :class:`GraphQLToolResult` envelope as the
+# text body.
+#
+# Validation failures and transport failures both come back as
+# ``ok=false`` envelopes — the wrapper never raises into the SDK loop,
+# satisfying SPEC §18's fail-soft requirement.
+#
+# Lazy SDK import (``_import_sdk``) keeps the unit tests that don't need
+# the SDK from breaking when it's missing — same pattern as
+# ``ClaudeCodeProvider``.
+
+
+# JSON Schema for the ``github_graphql`` tool. ``query`` is required;
+# ``variables`` is an optional JSON object. The schema is what Claude
+# sees, so the descriptions matter — they're how the model decides
+# whether to call the tool.
+TOOL_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "A GitHub GraphQL document. Exactly ONE operation per call "
+                "(query, mutation, or subscription). Use named operations when "
+                "the document contains fragments."
+            ),
+        },
+        "variables": {
+            "type": "object",
+            "description": (
+                "Optional GraphQL variables as a JSON object. Omit for "
+                "documents without $variables."
+            ),
+        },
+    },
+    "required": ["query"],
+    "additionalProperties": False,
+}
+
+
+def _import_sdk() -> Any:
+    """Import :mod:`claude_agent_sdk` lazily.
+
+    Mirrors ``provider.claude_code._import_sdk`` so building an SDK
+    server doesn't fail at module-import time when the SDK is absent.
+    """
+    try:
+        import claude_agent_sdk  # type: ignore
+    except ImportError as exc:  # pragma: no cover - exercised only when SDK missing
+        raise RuntimeError(
+            "claude-agent-sdk is not installed; cannot build the github_graphql MCP server"
+        ) from exc
+    return claude_agent_sdk
+
+
+def tool_handler(tool: GitHubGraphQLTool) -> Any:
+    """Build the async handler the SDK calls when Claude invokes the tool.
+
+    Returned function signature is ``async def handler(args: dict) -> dict``,
+    matching ``claude_agent_sdk.tool``'s contract. ``args`` is whatever
+    the model sent; the wrapper:
+
+    1. Pulls ``query`` / ``variables`` (variables defaults to None).
+    2. Calls :meth:`GitHubGraphQLTool.execute`.
+    3. Catches :class:`GraphQLToolError` from validation and converts it
+       to an ``ok=false`` envelope so the SDK loop is never raised into.
+    4. Catches any unexpected exception and converts it to
+       ``ok=false, transport_error=...`` so a regression in our code or
+       the GitHubClient never stalls a Claude session.
+    5. Wraps the envelope in the MCP ``{"content": [{"type": "text",
+       "text": ...}]}`` shape, JSON-encoding the envelope as the text
+       body.
+
+    The handler is exposed at module level (separate from
+    :func:`build_sdk_tool`) so contract tests can drive it without
+    touching the SDK.
+    """
+    import json as _json  # local: keep top-level imports at file head
+
+    async def handler(args: dict[str, Any]) -> dict[str, Any]:
+        query = args.get("query") if isinstance(args, dict) else None
+        variables = args.get("variables") if isinstance(args, dict) else None
+        try:
+            result = tool.execute(query, variables)
+        except GraphQLToolError as exc:
+            result = GraphQLToolResult(ok=False, validation_error=str(exc))
+        except Exception as exc:  # noqa: BLE001 - SDK-loop fail-soft
+            _LOG.exception("github_graphql: unexpected handler failure")
+            result = GraphQLToolResult(
+                ok=False,
+                transport_error=f"unexpected handler failure: {type(exc).__name__}: {exc}",
+            )
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": _json.dumps(result.to_json(), sort_keys=True),
+                }
+            ]
+        }
+
+    return handler
+
+
+def build_sdk_tool(tool: GitHubGraphQLTool) -> Any:
+    """Build the SDK ``SdkMcpTool`` instance for ``github_graphql``.
+
+    Returned object is what ``create_sdk_mcp_server`` expects in its
+    ``tools=[...]`` list. Decoupled from :func:`build_sdk_mcp_server`
+    so a future tool registry could batch multiple tools into one
+    server (not used today).
+    """
+    sdk = _import_sdk()
+    handler = tool_handler(tool)
+    decorated = sdk.tool(
+        TOOL_NAME,
+        "Run one GitHub GraphQL operation under Symphony's configured token. "
+        "Returns a structured envelope with `ok`, `data`, `errors`, and "
+        "diagnostic fields. Exactly one operation per call.",
+        TOOL_INPUT_SCHEMA,
+    )(handler)
+    return decorated
+
+
+def build_sdk_mcp_server(tool: GitHubGraphQLTool) -> Any:
+    """Build the SDK ``McpSdkServerConfig`` for the ``github_graphql`` tool.
+
+    The returned config is the value the provider drops into
+    ``ClaudeAgentOptions.mcp_servers["github_graphql"]``. Production
+    code path: ``ToolRegistry.register_github_graphql`` calls this and
+    stores the result; ``ClaudeCodeProvider._build_options`` passes
+    the dict straight through to the SDK.
+    """
+    sdk = _import_sdk()
+    sdk_tool = build_sdk_tool(tool)
+    return sdk.create_sdk_mcp_server(
+        name=TOOL_NAME,
+        version="1.0.0",
+        tools=[sdk_tool],
+    )
