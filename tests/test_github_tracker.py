@@ -25,6 +25,7 @@ from symphony.github import (
     GitHubTracker,
     GitHubTransportError,
     TrackerError,
+    TrackerMalformedResponse,
     TrackerMissingToken,
     TrackerNotFound,
     TrackerPermissionDenied,
@@ -503,6 +504,23 @@ def test_tracker_rate_limited_preserves_retry_after() -> None:
     with pytest.raises(TrackerRateLimited) as excinfo:
         tracker.fetch_candidate_issues()
     assert excinfo.value.retry_after == 45.0
+
+
+def test_tracker_malformed_response_is_typed() -> None:
+    """SPEC §9.4 explicitly lists malformed response as a required
+    distinguishable category. Drive a 200 with a non-JSON body through
+    fetch_candidate_issues() and assert the typed wrap.
+    """
+
+    def h(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>not json</html>")
+
+    tracker = _make_tracker(h)
+    with pytest.raises(TrackerMalformedResponse) as excinfo:
+        tracker.fetch_candidate_issues()
+    assert excinfo.value.status_code == 200
+    # Subclass of TrackerError so old catch-all callers still work.
+    assert isinstance(excinfo.value, TrackerError)
 
 
 def test_transport_error_at_tracker_boundary_is_typed() -> None:
