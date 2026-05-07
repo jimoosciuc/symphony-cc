@@ -25,6 +25,12 @@ from symphony.github import (
     GitHubTracker,
     GitHubTransportError,
     TrackerError,
+    TrackerMalformedResponse,
+    TrackerMissingToken,
+    TrackerNotFound,
+    TrackerPermissionDenied,
+    TrackerRateLimited,
+    TrackerTransportError,
     expected_branch_name,
     find_linked_pull_requests,
 )
@@ -419,8 +425,126 @@ def test_release_issue_wraps_other_errors() -> None:
         return httpx.Response(403, json={"message": "Forbidden"})
 
     tracker = _make_tracker(h)
-    with pytest.raises(TrackerError):
+    with pytest.raises(TrackerPermissionDenied) as excinfo:
         tracker.release_issue(_issue(), reason="r")
+    assert excinfo.value.status_code == 403
+
+
+# -- Tracker error categorization (review F1) --------------------------------
+
+
+@pytest.mark.parametrize(
+    "response_factory, expected_type, expected_status",
+    [
+        (
+            lambda: httpx.Response(401, json={"message": "Bad credentials"}),
+            TrackerMissingToken,
+            401,
+        ),
+        (
+            lambda: httpx.Response(403, json={"message": "Forbidden"}),
+            TrackerPermissionDenied,
+            403,
+        ),
+        (
+            lambda: httpx.Response(
+                429,
+                headers={"retry-after": "30"},
+                json={"message": "rate limited"},
+            ),
+            TrackerRateLimited,
+            429,
+        ),
+        (
+            lambda: httpx.Response(
+                403,
+                headers={"x-ratelimit-remaining": "0"},
+                json={"message": "secondary rate limit"},
+            ),
+            TrackerRateLimited,
+            403,
+        ),
+        (
+            lambda: httpx.Response(500, json={"message": "boom"}),
+            TrackerError,  # generic — no SPEC §9.4 category for 5xx
+            500,
+        ),
+    ],
+)
+def test_tracker_preserves_error_categories_through_wrap(
+    response_factory, expected_type, expected_status
+) -> None:
+    """SPEC §9.4 + #23 review F1: tracker boundary must distinguish
+    error categories (missing_token / permission_denied / not_found /
+    rate_limit / transport / malformed / claim_conflict) so the
+    orchestrator can branch without parsing strings.
+    """
+
+    def h(_req: httpx.Request) -> httpx.Response:
+        return response_factory()
+
+    tracker = _make_tracker(h)
+    with pytest.raises(expected_type) as excinfo:
+        tracker.fetch_candidate_issues()
+    assert excinfo.value.status_code == expected_status
+    # Subclasses must remain TrackerError so callers that catch the base
+    # class still work.
+    assert isinstance(excinfo.value, TrackerError)
+
+
+def test_tracker_rate_limited_preserves_retry_after() -> None:
+    def h(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"retry-after": "45"},
+            json={"message": "slow down"},
+        )
+
+    tracker = _make_tracker(h)
+    with pytest.raises(TrackerRateLimited) as excinfo:
+        tracker.fetch_candidate_issues()
+    assert excinfo.value.retry_after == 45.0
+
+
+def test_tracker_malformed_response_is_typed() -> None:
+    """SPEC §9.4 explicitly lists malformed response as a required
+    distinguishable category. Drive a 200 with a non-JSON body through
+    fetch_candidate_issues() and assert the typed wrap.
+    """
+
+    def h(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>not json</html>")
+
+    tracker = _make_tracker(h)
+    with pytest.raises(TrackerMalformedResponse) as excinfo:
+        tracker.fetch_candidate_issues()
+    assert excinfo.value.status_code == 200
+    # Subclass of TrackerError so old catch-all callers still work.
+    assert isinstance(excinfo.value, TrackerError)
+
+
+def test_transport_error_at_tracker_boundary_is_typed() -> None:
+    def h(_req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("nope")
+
+    tracker = _make_tracker(h)
+    with pytest.raises(TrackerTransportError) as excinfo:
+        tracker.fetch_candidate_issues()
+    # status_code is None for transport-side failures.
+    assert excinfo.value.status_code is None
+
+
+def test_not_found_propagates_only_outside_per_method_handlers() -> None:
+    """`fetch_issues_by_numbers` and `release_issue` swallow 404 (issue
+    deleted / label gone). Other methods must surface TrackerNotFound."""
+
+    def h(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    tracker = _make_tracker(h)
+    # claim_issue's first GET (re-fetch for race check) hits 404.
+    with pytest.raises(TrackerNotFound):
+        tracker.claim_issue(_issue(), {"run_id": "r"})
 
 
 # -- mark_issue_blocked ------------------------------------------------------
