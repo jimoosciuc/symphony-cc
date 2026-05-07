@@ -123,9 +123,11 @@ class FakeProvider:
         return record
 
     async def restore(self, session_record: SessionRecord) -> SessionRecord:
+        # Record the call BEFORE raising so tests can assert restore was
+        # attempted even when scripted to fail.
+        self.calls.append(("restore", session_record.session_id))
         if self.restore_should_fail:
             raise ProviderRestoreError("scripted restore failure")
-        self.calls.append(("restore", session_record.session_id))
         if session_record.provider_session_id:
             session_record.previous_provider_session_ids.append(session_record.provider_session_id)
         # restore() does not stream events; it just bumps the attempt
