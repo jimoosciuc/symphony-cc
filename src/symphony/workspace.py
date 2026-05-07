@@ -227,13 +227,18 @@ class WorkspaceManager:
         non-zero exit does NOT raise — the orchestrator decides what to
         do with each stage's failure.
 
-        ``cwd`` is the workspace path. Hooks inherit the parent
-        environment.
+        ``cwd`` is ALWAYS the workspace path (per SPEC §8 / #6 acceptance
+        criteria). If the workspace path is missing — including for
+        ``before_delete``, which used to silently fall back to the
+        Symphony process cwd — :class:`WorkspaceError` is raised so the
+        orchestrator can decide whether to skip cleanup. Lifecycle shell
+        commands are workspace-scoped by contract; running them in the
+        wrong cwd is a safety bug.
         """
         command = self._hook_command(name)
         if command is None:
             return None
-        if not workspace.path.exists() and name != "before_delete":
+        if not workspace.path.exists():
             raise WorkspaceError(
                 "workspace.path",
                 f"workspace path {workspace.path} does not exist; cannot run hook {name!r}",
@@ -245,7 +250,7 @@ class WorkspaceManager:
             completed = subprocess.run(  # noqa: S602 — shell intentional
                 command,
                 shell=True,
-                cwd=str(workspace.path) if workspace.path.exists() else None,
+                cwd=str(workspace.path),
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,

@@ -224,6 +224,29 @@ def test_hook_timeout_is_reported(mgr_with_hooks: WorkspaceManager) -> None:
     assert result.succeeded is False
 
 
+def test_before_delete_on_missing_workspace_raises(
+    mgr_with_hooks: WorkspaceManager,
+) -> None:
+    """Lifecycle shell commands are workspace-scoped by contract. If the
+    workspace path is missing — including for before_delete, which used to
+    silently fall back to the Symphony process cwd — run_hook MUST raise
+    WorkspaceError without executing the command. The orchestrator decides
+    whether cleanup can continue.
+    """
+    ws = mgr_with_hooks.prepare(_issue())
+    # Simulate the workspace having already been removed before
+    # before_delete runs. shutil.rmtree to mimic real cleanup semantics.
+    import shutil as _shutil
+
+    _shutil.rmtree(ws.path)
+    assert not ws.path.exists()
+    with pytest.raises(WorkspaceError) as excinfo:
+        mgr_with_hooks.run_hook("before_delete", ws)
+    assert excinfo.value.location == "workspace.path"
+    assert "does not exist" in excinfo.value.message
+    assert "before_delete" in excinfo.value.message
+
+
 def test_unconfigured_hook_returns_none(tmp_path: Path) -> None:
     mgr = WorkspaceManager(WorkspaceConfig(root=tmp_path / "ws"))
     ws = mgr.prepare(_issue())
