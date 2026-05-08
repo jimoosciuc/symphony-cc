@@ -124,6 +124,40 @@ def test_materialized_snapshot_omits_coordinator_tracker_token(tmp_path: Path):
     assert snapshot["tracker"]["token"] == REMOTE_TRACKER_TOKEN_PLACEHOLDER
 
 
+def test_materialized_snapshot_can_carry_separate_git_token(tmp_path: Path):
+    """Test snapshot can carry git-only token without exposing tracker token."""
+    raw = _minimal_config(tmp_path)
+    raw["remote"]["git_token"] = "git-only-token"
+    config = build_config(raw, workflow_path=tmp_path / "WORKFLOW.md")
+    plan = build_remote_dispatch_plan(_issue(), attempt=1, config=config)
+
+    materialize_remote_dispatch_plan(plan, config)
+
+    snapshot_text = plan.local_snapshot_path.read_text(encoding="utf-8")
+    snapshot = json.loads(snapshot_text)
+    assert config.tracker.token not in snapshot_text
+    assert snapshot["tracker"]["token"] == REMOTE_TRACKER_TOKEN_PLACEHOLDER
+    assert snapshot["remote"]["git_token"] == "git-only-token"
+    assert "git_token" in snapshot["logging"]["redact_keys"]
+
+
+def test_materialized_snapshot_does_not_reuse_tracker_token_as_git_token(
+    tmp_path: Path,
+):
+    """Test tracker token is not copied into remote git credential slot."""
+    raw = _minimal_config(tmp_path)
+    raw["remote"]["git_token"] = raw["tracker"]["token"]
+    config = build_config(raw, workflow_path=tmp_path / "WORKFLOW.md")
+    plan = build_remote_dispatch_plan(_issue(), attempt=1, config=config)
+
+    materialize_remote_dispatch_plan(plan, config)
+
+    snapshot_text = plan.local_snapshot_path.read_text(encoding="utf-8")
+    snapshot = json.loads(snapshot_text)
+    assert config.tracker.token not in snapshot_text
+    assert "git_token" not in snapshot["remote"]
+
+
 def test_materialize_creates_missing_parent_directories(tmp_path: Path):
     """Test materializer creates planned parent directories."""
     config = _config(tmp_path)

@@ -1,21 +1,26 @@
-"""Orchestrator-facing remote issue dispatch boundary."""
+"""Orchestrator-facing remote dispatch adapter.
+
+Provides a narrow protocol for the orchestrator to dispatch issues to remote
+workers without depending on concrete SSH/SCP implementations. The production
+adapter composes the pure plan builder with the remote runner; tests can still
+inject a small fake dispatcher.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Protocol
 
 from symphony.config import WorkflowConfig
 from symphony.models import Issue
 from symphony.remote.plan import build_remote_dispatch_plan
 from symphony.remote.runner import RemoteDispatchRunner, RemoteDispatchRunResult
-from symphony.remote.scp import SSHArtifactCollector
+from symphony.remote.scp import RealScpRunner, SSHArtifactCollector
 from symphony.remote.ssh import RealSubprocessRunner, SSHRemoteTransport
 from symphony.remote.upload import RealPayloadUploadRunner, SCPPayloadUploader
 
 
 class RemoteIssueDispatcher(Protocol):
-    """Dispatches one claimed issue through the remote execution pipeline."""
+    """Dispatches one issue to a remote worker."""
 
     def dispatch(
         self,
@@ -24,15 +29,15 @@ class RemoteIssueDispatcher(Protocol):
         attempt: int,
         config: WorkflowConfig,
     ) -> RemoteDispatchRunResult:
-        """Run one remote dispatch attempt for ``issue``."""
+        """Dispatch issue to remote worker and return outcome."""
         ...
 
 
-@dataclass(frozen=True, slots=True)
 class RunnerRemoteIssueDispatcher:
-    """Adapter from orchestrator issue context to ``RemoteDispatchRunner``."""
+    """RemoteIssueDispatcher backed by RemoteDispatchRunner."""
 
-    runner: RemoteDispatchRunner
+    def __init__(self, runner: RemoteDispatchRunner) -> None:
+        self._runner = runner
 
     def dispatch(
         self,
@@ -42,27 +47,34 @@ class RunnerRemoteIssueDispatcher:
         config: WorkflowConfig,
     ) -> RemoteDispatchRunResult:
         plan = build_remote_dispatch_plan(issue, attempt=attempt, config=config)
-        return self.runner.run(plan, config)
+        return self._runner.run(plan, config)
 
 
-def build_ssh_remote_issue_dispatcher(config: WorkflowConfig) -> RemoteIssueDispatcher | None:
-    """Build the production SSH/SCP dispatcher when remote execution is enabled."""
+def build_ssh_remote_issue_dispatcher(
+    config: WorkflowConfig,
+) -> RemoteIssueDispatcher | None:
+    """Build the production SSH/SCP remote dispatcher.
+
+    Returns ``None`` when remote execution is disabled so callers can pass the
+    result directly into ``Orchestrator`` for both local and remote runs.
+    """
     if not config.remote.enabled:
         return None
     if not config.remote.host:
-        raise ValueError("remote.host is required for remote dispatch")
+        raise ValueError("remote.host is required for SSH remote dispatch")
 
-    upload_runner = RealPayloadUploadRunner()
-    ssh_runner = RealSubprocessRunner()
+    extra_secrets = tuple(
+        secret for secret in (config.tracker.token, config.remote.git_token) if secret
+    )
     uploader = SCPPayloadUploader(
         host=config.remote.host,
-        runner=upload_runner,
-        extra_secrets=(config.tracker.token,),
+        runner=RealPayloadUploadRunner(),
+        extra_secrets=extra_secrets,
     )
     artifact_collector = SSHArtifactCollector(
         artifact_store=config.claude.artifact_store,
-        redact_keys=config.logging.redact_keys,
-        runner=upload_runner,
+        redact_keys=tuple(config.logging.redact_keys) + ("git_token",),
+        runner=RealScpRunner(),
         host=config.remote.host,
     )
 
@@ -72,15 +84,14 @@ def build_ssh_remote_issue_dispatcher(config: WorkflowConfig) -> RemoteIssueDisp
         remote_dispatch_path: str,
     ) -> SSHRemoteTransport:
         return SSHRemoteTransport(
-            runner=ssh_runner,
+            runner=RealSubprocessRunner(),
             remote_snapshot_path=remote_snapshot_path,
             remote_dispatch_path=remote_dispatch_path,
         )
 
-    return RunnerRemoteIssueDispatcher(
-        RemoteDispatchRunner(
-            uploader=uploader,
-            transport_factory=transport_factory,
-            artifact_collector=artifact_collector,
-        )
+    runner = RemoteDispatchRunner(
+        uploader=uploader,
+        transport_factory=transport_factory,
+        artifact_collector=artifact_collector,
     )
+    return RunnerRemoteIssueDispatcher(runner)

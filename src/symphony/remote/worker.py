@@ -11,6 +11,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from symphony.models import Issue, Workspace
 from symphony.provider.base import AgentProviderProtocol, SessionRecord, Terminal
 from symphony.remote.dispatch import DispatchRequest, load_dispatch_request
 from symphony.remote.protocol import WorkerEvent, serialize_worker_event
-from symphony.workspace import WorkspaceManager, WorkspacePopulator
+from symphony.workspace import GitWorkspacePopulator, WorkspaceManager, WorkspacePopulator
 
 DEFAULT_REDACT_KEYS = ("token", "authorization", "api_key", "password", "secret")
 
@@ -279,7 +280,7 @@ async def run_real_worker(
     provider_factory = provider_factory or _default_provider_factory
     host = config.remote.host or "remote-host"
     artifact_root = Path(dispatch.artifact_path)
-    artifacts = ArtifactWriter(artifact_root, redact_keys=config.logging.redact_keys)
+    artifacts = ArtifactWriter(artifact_root, redact_keys=_worker_redact_keys(config))
     issue = _issue_from_dispatch(dispatch)
     session: SessionRecord | None = None
     provider: AgentProviderProtocol | None = None
@@ -301,7 +302,7 @@ async def run_real_worker(
             config,
             dispatch,
             issue,
-            populator=workspace_populator,
+            populator=workspace_populator or build_worker_workspace_populator(config),
         )
         workspace_path = workspace.path
         manager = WorkspaceManager(config.workspace)
@@ -473,6 +474,16 @@ def prepare_worker_workspace(
     )
 
 
+def build_worker_workspace_populator(config: WorkflowConfig) -> WorkspacePopulator | None:
+    """Build the worker-side workspace populator without tracker API credentials."""
+    if config.workspace.populate != "git":
+        return None
+    if not config.remote.git_token:
+        raise ValueError("remote.git_token is required when workspace.populate=git")
+    git_tracker = replace(config.tracker, token=config.remote.git_token)
+    return GitWorkspacePopulator(git_tracker, config.github)
+
+
 def _ensure_hook_ok(result) -> None:
     if result is None or result.succeeded:
         return
@@ -536,7 +547,7 @@ def _emit_worker_event(
             host=host,
             fields=fields,
         ),
-        redact_keys=config.logging.redact_keys,
+        redact_keys=_worker_redact_keys(config),
     )
     emit(line)
 
@@ -568,9 +579,15 @@ def _emit_worker_failed(
 def _redact_runtime_error(message: str, config: WorkflowConfig) -> str:
     return redact_text(
         message,
-        redact_keys=config.logging.redact_keys,
-        extra_secrets=(config.tracker.token,),
+        redact_keys=_worker_redact_keys(config),
+        extra_secrets=tuple(
+            secret for secret in (config.tracker.token, config.remote.git_token) if secret
+        ),
     )
+
+
+def _worker_redact_keys(config: WorkflowConfig) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*config.logging.redact_keys, "git_token")))
 
 
 def _session_snapshot(session: SessionRecord) -> dict[str, Any]:

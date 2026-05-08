@@ -761,6 +761,7 @@ def _build_remote(raw: dict[str, Any]) -> RemoteConfig:
     workspace_root = _opt_str(section, "workspace_root", location)
     artifact_root = _opt_str(section, "artifact_root", location)
     session_store = _opt_str(section, "session_store", location)
+    git_token = _opt_str(section, "git_token", location)
     worker_timeout_ms = _opt_int(
         section, "worker_timeout_ms", location, default=7_200_000
     )
@@ -804,6 +805,7 @@ def _build_remote(raw: dict[str, Any]) -> RemoteConfig:
         workspace_root=workspace_root,
         artifact_root=artifact_root,
         session_store=session_store,
+        git_token=git_token,
         worker_timeout_ms=worker_timeout_ms,
         heartbeat_interval_ms=heartbeat_interval_ms,
         stall_timeout_ms=stall_timeout_ms,
