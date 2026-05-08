@@ -196,6 +196,36 @@ Implementation notes:
 - Profiles do not affect runtime behavior; validation is config-time only.
 - The provider does not enforce profiles; it passes `permission_mode` unchanged.
 
+## Remote Worker Execution (M7.4)
+
+Remote execution allows the orchestrator to dispatch work to remote hosts via SSH. The design is in `docs/remote-worker-design.md`.
+
+Module boundaries:
+
+- **Coordinator (Orchestrator)**: Owns tracker interactions, issue claims, remote dispatch, artifact collection, status snapshot. Runs on local host.
+- **Remote Worker**: New CLI (`symphony-worker`) that runs on remote hosts. Receives dispatch commands, creates workspaces, runs provider sessions, streams status events, writes artifacts locally.
+- **Artifact Collector**: New component on coordinator. Copies artifacts from remote worker via scp/rsync, applies redaction, writes to local artifact store.
+- **SSH Client**: Thin wrapper around SSH command execution. Handles connection, command dispatch, stdout streaming.
+
+Key contracts:
+
+- Remote worker streams JSONL status events to stdout: `worker_started`, `workspace_ready`, `session_started`, `heartbeat`, `turn_completed`, `worker_completed`.
+- Coordinator reads events line-by-line and updates in-memory worker state.
+- Remote worker never calls tracker; coordinator owns all tracker operations.
+- Config snapshot transmitted to remote worker includes `tracker.token` (for git auth), `security.profile`, and all workflow config.
+- Artifacts collected after worker completion; coordinator applies redaction before local write.
+
+Testing strategy:
+
+- Fake remote worker protocol tests with mocked SSH transport (default CI).
+- Opt-in live remote tests require `SYMPHONY_RUN_REMOTE_INTEGRATION=1` and SSH-accessible test host.
+
+Implementation phases:
+
+1. Protocol and fake tests (#109): Add `RemoteConfig`, `symphony-worker` CLI stub, fake remote worker, SSH client wrapper, artifact collector, fake protocol tests.
+2. SSH transport and live tests (#110): Implement SSH execution, event streaming, artifact collection, opt-in live tests.
+3. Orchestrator integration (#111): Add remote execution decision logic, wire into dispatch flow, update status snapshot and dashboard.
+
 ## Event Contract
 
 Every provider event should include:
