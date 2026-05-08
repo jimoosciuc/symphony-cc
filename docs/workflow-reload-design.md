@@ -9,19 +9,19 @@ Symphony reads its `WorkflowConfig` once from `WORKFLOW.md` at process start. Lo
 operators want to edit the workflow file (toggle a label, raise concurrency, swap a
 prompt) WITHOUT restarting the daemon, but reloads must not corrupt active worker state
 or silently lose claims. This document defines the semantics, contract, and error
-surfaces of a workflow reload BEFORE any watcher or signal handler is implemented.
+surfaces of a workflow reload BEFORE the poll-cycle reload implementation lands.
 
 ## Scope
 
 In scope:
 - Which fields are eligible for live reload, and which require restart.
-- The trigger model (file watch / polling / explicit signal).
+- The trigger model (polling / file watch / explicit signal).
 - Last-known-good fallback behavior on a malformed reload.
 - Interactions with the retry queue (`Orchestrator.retry_states`) and restart recovery
   (`Orchestrator.recover()` / `claude.retry_resume_policy`).
 
 Out of scope (deferred to other tickets):
-- Implementation of the watcher / poller (#70).
+- Implementation of the reload runtime (#70).
 - Operator dashboard surface (#56).
 - Hot-swap of the workspace root, session store, or artifact store (these are too
   invasive for hot reload — see "Restart-required fields" below).
@@ -79,42 +79,57 @@ risk of data loss or undefined behavior. A reload that changes any of them is RE
 
 ## Reload trigger strategy
 
-Two viable triggers were considered. The chosen approach is **explicit signal first,
-file-watch as opt-in follow-up**.
+Three viable triggers were considered. The chosen approach for #70 is
+**poll workflow metadata at poll-cycle start**. Explicit commands and file-watch
+libraries are optional follow-ups.
 
-### Chosen: explicit signal (default)
+### Chosen: poll workflow metadata at poll-cycle start
 
-The orchestrator listens for `SIGHUP` (POSIX) or a CLI subcommand
-(`symphony reload`) that sends an in-process notification. On receipt:
+At the beginning of each orchestrator poll cycle, before fetching candidate issues,
+the orchestrator checks the workflow file metadata observed by the current
+last-known-good snapshot. A reload is attempted when the file mtime or size differs
+from the last successfully observed value.
 
-1. Re-parse `workflow_path` using the existing `_load_workflow_config` path.
-2. Validate against the eligibility table above. If any Class C field changed,
-   REJECT the reload and emit a WARNING log.
-3. If valid, atomically swap `Orchestrator.config` with the new `WorkflowConfig`.
-4. Append a reload event to `_retention_reports/_reload_events.jsonl`
+On change:
+
+1. Re-parse `workflow_path` using the existing workflow loader path.
+2. Resolve environment variables and normalize paths using the same rules as startup.
+3. Validate against the eligibility table above. If any Class C field changed,
+   reject the reload and emit a WARNING log.
+4. If valid, atomically publish a new last-known-good `WorkflowSnapshot` with an
+   incremented revision.
+5. Append a reload event to `_retention_reports/_reload_events.jsonl`
    (mirroring the artifact-retention reporting pattern from #67) so operators
    can audit which reload changed what.
 
 Rationale:
-- Predictable: the operator decides WHEN reload happens, so it does not race with
-  reconcile or cleanup sweeps in unexpected ways.
-- No filesystem watching dependency in the core loop — keeps the runtime small and
-  testable.
-- Failure mode is obvious: if the signal handler crashes, the daemon keeps running
-  on the OLD config (last-known-good fallback is automatic).
+
+- It fits the existing daemon cadence; no extra watcher thread, process signal, or
+  control-plane API is required.
+- It is deterministic in tests because a fake clock and file metadata can drive the
+  same path as production.
+- It avoids making the optional status/dashboard API part of the scheduling contract.
+- Failure mode is obvious: if the changed file is invalid, the daemon keeps running
+  active workers on their existing snapshots and pauses new dispatch by default.
+
+### Deferred: explicit command or status API
+
+An explicit reload command or status API endpoint may be added later. It must call
+the same validation + publish path as metadata polling and must not introduce a
+second reload code path.
 
 ### Deferred: file watch
 
-A `watchdog`-style file-watch trigger may be added later as an opt-in setting
-(`workflow.reload.watch: true`). Deferred because:
+A `watchdog`-style file-watch trigger may be added later as an opt-in setting.
+Deferred because:
+
 - Editor save patterns vary (vim writes via swap-and-rename; some editors
   partial-write). Naive watching produces spurious mid-edit reloads.
-- Adds a dependency to the core runtime that we do not need for the MVP signal flow.
-- The polling alternative (re-stat `workflow_path` every tick) is simpler if we ever
-  want auto-reload, and reuses the existing `polling.interval_ms` cadence.
+- Adds a dependency to the core runtime that is not needed for the #70 MVP.
+- Polling already reuses the existing `polling.interval_ms` cadence.
 
-If implemented, file watch must use the SAME validation + swap path as the explicit
-signal — there is exactly one reload code path.
+If implemented, file watch must use the SAME validation + publish path as metadata
+polling — there is exactly one reload code path.
 
 ## Last-known-good behavior
 
@@ -124,25 +139,25 @@ property load-bearing — never partially apply a reload.
 
 | Outcome | Trigger | Operator-visible surface |
 |---|---|---|
-| **Accepted** | Reload parsed cleanly AND only Class A/B fields changed. | INFO log line (`workflow reload accepted: changed=[...]`). Reload event appended to `_reload_events.jsonl`. `Orchestrator.config` swapped atomically. |
+| **Accepted** | Reload parsed cleanly AND only Class A/B fields changed. | INFO log line (`workflow reload accepted: changed=[...]`). Reload event appended to `_reload_events.jsonl`. Current last-known-good snapshot published atomically. |
 | **Rejected (validation)** | Reload parsed cleanly BUT touched a Class C field, OR failed schema validation. | WARNING log line listing rejected fields. Reload event appended with `outcome: "rejected_validation"` and the field list. Daemon keeps the old config. |
 | **Rejected (parse)** | Reload could not parse (missing keys, bad YAML, env var not resolvable). | WARNING log line with the parse exception. Reload event appended with `outcome: "rejected_parse"` and the exception summary. Daemon keeps the old config. |
 
-The reload flow MUST NOT mutate `Orchestrator.config` until validation passes. Use a
-local `WorkflowConfig` variable; swap by reference assignment under a single lock.
+The reload flow MUST NOT publish a new current snapshot until validation passes. Use
+a local `WorkflowSnapshot` candidate; publish by reference assignment after all
+validation succeeds.
 
 ### Atomicity guarantees
 
-- The reload swap is a single attribute assignment, ordered after a successful parse +
-  validation. A reader can observe either the OLD or the NEW config but never a
-  half-applied state.
+- The reload publish step is a single reference assignment, ordered after a
+  successful parse + validation. A reader can observe either the OLD or the NEW
+  snapshot but never a half-applied state.
 - Active `WorkerState` snapshots no `WorkflowConfig` reference at construction; they
   capture only the specific fields they need (model name, prompt, etc.) at the moment
   of dispatch. This is how Class B fields stay isolated from existing workers.
-- The reload handler itself runs synchronously in the orchestrator's asyncio loop
-  (driven from a signal-handler-scheduled coroutine), so it cannot interleave with
-  `run_once` mid-tick. Either the reload finishes before the next tick starts, or the
-  next tick starts on the OLD config and the reload completes after.
+- The metadata check runs at the start of `run_once`, before fetch/dispatch. A tick
+  either uses the previously current snapshot or the newly accepted snapshot; reload
+  does not interleave with worker dispatch mid-tick.
 
 ## Interactions with the retry queue
 
