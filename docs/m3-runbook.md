@@ -103,6 +103,56 @@ What happens:
 If you want long-running mode, drop `--once`. The orchestrator will
 poll forever at `polling.interval_ms`.
 
+## Workflow reload in long-running mode
+
+Long-running Symphony reloads `WORKFLOW.md` on poll-cycle boundaries.
+At the start of each tick, before fetching candidate issues, the
+orchestrator checks the workflow file metadata. If mtime or size changed,
+it reloads the workflow through the same parser, env-var resolver, path
+normalizer, and validator used at startup.
+
+Accepted reloads:
+
+- Publish a new last-known-good workflow snapshot.
+- Apply to future issue dispatches and future retry attempts.
+- Do not mutate active workers. A worker keeps the config snapshot it
+  captured when its attempt started.
+- Write an accepted event to
+  `<claude.artifact_store>/_retention_reports/_reload_events.jsonl`.
+
+Rejected reloads:
+
+- Keep the previous last-known-good snapshot.
+- Continue reconciling active workers against their captured snapshots.
+- Pause new dispatch by default until the workflow file is fixed.
+- Write a rejected event to
+  `<claude.artifact_store>/_retention_reports/_reload_events.jsonl`.
+
+Reload does not use SIGHUP, `symphony reload`, a file watcher, dashboard,
+or status API in the current implementation. Those may become optional
+triggers later, but the poll-cycle metadata check is the supported path.
+
+Restart-required changes are rejected during reload. Examples:
+
+- `tracker.kind`, `tracker.owner`, `tracker.repo`, or resolved
+  `tracker.token`;
+- `workspace.root`;
+- `claude.session_store`, `claude.transcript_store`, or
+  `claude.artifact_store`;
+- `claude.retry_resume_policy`.
+
+To validate invalid-reload recovery locally without hitting GitHub or
+Claude, run:
+
+```bash
+PYTHONPATH=src pytest tests/test_workflow_reload.py -q
+```
+
+The focused tests cover valid reloads, invalid reload fallback, env/path
+resolution through the normal workflow loader, restart-required rejection,
+and active-worker isolation. The default `make ci` target runs the same
+tests with the rest of the fake provider/tracker suite.
+
 ## Stopping the daemon
 
 `Ctrl-C` (SIGINT). The CLI catches it, releases trackers, and exits
@@ -170,6 +220,14 @@ Fill in this template and post as a comment on
   issue against the provider if it reproduces.
 - **Workspace directory survives across runs** — by design (SPEC §8).
   Delete manually if you want a fresh checkout.
+- **Workflow edit is ignored or dispatch pauses** — check
+  `<claude.artifact_store>/_retention_reports/_reload_events.jsonl`.
+  `outcome: "accepted"` means the new snapshot was published.
+  `outcome: "rejected_parse"` means the file failed parsing, env-var
+  resolution, path normalization, or schema validation. `outcome:
+  "rejected_validation"` means the file parsed but changed a
+  restart-required field. Fix the file; the next poll cycle will retry
+  reload automatically.
 
 ## Triaging a run by `task_outcome`
 
