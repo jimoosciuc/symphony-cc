@@ -124,6 +124,90 @@ def test_ssh_transport_includes_dispatch_path_when_provided(tmp_path: Path):
     assert "--fake" not in runner.last_args  # Still no --fake in production command
 
 
+def test_ssh_transport_uses_staged_remote_payload_paths(tmp_path: Path):
+    """Test SSH command uses pre-staged remote snapshot and dispatch paths."""
+    raw = _minimal_config(tmp_path)
+    config = build_config(raw, workflow_path=tmp_path / "WORKFLOW.md")
+
+    runner = FakeSubprocessRunner(stdout="", returncode=0)
+    local_snapshot_path = tmp_path / "should-not-be-written.json"
+    transport = SSHRemoteTransport(
+        runner=runner,
+        snapshot_path=local_snapshot_path,
+        remote_snapshot_path="/remote/workspaces/test/repo/1/.symphony/attempt-1/snapshot.json",
+        remote_dispatch_path="/remote/workspaces/test/repo/1/.symphony/attempt-1/dispatch.json",
+    )
+
+    transport.run(config)
+
+    assert runner.last_args is not None
+    assert "--snapshot-path" in runner.last_args
+    snapshot_idx = runner.last_args.index("--snapshot-path")
+    assert (
+        runner.last_args[snapshot_idx + 1]
+        == "/remote/workspaces/test/repo/1/.symphony/attempt-1/snapshot.json"
+    )
+    dispatch_idx = runner.last_args.index("--dispatch-path")
+    assert (
+        runner.last_args[dispatch_idx + 1]
+        == "/remote/workspaces/test/repo/1/.symphony/attempt-1/dispatch.json"
+    )
+    assert not local_snapshot_path.exists()
+
+
+def test_ssh_transport_staged_remote_command_omits_tracker_token(tmp_path: Path):
+    """Test staged remote path command does not include tracker credentials."""
+    raw = _minimal_config(tmp_path)
+    config = build_config(raw, workflow_path=tmp_path / "WORKFLOW.md")
+
+    runner = FakeSubprocessRunner(stdout="", returncode=0)
+    transport = SSHRemoteTransport(
+        runner=runner,
+        remote_snapshot_path="/remote/workspaces/test/repo/1/.symphony/attempt-1/snapshot.json",
+        remote_dispatch_path="/remote/workspaces/test/repo/1/.symphony/attempt-1/dispatch.json",
+    )
+
+    transport.run(config)
+
+    command_text = " ".join(runner.last_args or [])
+    assert config.tracker.token not in command_text
+    assert "ghp_" not in command_text
+
+
+def test_ssh_transport_requires_snapshot_path_for_command(tmp_path: Path):
+    """Test command construction fails clearly without any snapshot path."""
+    raw = _minimal_config(tmp_path)
+    config = build_config(raw, workflow_path=tmp_path / "WORKFLOW.md")
+
+    runner = FakeSubprocessRunner(stdout="", returncode=0)
+    transport = SSHRemoteTransport(runner=runner)
+
+    try:
+        transport._build_ssh_command(config)
+    except ValueError as exc:
+        assert "remote_snapshot_path or snapshot_path" in str(exc)
+    else:
+        raise AssertionError("expected missing snapshot path to raise ValueError")
+
+
+def test_ssh_transport_allows_staged_snapshot_without_dispatch(tmp_path: Path):
+    """Test staged remote snapshot path can be used without dispatch path."""
+    raw = _minimal_config(tmp_path)
+    config = build_config(raw, workflow_path=tmp_path / "WORKFLOW.md")
+
+    runner = FakeSubprocessRunner(stdout="", returncode=0)
+    transport = SSHRemoteTransport(
+        runner=runner,
+        remote_snapshot_path="/remote/workspaces/test/repo/1/.symphony/attempt-1/snapshot.json",
+    )
+
+    transport.run(config)
+
+    assert runner.last_args is not None
+    assert "--snapshot-path" in runner.last_args
+    assert "--dispatch-path" not in runner.last_args
+
+
 def test_ssh_transport_no_tracker_token_in_command_with_dispatch(tmp_path: Path):
     """Test SSH transport doesn't include tracker token in command with dispatch path."""
     raw = _minimal_config(tmp_path)

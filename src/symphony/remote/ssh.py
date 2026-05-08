@@ -68,11 +68,19 @@ class SSHRemoteTransport:
     Executes symphony-worker on a remote host via SSH, streams stdout JSONL
     events, and captures stderr. Uses a configurable subprocess runner to
     enable deterministic testing without real SSH.
+
+    Supports two modes:
+    1. Pre-staged remote paths: Use remote_snapshot_path and remote_dispatch_path
+       for already-uploaded payloads. No local snapshot writing occurs.
+    2. Legacy local paths: Use snapshot_path and dispatch_path for local test
+       compatibility. Writes snapshot locally (test-only behavior).
     """
 
     runner: SubprocessRunner
     snapshot_path: Path | None = None
     dispatch_path: Path | None = None
+    remote_snapshot_path: str | None = None
+    remote_dispatch_path: str | None = None
 
     def run(self, config: WorkflowConfig) -> RemoteRunResult:
         """Execute remote worker via SSH and parse protocol events.
@@ -148,17 +156,17 @@ class SSHRemoteTransport:
         if not config.remote.host:
             raise ValueError("remote.host is required for SSH transport")
 
-        # Serialize config snapshot to JSON
-        snapshot_json = self._serialize_config_snapshot(config)
-
-        # Write snapshot to temp file if snapshot_path is set
-        if self.snapshot_path:
+        # Determine snapshot path to use
+        if self.remote_snapshot_path:
+            # Use pre-staged remote path (no local snapshot writing)
+            remote_snapshot_path = self.remote_snapshot_path
+        elif self.snapshot_path:
+            # Legacy local path mode: write snapshot locally for tests
+            snapshot_json = serialize_config_snapshot(config)
             self.snapshot_path.write_text(snapshot_json, encoding="utf-8")
             remote_snapshot_path = str(self.snapshot_path)
         else:
-            # For production, we'd use a temp file or stdin
-            # For now, assume snapshot is pre-written
-            remote_snapshot_path = "/tmp/symphony-snapshot.json"
+            raise ValueError("Either remote_snapshot_path or snapshot_path must be provided")
 
         # Build SSH command
         ssh_args = [
@@ -170,21 +178,12 @@ class SSHRemoteTransport:
         ]
 
         # Add dispatch path if provided
-        if self.dispatch_path:
+        if self.remote_dispatch_path:
+            ssh_args.extend(["--dispatch-path", self.remote_dispatch_path])
+        elif self.dispatch_path:
             ssh_args.extend(["--dispatch-path", str(self.dispatch_path)])
 
         return ssh_args
-
-    def _serialize_config_snapshot(self, config: WorkflowConfig) -> str:
-        """Serialize config to JSON snapshot for remote worker.
-
-        Args:
-            config: Workflow configuration
-
-        Returns:
-            JSON string of config snapshot
-        """
-        return serialize_config_snapshot(config)
 
     def _redact_error(self, error_msg: str, config: WorkflowConfig) -> str:
         """Redact secrets from error messages.
