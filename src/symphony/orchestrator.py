@@ -31,6 +31,12 @@ from typing import Any
 from symphony.artifacts import ArtifactWriter
 from symphony.config import WorkflowConfig
 from symphony.events import TERMINAL_TURN_EVENTS, AgentEvent
+from symphony.evidence import (
+    OUTCOME_COMPLETED_NO_PR_DECLARED,
+    OUTCOME_COMPLETED_WITH_PR,
+    DetectorResult,
+    EvidenceDetector,
+)
 from symphony.github.tracker import ClaimResult, TrackerError, TrackerProtocol
 from symphony.models import Issue, Workspace
 from symphony.provider.base import (
@@ -118,6 +124,7 @@ class Orchestrator:
         continuation_policy: ContinuationPolicy | None = None,
         run_id: str | None = None,
         clock: Callable[[], datetime] | None = None,
+        evidence_detector: EvidenceDetector | None = None,
     ) -> None:
         self.config = config
         self.tracker = tracker
@@ -141,6 +148,15 @@ class Orchestrator:
         # Decisions made by the most recent ``recover()`` call. Surfaced
         # for tests + the CLI's startup summary.
         self.recovery_decisions: list[RecoveryDecision] = []
+        # M5.2 #60 evidence detector. Optional injection so unit tests
+        # can substitute a stub or pass ``None`` (the default detector
+        # falls back to SPEC §17.4 derivation when no GitHubClient is
+        # supplied — safe for tests using FakeGitHubTracker without a
+        # real REST surface).
+        self._evidence = evidence_detector or EvidenceDetector(
+            self.config.github,
+            client=getattr(tracker, "client", None),
+        )
 
     # -- Public API ---------------------------------------------------------
 
@@ -800,6 +816,20 @@ class Orchestrator:
                         exc,
                     )
 
+            permission_denials_count = _extract_permission_denials_count(worker)
+            detector_result = self._evidence.detect(
+                issue=worker.issue,
+                terminal_state=worker.terminal_state,
+                retryable=_is_retryable(worker, retry),
+                blocked=non_retryable_failure,
+                permission_denials_count=permission_denials_count,
+                last_event=worker.last_event,
+                # M5.2 detector reads last_event payload directly;
+                # M5.4 may pass a longer assistant-text tail.
+                recent_assistant_text="",
+                workspace_path=worker.workspace.path,
+            )
+            _maybe_log_task_outcome(worker, detector_result)
             worker.artifacts.write_json(
                 "terminal.json",
                 {
@@ -821,7 +851,12 @@ class Orchestrator:
                     # the agent needed Bash/AskUserQuestion). Count is
                     # surfaced so operators can grep terminal.json for
                     # incomplete runs without reparsing events.jsonl.
-                    "permission_denials_count": _extract_permission_denials_count(worker),
+                    "permission_denials_count": permission_denials_count,
+                    # SPEC §17.1 task-outcome row (M5.1 #61, populated by
+                    # the M5.2 #60 detector). Routing decisions remain
+                    # driven by terminal_state / retryable / blocked —
+                    # task_outcome is operator-visible signal only.
+                    **detector_result.to_terminal_fields(),
                 },
             )
             self.active.pop(worker.issue.identifier, None)
@@ -1080,6 +1115,25 @@ def _extract_permission_denials_count(worker: WorkerState) -> int:
             worker.issue.identifier,
         )
     return count
+
+
+def _maybe_log_task_outcome(worker: WorkerState, result: DetectorResult) -> None:
+    """Emit operator-visible WARNING for non-completed task outcomes (SPEC §17.7).
+
+    Generalizes the #45 ``permission_denials`` warning to every M5.1
+    incomplete/blocked/retryable outcome. Operators running at the
+    default ``--log-level info`` see misleading-success cases without
+    parsing artifacts.
+    """
+    if result.task_outcome in {OUTCOME_COMPLETED_WITH_PR, OUTCOME_COMPLETED_NO_PR_DECLARED}:
+        return
+    _LOG.warning(
+        "task_outcome=%s for %s (decided_by=%s) — see terminal.json and "
+        "docs/terminal-outcomes.md for diagnosis.",
+        result.task_outcome,
+        worker.issue.identifier,
+        result.outcome_decided_by,
+    )
 
 
 def _now_utc() -> datetime:
