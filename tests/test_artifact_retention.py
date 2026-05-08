@@ -207,11 +207,13 @@ async def test_orchestrator_runs_artifact_retention_before_dispatch(tmp_path: Pa
         logging=LoggingConfig(),
         workflow_path=tmp_path / "WORKFLOW.md",
     )
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
     orch = Orchestrator(
         cfg,
         tracker=FakeGitHubTracker(issues=[]),
         provider=FakeProvider(),
         workspace_manager=WorkspaceManager(cfg.workspace),
+        workflow_path=cfg.workflow_path,
         clock=lambda: datetime(2026, 5, 8, tzinfo=timezone.utc),
     )
 

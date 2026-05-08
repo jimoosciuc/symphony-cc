@@ -112,6 +112,8 @@ def _make_orchestrator(
         max_turns=max_turns,
         retry_resume_policy=retry_resume_policy,
     )
+    # M5.10 #70: orchestrator now requires workflow_path to exist for reload.
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
     tracker = FakeGitHubTracker(issues=issues)
     prov = provider or FakeProvider()
     mgr = WorkspaceManager(cfg.workspace)
@@ -120,6 +122,7 @@ def _make_orchestrator(
         tracker=tracker,
         provider=prov,
         workspace_manager=mgr,
+        workflow_path=cfg.workflow_path,
         continuation_policy=continuation_policy,
         clock=clock,
     )

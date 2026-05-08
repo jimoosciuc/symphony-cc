@@ -68,6 +68,39 @@ from symphony.workspace import WorkspaceManager
 _LOG = logging.getLogger("symphony.orchestrator")
 
 
+# -- Workflow reload (M5.10 #70) -----------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowSnapshot:
+    """Immutable workflow snapshot for last-known-good reload.
+
+    Captures the parsed config, prompt template, file identity metadata,
+    and a monotonically increasing revision counter. Active workers hold
+    a snapshot captured at dispatch time; reload affects only future work.
+    """
+
+    config: WorkflowConfig
+    prompt_template: str
+    workflow_path: Path
+    mtime: float
+    size: int
+    inode: int
+    revision: int
+    loaded_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ReloadResult:
+    """Outcome of one reload attempt."""
+
+    current_snapshot: WorkflowSnapshot
+    changed: bool  # file metadata changed
+    reloaded: bool  # parse+validate succeeded and config swapped
+    error: str | None  # parse/validation error message
+    dispatch_paused: bool  # true if changed but invalid (fail-closed)
+
+
 # A continuation policy lets tests inject "should we run another turn?"
 # without depending on a real prompt renderer. Returns the message to send
 # next or None to terminate the worker. The default policy runs exactly
@@ -126,6 +159,7 @@ class Orchestrator:
         tracker: TrackerProtocol,
         provider: AgentProviderProtocol,
         workspace_manager: WorkspaceManager,
+        workflow_path: Path,
         continuation_policy: ContinuationPolicy | None = None,
         run_id: str | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -178,13 +212,28 @@ class Orchestrator:
             redact_keys=self.config.logging.redact_keys,
             clock=self._clock,
         )
+        # M5.10 #70: last-known-good workflow snapshot for reload.
+        self._workflow_snapshot = self._make_initial_snapshot(
+            config, workflow_path, prompt_template=""
+        )
 
     # -- Public API ---------------------------------------------------------
 
     async def run_once(self) -> TickResult:
         result = TickResult()
 
-        # 0. M5.7 #66: age-based workspace sweep BEFORE reconcile.
+        # 0. M5.10 #70: poll workflow file and reload if changed.
+        reload_result = self.reload_workflow()
+        if reload_result.dispatch_paused:
+            _LOG.warning(
+                "reload: dispatch paused due to invalid workflow (error: %s)",
+                reload_result.error,
+            )
+            # Skip dispatch but continue reconciling active workers.
+            await self._reconcile(result)
+            return result
+
+        # 0.5. M5.7 #66: age-based workspace sweep BEFORE reconcile.
         # ``self.active`` here reflects the *previous* tick's workers
         # (reconcile hasn't run yet for this tick) — that's intentional:
         # the workers carried over from last tick are exactly the ones
@@ -198,7 +247,7 @@ class Orchestrator:
         self._artifact_retention.sweep()
         self._cleanup.sweep_for_age(active_identifiers=set(self.active.keys()))
 
-        # 0.5. M5.7 #66 / #82: closed/merged-PR workspace sweep, also
+        # 0.75. M5.7 #66 / #82: closed/merged-PR workspace sweep, also
         # before reconcile and using the same ``self.active`` snapshot
         # for the same reason. No-op when workspace.cleanup.enabled or
         # workspace.cleanup.on_closed_pr is False.
@@ -219,6 +268,165 @@ class Orchestrator:
         while True:
             await self.run_once()
             await asyncio.sleep(interval)
+
+    # -- Workflow reload (M5.10 #70) -------------------------------------------
+
+    def reload_workflow(self) -> ReloadResult:
+        """Poll workflow file metadata and reload if changed.
+
+        Returns a ReloadResult with the current snapshot and reload outcome.
+        No-op if file metadata unchanged. On parse/validation failure, keeps
+        the last-known-good snapshot and sets dispatch_paused=True.
+        """
+        prev = self._workflow_snapshot
+        path = prev.workflow_path
+
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            _LOG.warning("reload: could not stat %s: %s", path, exc)
+            return ReloadResult(
+                current_snapshot=prev,
+                changed=False,
+                reloaded=False,
+                error=f"stat failed: {exc}",
+                dispatch_paused=False,
+            )
+
+        # Check if file changed.
+        if stat.st_mtime == prev.mtime and stat.st_size == prev.size:
+            return ReloadResult(
+                current_snapshot=prev,
+                changed=False,
+                reloaded=False,
+                error=None,
+                dispatch_paused=False,
+            )
+
+        # File changed; attempt reload.
+        try:
+            from symphony.workflow import load_workflow
+
+            workflow_file = load_workflow(path)
+        except Exception as exc:
+            _LOG.warning(
+                "reload: parse failed for %s (revision %d): %s",
+                path,
+                prev.revision + 1,
+                exc,
+            )
+            return ReloadResult(
+                current_snapshot=prev,
+                changed=True,
+                reloaded=False,
+                error=str(exc),
+                dispatch_paused=True,
+            )
+
+        # Validate Class C fields.
+        validation_error = self._validate_class_c_fields(prev.config, workflow_file.config)
+        if validation_error:
+            _LOG.warning(
+                "reload: validation rejected for %s (revision %d): %s",
+                path,
+                prev.revision + 1,
+                validation_error,
+            )
+            return ReloadResult(
+                current_snapshot=prev,
+                changed=True,
+                reloaded=False,
+                error=validation_error,
+                dispatch_paused=True,
+            )
+
+        # Swap config atomically.
+        new_snapshot = WorkflowSnapshot(
+            config=workflow_file.config,
+            prompt_template=workflow_file.prompt_template,
+            workflow_path=path,
+            mtime=stat.st_mtime,
+            size=stat.st_size,
+            inode=stat.st_ino,
+            revision=prev.revision + 1,
+            loaded_at=self._clock(),
+        )
+        self.config = new_snapshot.config
+        self._workflow_snapshot = new_snapshot
+
+        _LOG.info(
+            "reload: accepted revision %d for %s (mtime=%s, size=%d)",
+            new_snapshot.revision,
+            path,
+            datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            stat.st_size,
+        )
+
+        return ReloadResult(
+            current_snapshot=new_snapshot,
+            changed=True,
+            reloaded=True,
+            error=None,
+            dispatch_paused=False,
+        )
+
+    def _make_initial_snapshot(
+        self, config: WorkflowConfig, workflow_path: Path, prompt_template: str
+    ) -> WorkflowSnapshot:
+        """Build the initial snapshot at orchestrator startup."""
+        stat = workflow_path.stat()
+        return WorkflowSnapshot(
+            config=config,
+            prompt_template=prompt_template,
+            workflow_path=workflow_path,
+            mtime=stat.st_mtime,
+            size=stat.st_size,
+            inode=stat.st_ino,
+            revision=1,
+            loaded_at=self._clock(),
+        )
+
+    def _validate_class_c_fields(
+        self, old: WorkflowConfig, new: WorkflowConfig
+    ) -> str | None:
+        """Check if any Class C (restart-required) field changed.
+
+        Returns an error message if validation fails, None if valid.
+        """
+        errors = []
+
+        if old.tracker.kind != new.tracker.kind:
+            errors.append(f"tracker.kind changed ({old.tracker.kind} → {new.tracker.kind})")
+        if old.tracker.owner != new.tracker.owner:
+            errors.append(f"tracker.owner changed ({old.tracker.owner} → {new.tracker.owner})")
+        if old.tracker.repo != new.tracker.repo:
+            errors.append(f"tracker.repo changed ({old.tracker.repo} → {new.tracker.repo})")
+        if old.tracker.token != new.tracker.token:
+            errors.append("tracker.token changed")
+
+        if old.workspace.root != new.workspace.root:
+            errors.append(f"workspace.root changed ({old.workspace.root} → {new.workspace.root})")
+
+        if old.claude.session_store != new.claude.session_store:
+            errors.append(
+                f"claude.session_store changed ({old.claude.session_store} → {new.claude.session_store})"
+            )
+        if old.claude.transcript_store != new.claude.transcript_store:
+            errors.append(
+                f"claude.transcript_store changed ({old.claude.transcript_store} → {new.claude.transcript_store})"
+            )
+        if old.claude.artifact_store != new.claude.artifact_store:
+            errors.append(
+                f"claude.artifact_store changed ({old.claude.artifact_store} → {new.claude.artifact_store})"
+            )
+        if old.claude.retry_resume_policy != new.claude.retry_resume_policy:
+            errors.append(
+                f"claude.retry_resume_policy changed ({old.claude.retry_resume_policy} → {new.claude.retry_resume_policy})"
+            )
+
+        if errors:
+            return "Class C fields changed (restart required): " + "; ".join(errors)
+        return None
 
     # -- Restart recovery (#31) ---------------------------------------------
 

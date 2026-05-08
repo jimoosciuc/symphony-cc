@@ -513,11 +513,13 @@ async def test_orchestrator_terminal_cleanup_fires_on_completion(
                 outcome_decided_by=DECIDED_BY_DETECTOR,
             )
 
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
     orch = Orchestrator(
         cfg,
         tracker=tracker,
         provider=FakeProvider(),
         workspace_manager=mgr,
+        workflow_path=cfg.workflow_path,
         evidence_detector=_StubDetector(),
     )
     await orch.run_once()
@@ -607,11 +609,13 @@ async def test_orchestrator_terminal_cleanup_skipped_for_incomplete_outcome(
                 outcome_decided_by=DECIDED_BY_DETECTOR,
             )
 
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
     orch = Orchestrator(
         cfg,
         tracker=tracker,
         provider=FakeProvider(),
         workspace_manager=mgr,
+        workflow_path=cfg.workflow_path,
         evidence_detector=_StubDetector(),
     )
     await orch.run_once()
@@ -682,11 +686,13 @@ def _make_orchestrator_for_sweep(
     cfg = _closed_pr_cfg(tmp_path, **(cleanup_overrides or {}))
     tracker = FakeGitHubTracker(issues=[])
     mgr = WorkspaceManager(cfg.workspace)
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
     orch = Orchestrator(
         cfg,
         tracker=tracker,
         provider=FakeProvider(),
         workspace_manager=mgr,
+        workflow_path=cfg.workflow_path,
     )
     return orch, tracker, mgr
 

@@ -685,7 +685,8 @@ async def test_orchestrator_writes_new_terminal_fields(tmp_path: Path) -> None:
         ]
     )
     mgr = WorkspaceManager(cfg.workspace)
-    orch = Orchestrator(cfg, tracker=tracker, provider=FakeProvider(), workspace_manager=mgr)
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
+    orch = Orchestrator(cfg, tracker=tracker, provider=FakeProvider(), workspace_manager=mgr, workflow_path=cfg.workflow_path)
     await orch.run_once()
 
     terminal_files = list(Path(tmp_path / "artifacts").rglob("terminal.json"))

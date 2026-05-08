@@ -88,6 +88,12 @@ def _config(tmp_path: Path) -> WorkflowConfig:
         logging=LoggingConfig(),
         workflow_path=tmp_path / "WORKFLOW.md",
     )
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
+
+
+
+    return WorkflowConfig(
+    )
 
 
 class _StubDetector:
@@ -120,11 +126,13 @@ def _make_orch(
     tracker = FakeGitHubTracker(issues=[_issue()])
     mgr = WorkspaceManager(cfg.workspace)
     detector = _StubDetector(outcome)
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
     orch = Orchestrator(
         cfg,
         tracker=tracker,
         provider=FakeProvider(),
         workspace_manager=mgr,
+        workflow_path=cfg.workflow_path,
         evidence_detector=detector,
     )
     return orch, tracker
@@ -296,11 +304,13 @@ async def test_pr_lookup_failure_does_not_block_issue(tmp_path: Path) -> None:
     # Wire the REAL detector (not a stub) so we exercise the
     # GitHubError → None code path that this test was added to lock in.
     detector = EvidenceDetector(cfg.github, client=client)
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
     orch = Orchestrator(
         cfg,
         tracker=tracker,
         provider=FakeProvider(),
         workspace_manager=mgr,
+        workflow_path=cfg.workflow_path,
         evidence_detector=detector,
     )
     await orch.run_once()

@@ -90,6 +90,12 @@ def _config(
         logging=LoggingConfig(),
         workflow_path=tmp_path / "WORKFLOW.md",
     )
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
+
+
+
+    return WorkflowConfig(
+    )
 
 
 def _make(
@@ -102,9 +108,10 @@ def _make(
     max_turns: int = 1,
 ) -> tuple[Orchestrator, FakeGitHubTracker]:
     cfg = _config(tmp_path, stall_ms=stall_ms, turn_ms=turn_ms, max_turns=max_turns)
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
     tracker = FakeGitHubTracker(issues=issues or [_issue()])
     mgr = WorkspaceManager(cfg.workspace)
-    orch = Orchestrator(cfg, tracker=tracker, provider=provider, workspace_manager=mgr)
+    orch = Orchestrator(cfg, tracker=tracker, provider=provider, workspace_manager=mgr, workflow_path=cfg.workflow_path)
     return orch, tracker
 
 
@@ -457,11 +464,12 @@ async def test_after_run_hook_runs_even_when_provider_fails(tmp_path: Path) -> N
         cfg,
         workspace=_replace(cfg.workspace, after_run=f"touch {marker}"),
     )
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
     bad = FakeTurnScript(events=[], raise_after=0, raise_with=ProviderError)
     prov = FakeProvider(default_script=bad)
     tracker = FakeGitHubTracker(issues=[_issue()])
     mgr = WorkspaceManager(cfg.workspace)
-    orch = Orchestrator(cfg, tracker=tracker, provider=prov, workspace_manager=mgr)
+    orch = Orchestrator(cfg, tracker=tracker, provider=prov, workspace_manager=mgr, workflow_path=cfg.workflow_path)
     await orch.run_once()
     assert marker.exists(), "after_run hook should run even on provider failure"
 

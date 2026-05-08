@@ -104,6 +104,12 @@ def _config(
         logging=LoggingConfig(),
         workflow_path=tmp_path / "WORKFLOW.md",
     )
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
+
+
+
+    return WorkflowConfig(
+    )
 
 
 def _make(
@@ -118,7 +124,8 @@ def _make(
         issues = [_issue()]
     tracker = FakeGitHubTracker(issues=issues)
     mgr = WorkspaceManager(cfg.workspace)
-    orch = Orchestrator(cfg, tracker=tracker, provider=provider, workspace_manager=mgr)
+    cfg.workflow_path.write_text("---\n---\ntest prompt")
+    orch = Orchestrator(cfg, tracker=tracker, provider=provider, workspace_manager=mgr, workflow_path=cfg.workflow_path)
     return orch, tracker, cfg
 
 

@@ -139,6 +139,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         tracker=tracker,
         provider=provider,
         workspace_manager=workspace_mgr,
+        workflow_path=workflow.path,
     )
 
     try:
