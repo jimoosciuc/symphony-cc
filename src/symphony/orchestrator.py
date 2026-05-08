@@ -814,6 +814,14 @@ class Orchestrator:
                     "provider_session_id": worker.session.provider_session_id,
                     "error": worker.error,
                     "turn_count": worker.turn_count,
+                    # SPEC §17 + #45: a turn that "completed" with one or
+                    # more denied tool calls is misleading-success — Claude
+                    # answered but could not perform the underlying action
+                    # (typically because the operator chose acceptEdits and
+                    # the agent needed Bash/AskUserQuestion). Count is
+                    # surfaced so operators can grep terminal.json for
+                    # incomplete runs without reparsing events.jsonl.
+                    "permission_denials_count": _extract_permission_denials_count(worker),
                 },
             )
             self.active.pop(worker.issue.identifier, None)
@@ -1033,6 +1041,45 @@ def _session_snapshot(session: SessionRecord) -> dict[str, Any]:
         "last_event_at": session.last_event_at,
         "terminal_state": session.terminal_state.value if session.terminal_state else None,
     }
+
+
+def _extract_permission_denials_count(worker: WorkerState) -> int:
+    """Pull the count of denied tool calls from the worker's last event (#45).
+
+    The Claude SDK surfaces ``permission_denials`` on every
+    ``ResultMessage``; the provider lands the list verbatim in the
+    ``turn_completed`` / ``turn_failed`` payload. Returns the length of
+    that list (0 if the field is missing or the last event isn't a
+    terminal turn event).
+
+    Defensive on payload shape: a future SDK that switches to a dict-
+    keyed-by-tool-name representation would surface as ``len(dict)``;
+    a malformed value (string, None) returns 0 rather than raising.
+    A non-zero count is logged at WARNING so an operator running
+    ``--log-level info`` (the default) sees the incomplete-success
+    signal even without parsing ``terminal.json``.
+    """
+    event = worker.last_event
+    if event is None:
+        return 0
+    payload = event.payload or {}
+    raw = payload.get("permission_denials")
+    if raw is None:
+        return 0
+    try:
+        count = len(raw)
+    except TypeError:
+        return 0
+    if count > 0:
+        _LOG.warning(
+            "permission_denials=%d on terminal event for %s — "
+            "Claude was denied tool calls under permission_mode; "
+            "the run may have completed without taking the requested action. "
+            "See docs/m3-runbook.md for the unattended permission contract.",
+            count,
+            worker.issue.identifier,
+        )
+    return count
 
 
 def _now_utc() -> datetime:

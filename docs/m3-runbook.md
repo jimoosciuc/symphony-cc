@@ -154,6 +154,16 @@ Fill in this template and post as a comment on
 - **Claim conflicts (`skipped_claim_conflict` non-empty)** — another
   Symphony run already claimed the issue. Manually remove the
   `symphony-running` label or wait for the other run to release.
+- **Run looks successful but no commits / no PR landed** — check
+  `terminal.json:permission_denials_count`. A non-zero count means
+  Claude was denied tool calls (typically `Bash` or
+  `AskUserQuestion`) under `permission_mode: acceptEdits`. Stock
+  unattended PR work needs `git`/`gh`/shell, so `acceptEdits` cannot
+  complete it — switch the workflow to `permission_mode:
+  bypassPermissions` (only on trusted hosts) and re-run. The
+  orchestrator also emits a WARNING log line when this happens, so
+  the signal shows up in `--log-level info` (the default) without
+  parsing artifacts.
 - **`session.json` shows `provider_session_id: null` after a turn** —
   Claude didn't return a `session_id` on the first message. Check
   `<artifact_dir>/events.jsonl` for the raw event sequence; file an

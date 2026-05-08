@@ -18,6 +18,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from symphony.config import (
     AgentConfig,
     ClaudeConfig,
@@ -325,6 +327,116 @@ async def test_successful_run_terminal_json_shape(tmp_path: Path) -> None:
     assert record["blocked"] is False
     assert record["subtype"] is None
     assert record["turn_count"] >= 1
+    # #45: clean run has zero permission denials surfaced.
+    assert record["permission_denials_count"] == 0
+
+
+# -- Permission denials surfaced (#45) --------------------------------------
+
+
+async def test_permission_denials_surfaced_in_terminal_json(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A turn_completed event whose payload carries ``permission_denials``
+    must surface the count in ``terminal.json`` AND emit a WARNING log so
+    operators do not mistake misleading-success for a clean unattended
+    completion. Repro of the leader E2E #42 misleading-success case under
+    ``permission_mode: acceptEdits``."""
+    import logging as _logging
+
+    script = FakeTurnScript(
+        events=[
+            ("message_delta", {"text": "I cannot run shell commands.", "block_index": 0}),
+            (
+                "turn_completed",
+                {
+                    "duration_ms": 1,
+                    "result": "I would run `ls` but lack permission.",
+                    "permission_denials": [
+                        {"tool_name": "Bash", "tool_use_id": "tu_1"},
+                        {"tool_name": "AskUserQuestion", "tool_use_id": "tu_2"},
+                    ],
+                },
+            ),
+        ],
+    )
+    prov = FakeProvider(default_script=script)
+    orch, _ = _make(tmp_path, provider=prov)
+    with caplog.at_level(_logging.WARNING, logger="symphony.orchestrator"):
+        await orch.run_once()
+
+    record = _read_terminal(tmp_path)
+    assert record["terminal_state"] == "completed"
+    assert record["permission_denials_count"] == 2
+    # WARNING text mentions the count, the issue identifier, and the
+    # operator-facing pointer to the runbook.
+    warnings = [r for r in caplog.records if r.levelno == _logging.WARNING]
+    permission_warnings = [r for r in warnings if "permission_denials=" in r.getMessage()]
+    assert permission_warnings, (
+        f"expected a permission_denials WARNING; got: {[r.getMessage() for r in warnings]}"
+    )
+    msg = permission_warnings[0].getMessage()
+    assert "acme/proj#1" in msg
+    assert "permission_mode" in msg
+    assert "m3-runbook" in msg
+
+
+async def test_permission_denials_count_zero_when_field_missing(tmp_path: Path) -> None:
+    """The default success script has no ``permission_denials`` key.
+    Count must be 0 (not absent / not raising) so operators always see
+    the same field shape in terminal.json."""
+    orch, _ = _make(tmp_path, provider=FakeProvider())
+    await orch.run_once()
+    record = _read_terminal(tmp_path)
+    assert "permission_denials_count" in record
+    assert record["permission_denials_count"] == 0
+
+
+def test_extract_permission_denials_count_defensive() -> None:
+    """Helper survives None last_event, missing payload, malformed
+    permission_denials values — never raises into the worker finally
+    block."""
+    from datetime import datetime, timezone
+
+    from symphony.events import AgentEvent
+    from symphony.orchestrator import _extract_permission_denials_count
+
+    # Build a minimal worker-like object with .last_event + .issue.
+    class _Stub:
+        def __init__(self, event):
+            self.last_event = event
+
+            class _I:
+                identifier = "x/y#1"
+
+            self.issue = _I()
+
+    assert _extract_permission_denials_count(_Stub(None)) == 0
+
+    # Wrong-shape payload: permission_denials is a string (would TypeError on len()
+    # only if it weren't a string — strings have len. Use an int instead).
+    bad = AgentEvent(
+        event="turn_completed",
+        timestamp=datetime.now(timezone.utc),
+        session_id="s",
+        provider="fake",
+        issue_identifier="x/y#1",
+        attempt=1,
+        payload={"permission_denials": 5},  # int has no len → TypeError → 0
+    )
+    assert _extract_permission_denials_count(_Stub(bad)) == 0
+
+    # Missing field entirely → 0.
+    none_payload = AgentEvent(
+        event="turn_completed",
+        timestamp=datetime.now(timezone.utc),
+        session_id="s",
+        provider="fake",
+        issue_identifier="x/y#1",
+        attempt=1,
+        payload={},
+    )
+    assert _extract_permission_denials_count(_Stub(none_payload)) == 0
 
 
 # -- after_run hook always runs ----------------------------------------------
