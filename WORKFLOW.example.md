@@ -39,6 +39,20 @@ github:
   claim_comment: true
   pr_link_comment: true
 
+# M7.1 security profiles: validate permission_mode against operator intent.
+# Profiles are NOT host-level sandbox guarantees — they describe intended
+# trust boundaries and reject obviously unsafe configurations.
+#
+# - conservative (default): human-safer profile compatible with acceptEdits.
+#   Permission denials remain operator-visible through terminal outcomes.
+# - trusted_unattended: intended for trusted repos/issues on trusted hosts.
+#   Allows unattended work and may use bypassPermissions (emits high-risk warning).
+# - restricted: read-only / no privileged tool posture. Rejects bypassPermissions.
+#   Task completion may require handoff or blocked outcomes.
+#
+# security:
+#   profile: conservative
+
 claude:
   model: claude-opus-4-7
   # `acceptEdits` lets Claude write files but blocks Bash, AskUserQuestion,
