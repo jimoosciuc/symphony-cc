@@ -125,6 +125,40 @@ def test_artifact_retention_does_not_overwrite_same_second_reports(
     }
 
 
+def test_artifact_retention_keeps_retention_reports(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    report_dir = root / REPORT_DIR_NAME
+    report_dir.mkdir(parents=True)
+    old_report = report_dir / "artifact-retention-20260401T000000Z.json"
+    old_report.write_text("{}", encoding="utf-8")
+    old_ts = datetime(2026, 4, 1, tzinfo=timezone.utc).timestamp()
+    os.utime(old_report, (old_ts, old_ts))
+
+    report = _executor(root).sweep()
+
+    assert old_report.exists()
+    assert report is not None
+    assert report.considered == 0
+
+
+def test_artifact_retention_report_write_error_does_not_fail_sweep(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "artifacts"
+    _attempt(root, "acme_proj_1", "1", mtime=datetime(2026, 4, 1, tzinfo=timezone.utc))
+
+    def _fail_write(self: Path, _data: str, *, encoding: str | None = None) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", _fail_write)
+
+    report = _executor(root, dry_run=True).sweep()
+
+    assert report is not None
+    assert report.considered == 1
+    assert report.skipped == 1
+
+
 def test_artifact_retention_records_delete_errors(
     tmp_path: Path, monkeypatch
 ) -> None:
