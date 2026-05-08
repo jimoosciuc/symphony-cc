@@ -7,14 +7,19 @@ fake/no-op mode for testing without real workspace/provider execution.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from symphony.artifacts import redact_text
+from symphony.artifacts import ArtifactWriter, redact_text
 from symphony.config import WorkflowConfig, build_config
+from symphony.events import TERMINAL_TURN_EVENTS, AgentEvent
+from symphony.models import Issue
+from symphony.provider.base import AgentProviderProtocol, SessionRecord, Terminal
 from symphony.remote.dispatch import DispatchRequest, load_dispatch_request
 from symphony.remote.protocol import WorkerEvent, serialize_worker_event
 
@@ -65,24 +70,21 @@ def main() -> int:
         print(f"Worker failed: {error_msg}", file=sys.stderr)
         return 1
 
+    if not args.dispatch_path:
+        print("Worker failed: --dispatch-path required", file=sys.stderr)
+        return 1
+
+    try:
+        dispatch = load_dispatch_request(args.dispatch_path)
+    except Exception as e:
+        error_msg = _redact_error_message(str(e), raw_snapshot)
+        print(f"Worker failed: {error_msg}", file=sys.stderr)
+        return 1
+
     if args.fake:
-        # Fake mode requires dispatch request
-        if not args.dispatch_path:
-            print("Worker failed: --dispatch-path required for --fake mode", file=sys.stderr)
-            return 1
-
-        try:
-            dispatch = load_dispatch_request(args.dispatch_path)
-        except Exception as e:
-            error_msg = _redact_error_message(str(e), raw_snapshot)
-            print(f"Worker failed: {error_msg}", file=sys.stderr)
-            return 1
-
         return run_fake_worker(config, dispatch)
 
-    # Real worker execution not implemented yet
-    print("Real worker execution not implemented", file=sys.stderr)
-    return 1
+    return asyncio.run(run_real_worker(config, dispatch))
 
 
 def load_and_validate_snapshot(snapshot_path: Path) -> WorkflowConfig:
@@ -257,6 +259,284 @@ def run_fake_worker(config: WorkflowConfig, dispatch: DispatchRequest) -> int:
     print(serialize_worker_event(event), flush=True)
 
     return 0
+
+
+ProviderFactory = Callable[[WorkflowConfig], AgentProviderProtocol]
+EmitLine = Callable[[str], None]
+
+
+async def run_real_worker(
+    config: WorkflowConfig,
+    dispatch: DispatchRequest,
+    *,
+    provider_factory: ProviderFactory | None = None,
+    emit: EmitLine | None = None,
+) -> int:
+    """Run a real worker attempt with injectable provider I/O for tests."""
+    emit = emit or (lambda line: print(line, flush=True))
+    provider_factory = provider_factory or _default_provider_factory
+    host = config.remote.host or "remote-host"
+    artifact_root = Path(dispatch.artifact_path)
+    artifacts = ArtifactWriter(artifact_root, redact_keys=config.logging.redact_keys)
+    issue = _issue_from_dispatch(dispatch)
+    session: SessionRecord | None = None
+    provider: AgentProviderProtocol | None = None
+    terminal_state = Terminal.FAILED
+    terminal_reason = "worker_failed"
+    error: str | None = None
+
+    try:
+        workspace_path = _validated_workspace_path(dispatch, config)
+        _emit_worker_event(
+            "worker_started",
+            config=config,
+            dispatch=dispatch,
+            host=host,
+            emit=emit,
+            fields={"worker_id": f"{dispatch.issue_identifier}:{dispatch.attempt}"},
+        )
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        _emit_worker_event(
+            "workspace_ready",
+            config=config,
+            dispatch=dispatch,
+            host=host,
+            emit=emit,
+            fields={"workspace_path": str(workspace_path)},
+        )
+
+        artifacts.write_json(
+            "request.json",
+            {
+                "issue_identifier": dispatch.issue_identifier,
+                "workspace_path": str(workspace_path),
+                "attempt": dispatch.attempt,
+                "model": config.claude.model,
+                "permission_mode": config.claude.permission_mode,
+                "security_profile": config.security.profile,
+                "execution": "remote",
+            },
+        )
+
+        provider = provider_factory(config)
+        session = await provider.start_session(issue, workspace_path, config.claude)
+        session.attempt = dispatch.attempt
+        session.artifact_dir = artifact_root
+        artifacts.write_json("session.json", _session_snapshot(session))
+
+        terminal_event: AgentEvent | None = None
+        async for event in provider.send_input(
+            session,
+            f"first prompt for {dispatch.issue_identifier}",
+        ):
+            artifacts.append_event(event)
+            session.last_event_at = event.timestamp
+            if event.event == "session_started":
+                _emit_worker_event(
+                    "session_started",
+                    config=config,
+                    dispatch=dispatch,
+                    host=host,
+                    emit=emit,
+                    fields={
+                        "session_id": session.session_id,
+                        "provider_session_id": (
+                            event.payload.get("session_id")
+                            or session.provider_session_id
+                            or "unknown"
+                        ),
+                    },
+                )
+                _emit_worker_event(
+                    "heartbeat",
+                    config=config,
+                    dispatch=dispatch,
+                    host=host,
+                    emit=emit,
+                    fields={"status": "running"},
+                )
+            if event.event in TERMINAL_TURN_EVENTS:
+                terminal_event = event
+                break
+
+        if terminal_event is None:
+            raise RuntimeError("provider stream ended without terminal event")
+
+        if terminal_event.event == "turn_completed":
+            terminal_state = Terminal.COMPLETED
+            terminal_reason = "turn_completed"
+            _emit_worker_event(
+                "turn_completed",
+                config=config,
+                dispatch=dispatch,
+                host=host,
+                emit=emit,
+                fields={"terminal": terminal_event.event},
+            )
+            _emit_worker_event(
+                "worker_completed",
+                config=config,
+                dispatch=dispatch,
+                host=host,
+                emit=emit,
+                fields={
+                    "exit_code": 0,
+                    "artifact_path": str(artifact_root),
+                    "artifacts_ready": True,
+                },
+            )
+            return 0
+
+        terminal_reason = terminal_event.event
+        error = terminal_event.payload.get("reason") or terminal_event.event
+        _emit_worker_failed(
+            config=config,
+            dispatch=dispatch,
+            host=host,
+            emit=emit,
+            message=str(error),
+            error_type="provider_terminal",
+            retryable=terminal_event.event == "turn_cancelled",
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 - worker boundary must fail closed
+        error = _redact_runtime_error(str(exc), config)
+        _emit_worker_failed(
+            config=config,
+            dispatch=dispatch,
+            host=host,
+            emit=emit,
+            message=error,
+            error_type=type(exc).__name__,
+            retryable=True,
+        )
+        return 1
+    finally:
+        if session is not None and provider is not None:
+            try:
+                await provider.close(session)
+            except Exception:
+                pass
+            artifacts.write_json("session.json", _session_snapshot(session))
+        artifacts.write_json(
+            "terminal.json",
+            {
+                "terminal_state": terminal_state.value,
+                "reason": terminal_reason,
+                "error": error,
+                "retryable": terminal_state != Terminal.COMPLETED,
+                "execution": "remote",
+            },
+        )
+
+
+def _default_provider_factory(config: WorkflowConfig) -> AgentProviderProtocol:
+    from symphony.provider import ClaudeCodeProvider
+
+    return ClaudeCodeProvider()
+
+
+def _validated_workspace_path(
+    dispatch: DispatchRequest,
+    config: WorkflowConfig,
+) -> Path:
+    if not config.remote.workspace_root:
+        raise ValueError("remote.workspace_root is required")
+    root = Path(config.remote.workspace_root)
+    workspace = Path(dispatch.workspace_path)
+    if not workspace.is_absolute():
+        raise ValueError("dispatch.workspace_path must be absolute")
+    try:
+        workspace.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("dispatch.workspace_path must be inside remote.workspace_root") from exc
+    return workspace
+
+
+def _issue_from_dispatch(dispatch: DispatchRequest) -> Issue:
+    return Issue(
+        id=dispatch.issue_identifier,
+        number=dispatch.issue_number,
+        identifier=dispatch.issue_identifier,
+        owner=dispatch.owner,
+        repo=dispatch.repo,
+        title=f"Remote issue {dispatch.issue_identifier}",
+        body="",
+        state="open",
+        url=f"https://github.com/{dispatch.owner}/{dispatch.repo}/issues/{dispatch.issue_number}",
+    )
+
+
+def _emit_worker_event(
+    event: str,
+    *,
+    config: WorkflowConfig,
+    dispatch: DispatchRequest,
+    host: str,
+    emit: EmitLine,
+    fields: dict[str, Any],
+) -> None:
+    line = serialize_worker_event(
+        WorkerEvent(
+            event=event,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            issue_identifier=dispatch.issue_identifier,
+            attempt=dispatch.attempt,
+            host=host,
+            fields=fields,
+        ),
+        redact_keys=config.logging.redact_keys,
+    )
+    emit(line)
+
+
+def _emit_worker_failed(
+    *,
+    config: WorkflowConfig,
+    dispatch: DispatchRequest,
+    host: str,
+    emit: EmitLine,
+    message: str,
+    error_type: str,
+    retryable: bool,
+) -> None:
+    _emit_worker_event(
+        "worker_failed",
+        config=config,
+        dispatch=dispatch,
+        host=host,
+        emit=emit,
+        fields={
+            "error_type": error_type,
+            "message": _redact_runtime_error(message, config),
+            "retryable": retryable,
+        },
+    )
+
+
+def _redact_runtime_error(message: str, config: WorkflowConfig) -> str:
+    return redact_text(
+        message,
+        redact_keys=config.logging.redact_keys,
+        extra_secrets=(config.tracker.token,),
+    )
+
+
+def _session_snapshot(session: SessionRecord) -> dict[str, Any]:
+    return {
+        "session_id": session.session_id,
+        "provider": session.provider,
+        "provider_session_id": session.provider_session_id,
+        "issue_identifier": session.issue_identifier,
+        "issue_number": session.issue_number,
+        "workspace_path": str(session.workspace_path),
+        "artifact_dir": str(session.artifact_dir),
+        "attempt": session.attempt,
+        "turn_count": session.turn_count,
+        "started_at": session.started_at,
+        "last_event_at": session.last_event_at,
+        "terminal_state": session.terminal_state.value if session.terminal_state else None,
+    }
 
 if __name__ == "__main__":
     sys.exit(main())
