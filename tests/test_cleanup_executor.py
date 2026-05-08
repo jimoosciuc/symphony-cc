@@ -23,6 +23,7 @@ Surface tested (mapping to #66 acceptance criteria):
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -692,9 +693,34 @@ def _make_orchestrator_for_sweep(
 
 def _seed_workspace_dir(mgr: WorkspaceManager, number: int) -> Path:
     """Create an on-disk workspace dir mirroring WorkspaceManager naming."""
-    path = mgr.root / f"acme_proj_{number}"
+    issue = _issue(owner="acme", repo="proj", number=number)
+    return _seed_workspace_dir_for_issue(mgr, issue)
+
+
+def _seed_workspace_dir_for_issue(mgr: WorkspaceManager, issue: Issue) -> Path:
+    """Create a workspace dir plus authoritative session metadata."""
+    path = mgr.workspace_path(issue)
     path.mkdir(parents=True, exist_ok=True)
     (path / "marker").write_text("seed")
+    session_store = mgr.root.parent / "sessions"
+    session_store.mkdir(parents=True, exist_ok=True)
+    (session_store / f"sym-{issue.number}.json").write_text(
+        json.dumps(
+            {
+                "session_id": f"sym-{issue.number}",
+                "provider": "fake",
+                "issue_identifier": issue.identifier,
+                "issue_number": issue.number,
+                "workspace_path": str(path),
+                "artifact_dir": str(mgr.root.parent / "artifacts" / f"sym-{issue.number}"),
+                "attempt": 1,
+                "started_at": "2026-05-08T00:00:00+00:00",
+                "terminal_state": "completed",
+                "session_store": str(session_store),
+            }
+        ),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -738,6 +764,23 @@ async def test_orchestrator_closed_pr_sweep_deletes_when_pr_merged(
         )
     )
     tracker.add_linked_pr("acme/proj#7", _pr(700, state="merged"))
+
+    await orch.run_once()
+
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_closed_pr_sweep_uses_session_metadata_not_dir_parsing(
+    tmp_path: Path,
+) -> None:
+    """Workspace names are sanitized and one-way; the sweep must use the
+    session record's issue metadata instead of reverse-parsing the dir."""
+    orch, tracker, mgr = _make_orchestrator_for_sweep(tmp_path)
+    issue = _issue(owner="ac_me", repo="pr_oj", number=60)
+    path = _seed_workspace_dir_for_issue(mgr, issue)
+    tracker.add_issue(issue)
+    tracker.add_linked_pr(issue.identifier, _pr(6000, state="merged"))
 
     await orch.run_once()
 

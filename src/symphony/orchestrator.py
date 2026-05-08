@@ -58,10 +58,11 @@ from symphony.recovery import (
     ACTION_SKIPPED,
     RecoveryDecision,
     discover_persisted_records,
+    discover_workspace_records,
     issue_is_actionable,
 )
 from symphony.retry import RetryState, next_backoff_ms
-from symphony.workspace import WorkspaceManager, workspace_key_from_identifier
+from symphony.workspace import WorkspaceManager
 
 _LOG = logging.getLogger("symphony.orchestrator")
 
@@ -537,12 +538,10 @@ class Orchestrator:
     def _sweep_for_closed_prs(self) -> None:
         """Per-tick sweep that wires :meth:`cleanup_for_closed_pr` (#82).
 
-        For each per-issue workspace dir under ``workspace.root`` whose
-        key is NOT held by an active worker:
+        For each persisted session record whose workspace path still
+        exists and whose issue is NOT currently active:
 
-        - Reconstruct a synthetic :class:`Issue` from the dir name
-          (``{owner}_{repo}_{number}``) using the configured tracker
-          ``owner``/``repo`` as the prefix anchor.
+        - Reconstruct a minimal :class:`Issue` from session metadata.
         - Look up linked PRs via :meth:`tracker.find_linked_pull_requests`.
         - If ANY linked PR is still ``"open"``, preserve the workspace
           (executor returns ``KEPT_PR_OPEN``).
@@ -558,41 +557,27 @@ class Orchestrator:
         cleanup_cfg = self.config.workspace.cleanup
         if not cleanup_cfg.enabled or not cleanup_cfg.on_closed_pr:
             return
-        root = self.workspaces.root
-        if not root.is_dir():
-            return
-        active_keys = {workspace_key_from_identifier(i) for i in self.active.keys()}
-        owner = self.config.tracker.owner
-        repo = self.config.tracker.repo
-        prefix = f"{owner}_{repo}_"
-        for entry in sorted(root.iterdir()):
-            if not entry.is_dir():
+        active_identifiers = set(self.active.keys())
+        for _record_path, record in discover_workspace_records(
+            self.config.claude.session_store
+        ):
+            if record.issue_identifier in active_identifiers:
                 continue
-            if entry.name in active_keys:
+            if not record.workspace_path.is_dir():
                 continue
-            if not entry.name.startswith(prefix):
+            synthetic_issue = _issue_from_session_record(record)
+            if synthetic_issue is None:
+                _LOG.warning(
+                    "closed-pr sweep: malformed session issue identifier %s — skipping",
+                    record.issue_identifier,
+                )
                 continue
-            try:
-                number = int(entry.name[len(prefix):])
-            except ValueError:
-                continue
-            synthetic_issue = Issue(
-                id=f"workspace_dir_{number}",
-                number=number,
-                identifier=f"{owner}/{repo}#{number}",
-                owner=owner,
-                repo=repo,
-                title="(synthetic from workspace dir)",
-                body="",
-                state="unknown",
-                url=f"https://github.com/{owner}/{repo}/issues/{number}",
-            )
             try:
                 prs = self.tracker.find_linked_pull_requests(synthetic_issue)
             except TrackerError as exc:
                 _LOG.warning(
                     "closed-pr sweep: tracker lookup failed for %s: %s — skipping",
-                    entry.name,
+                    record.issue_identifier,
                     exc,
                 )
                 continue
@@ -600,10 +585,10 @@ class Orchestrator:
                 continue
             workspace = Workspace(
                 issue_identifier=synthetic_issue.identifier,
-                workspace_key=entry.name,
-                path=entry,
-                repo_path=entry,
-                created_at=self._clock(),
+                workspace_key=record.workspace_path.name,
+                path=record.workspace_path,
+                repo_path=record.workspace_path,
+                created_at=record.started_at,
                 reused=True,
             )
             if any(p.state == "open" for p in prs):
@@ -1324,6 +1309,39 @@ def _stamp_record_terminal(path: Path, record: SessionRecord, terminal: Terminal
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(existing, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def _issue_from_session_record(record: SessionRecord) -> Issue | None:
+    """Build the minimal Issue shell needed for linked-PR lookup.
+
+    ``SessionRecord.issue_identifier`` is authoritative metadata written
+    at dispatch time. Do not derive this from the workspace directory
+    name: workspace keys are sanitized and intentionally one-way.
+    """
+    ident = record.issue_identifier
+    if "#" not in ident or "/" not in ident:
+        return None
+    owner_repo, number_text = ident.rsplit("#", 1)
+    owner, repo = owner_repo.split("/", 1)
+    if not owner or not repo:
+        return None
+    try:
+        number = int(number_text)
+    except ValueError:
+        return None
+    if number != record.issue_number:
+        number = record.issue_number
+    return Issue(
+        id=ident,
+        number=number,
+        identifier=ident,
+        owner=owner,
+        repo=repo,
+        title="",
+        body="",
+        state="open",
+        url=f"https://github.com/{owner}/{repo}/issues/{number}",
+    )
 
 
 # -- turn_failed classification (#30) ---------------------------------------
