@@ -751,6 +751,146 @@ Recommended files:
 
 Secrets MUST be redacted.
 
+### 17.1 Terminal Artifact Schema
+
+`terminal.json` is the per-attempt outcome record. It MUST distinguish
+two orthogonal axes:
+
+- **Provider outcome** — what the agent SDK reported (turn completed,
+  turn failed, cancelled, crashed). Driven by the provider event stream.
+- **Task outcome** — what Symphony observed in the world after the
+  provider stopped (linked PR, branch pushed, explicit no-PR
+  declaration, permission denials, no evidence at all). Driven by
+  Symphony's evidence detector.
+
+A clean provider turn is NOT sufficient evidence of a clean task
+outcome. SPEC §17 requires that a run which only produced a
+clarification message — or that completed with permission denials and
+no PR — is NOT silently labelled successful.
+
+#### Required fields (provider outcome — existing, unchanged)
+
+| field | type | notes |
+|---|---|---|
+| `terminal_state` | enum | `completed` / `failed` / `cancelled` / `crashed` / `ended` |
+| `reason` | string | One-token provider-side reason (`completed`, `stall_timeout`, `turn_timeout`, `auth_failed`, …) |
+| `retryable` | bool | Did the orchestrator schedule a retry? |
+| `subtype` | string \| null | Timeout subtype (`stall_timeout` / `turn_timeout`) when applicable |
+| `blocked` | bool | True when the run failed non-retryably and was marked `symphony-blocked` |
+| `last_event_at` | timestamp \| null | Timestamp of the last event from the provider |
+| `provider_session_id` | string \| null | Provider-native session id (Claude session uuid, etc.) |
+| `error` | string \| null | Provider error string when applicable |
+| `turn_count` | int | Number of completed turns |
+| `permission_denials_count` | int | Count of denied tool calls on the last terminal event (#45) |
+
+#### Required fields (task outcome — NEW)
+
+| field | type | notes |
+|---|---|---|
+| `task_outcome` | enum | One of the values in §17.2 |
+| `task_evidence` | array | Zero or more evidence objects (§17.3); empty when no detector ran |
+| `outcome_decided_by` | enum | `detector` (M5.2 evidence detector ran) / `derivation` (mapped from provider fields per §17.4) / `unknown` |
+| `no_pr_reason` | string \| null | Required when `task_outcome == "completed_no_pr_declared"`; otherwise null |
+| `task_outcome_recorded_at` | timestamp | When the orchestrator wrote `task_outcome` (UTC ISO 8601) |
+
+### 17.2 Allowed `task_outcome` values
+
+| value | meaning |
+|---|---|
+| `completed_with_pr` | A linked pull request was created or updated for this issue. Evidence: at least one `pr_linked` entry. |
+| `completed_no_pr_declared` | Claude explicitly declared no change is needed (e.g. via a sentinel marker on the issue) and the orchestrator detected the declaration. Evidence: `no_pr_declared` entry; `no_pr_reason` populated. |
+| `incomplete_no_evidence` | Provider turn completed but no PR / no branch / no declaration was detected. Default for COMPLETED runs whose detector found nothing — this is the misleading-success case (#42 / #45). |
+| `incomplete_permission_denied` | Provider turn completed AND `permission_denials_count > 0` AND no other completion evidence. The run was bounced by `permission_mode` (typically `acceptEdits` denying `Bash` / `AskUserQuestion`). |
+| `blocked_operator_required` | Non-retryable failure; the issue carries `symphony-blocked` and an operator must intervene. Includes auth failures, invalid workflow, unsupported provider, restore failures under `fail_closed`. |
+| `retryable_failure` | Transient failure; orchestrator scheduled (or will schedule) a retry per `RetryConfig`. Includes turn / stall timeouts, provider crashes, transient API errors. |
+| `unknown` | Detector did not run AND derivation could not classify the outcome. Operators should treat this as needing investigation. |
+
+### 17.3 `task_evidence` entries
+
+Each evidence object is `{ "type": <kind>, … }`. The orchestrator
+appends entries as the M5.2 detector finds them; consumers MUST tolerate
+unknown `type` values for forward compatibility.
+
+| `type` | additional fields | sufficient for which `task_outcome` |
+|---|---|---|
+| `pr_linked` | `url` (string), `number` (int), `state` (`open` / `closed` / `merged`), `created` (bool — true when this run created the PR, false when it only updated it) | `completed_with_pr` |
+| `branch_pushed` | `name` (string), `head_sha` (string) | Necessary but NOT sufficient by itself — usually accompanied by `pr_linked`. Recorded for audit. |
+| `diff_in_workspace` | `files_changed` (int), `lines_added` (int), `lines_removed` (int) | Informational only. Does NOT promote `incomplete_no_evidence` to `completed_*` because uncommitted local edits don't reach GitHub. |
+| `no_pr_declared` | `reason` (string), `marker_source` (`issue_comment` / `assistant_message` / `terminal_marker`) | `completed_no_pr_declared` |
+| `issue_handoff` | `label_added` (string \| null), `comment_url` (string \| null) | `blocked_operator_required` (when label is the configured `blocked_label`) |
+| `permission_denied` | `denials_count` (int), `tool_names` (array of strings) | Companion to `permission_denials_count`; promotes COMPLETED to `incomplete_permission_denied` when no other evidence is present. |
+
+### 17.4 Derivation rules (when no detector runs)
+
+Until M5.2 ships the evidence detector, the orchestrator derives
+`task_outcome` from existing fields. These rules also serve as the
+fallback for any future code path that bypasses the detector
+(`outcome_decided_by` set to `derivation`):
+
+| derived `task_outcome` | preconditions |
+|---|---|
+| `incomplete_permission_denied` | `terminal_state == completed` AND `permission_denials_count > 0` |
+| `blocked_operator_required` | `terminal_state == failed` AND `blocked == true` |
+| `retryable_failure` | `terminal_state in {failed, cancelled, crashed}` AND `retryable == true` |
+| `incomplete_no_evidence` | `terminal_state == completed` AND `permission_denials_count == 0` AND no detector ran |
+| `unknown` | none of the above match |
+
+Note the conservative default: a clean provider completion with no
+detector evidence becomes `incomplete_no_evidence`, NOT `completed_*`.
+This is the SPEC §17.1 contract — provider success ≠ task success.
+
+### 17.5 Sufficient evidence for GitHub issue work
+
+For an issue dispatched via the GitHub tracker, a `task_outcome` of
+`completed_with_pr` requires at least one `pr_linked` evidence entry
+whose `number` matches a PR linked to the issue (via PR body text,
+GitHub's `Closes #N` syntax, or the comment created by
+`create_or_update_pr_link_comment`). The detector MAY require
+additional matching (e.g. branch name follows `branch_prefix` /
+`expected_branch_name`); this tightening is left to M5.2.
+
+A `completed_no_pr_declared` outcome requires both:
+
+1. A `no_pr_declared` evidence entry, AND
+2. A populated `no_pr_reason` field that explains why no change was
+   needed. The `marker_source` indicates how the declaration was
+   detected (Claude's final `assistant_message`, an `issue_comment`
+   with a sentinel marker like `Symphony-No-PR: <reason>`, or a
+   workflow-specific terminal marker).
+
+The exact sentinel format and detection heuristics are deferred to
+M5.2 (#60). This SPEC pins the schema and the contract; #60 fills in
+the recognition logic.
+
+### 17.6 Backward compatibility
+
+- The provider-outcome fields in §17.1 are unchanged from prior SPEC
+  versions. Existing tooling that reads `terminal_state`, `reason`,
+  `retryable`, `blocked`, `subtype`, `permission_denials_count`,
+  `error`, or `turn_count` continues to work.
+- New fields (§17.1 task outcome row) MUST be present in every
+  `terminal.json` written after M5.1 lands. Consumers reading older
+  artifacts (no `task_outcome`) MUST treat the missing value as
+  `unknown` rather than asserting any positive outcome.
+- `task_evidence` MAY be empty (no detector ran or no evidence
+  found). An empty list is NOT itself evidence of a clean run.
+- `outcome_decided_by` documents the provenance. Operators auditing
+  past artifacts can filter on `outcome_decided_by == "detector"` to
+  isolate runs whose `task_outcome` reflects real-world observation
+  rather than a derivation fallback.
+- No GitHub Projects fields are added. The schema is repository /
+  issue / PR centric (matching the rest of SPEC).
+
+### 17.7 Operator-visible logging requirement
+
+Whenever the orchestrator writes a `task_outcome` other than
+`completed_with_pr` or `completed_no_pr_declared`, it MUST emit at
+least one operator-visible log entry at `WARNING` (or higher) naming
+the issue identifier and the outcome value. This generalizes the
+`permission_denials_count > 0` warning shipped in #45 so operators
+running at `--log-level info` see every misleading-success case
+without parsing artifacts.
+
 ## 18. Optional Tools
 
 Symphony MAY expose client-side tools to Claude Code.
