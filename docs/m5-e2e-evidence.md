@@ -46,16 +46,30 @@ manufactured a second time.
 | Workspace | `/private/tmp/.symphony/workspaces/jimoosciuc_symphony-cc_64` |
 | Artifact dir | `/private/tmp/.symphony/runs-m55-2/jimoosciuc_symphony-cc_64/1/` |
 | Branch | `symphony/jimoosciuc-symphony-cc-64` |
-| PR | This document's PR (URL filled in on the PR body once opened). |
-| Expected `task_outcome` | `completed_with_pr` |
-| Expected `outcome_decided_by` | `detector` |
+| PR | [jimoosciuc/symphony-cc#77](https://github.com/jimoosciuc/symphony-cc/pull/77). |
+| `terminal_state` | `completed` |
+| `task_outcome` | `completed_with_pr` |
+| `outcome_decided_by` | `detector` |
+| `permission_denials_count` | 0 |
+| `blocked` | `false` |
+| `retryable` | `false` |
+| `task_evidence` | `pr_linked` for PR #77, `branch_pushed` for `symphony/jimoosciuc-symphony-cc-64`, and `diff_in_workspace` with 2 files changed. |
 
-The PR body (not this file) is where the *post-run* `terminal.json`
-fields are pasted, because `terminal.json` is finalized by the
-orchestrator after the provider stream closes — i.e. after this commit
-already exists on the branch. The reviewer should re-read
-`terminal.json` at the artifact dir above once Symphony reports the
-session as terminal.
+The finalized `terminal.json` confirms the happy-path gate:
+
+```json
+{
+  "blocked": false,
+  "outcome_decided_by": "detector",
+  "permission_denials_count": 0,
+  "provider_session_id": "8044a984-4360-4687-8ba7-c47f34397691",
+  "reason": "completed",
+  "retryable": false,
+  "task_outcome": "completed_with_pr",
+  "terminal_state": "completed",
+  "turn_count": 1
+}
+```
 
 ## Scenario 2 — Incomplete / permission-denied path
 
@@ -118,7 +132,7 @@ The following were verified on 2026-05-08:
   so the routing layer is allowed to act on the outcome.
 - The two axes disagree in the way `docs/terminal-outcomes.md`
   describes: `terminal_state: completed` + `task_outcome:
-  incomplete_permission_denied` for run 1, and (expected)
+  incomplete_permission_denied` for run 1, and
   `terminal_state: completed` + `task_outcome: completed_with_pr` for
   run 2.
 - `pytest` against the in-tree unit suite still passes (the M5.5
