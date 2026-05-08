@@ -135,7 +135,7 @@ Fields the provider sets, sourced from `claude:` block in `WORKFLOW.md`
 | Option                 | Source                              | Notes                                                                                |
 | ---------------------- | ----------------------------------- | ------------------------------------------------------------------------------------ |
 | `cwd`                  | `workspace.path`                    | Absolute path. SDK launches the CLI here; tools and edits scope to this dir.         |
-| `model`                | `claude.model`                      | e.g. `claude-sonnet-4-5`. Provider does not default — config layer does.             |
+| `model`                | `claude.model`                      | e.g. `claude-opus-4-7`. Provider does not default — config layer does.             |
 | `permission_mode`      | `claude.permission_mode`            | See §7. Must be one of the SDK literals.                                             |
 | `resume`               | `session_record.provider_session_id` | Set only on `restore()`.                                                             |
 | `fork_session`         | always `False`                      | Symphony retries on the same id; forking would lose continuity.                      |
