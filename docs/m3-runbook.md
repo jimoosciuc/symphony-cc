@@ -82,7 +82,15 @@ What happens:
 3. The first eligible issue is claimed (`symphony-running` label
    added; if `claim_comment: true`, a comment is posted).
 4. A workspace is created at
-   `<workspace.root>/<owner>_<repo>_<issue_number>/`.
+   `<workspace.root>/<owner>_<repo>_<issue_number>/`. When
+   `workspace.populate: git` is set (the default in
+   `WORKFLOW.example.md`), Symphony clones the tracker repo into the
+   workspace from `github.base_branch` on first run, and on reuse
+   refreshes via `git fetch` + `git reset --hard origin/<base_branch>`
+   + `git clean -fdx`. Reuse is destructive of any uncommitted local
+   state by design — every dispatch starts from a deterministic
+   checkout. The `tracker.token` is used for clone auth and is NEVER
+   persisted into `.git/config`.
 5. `ClaudeCodeProvider.start_session` connects to the local Claude
    CLI; `send_input` drives one turn with the rendered first prompt.
 6. Claude's session ID is captured into
