@@ -22,6 +22,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from symphony.remote.config import RemoteConfig
+
 # -- Errors --------------------------------------------------------------------
 
 
@@ -294,6 +296,7 @@ class WorkflowConfig:
     polling: PollingConfig = field(default_factory=PollingConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    remote: RemoteConfig = field(default_factory=RemoteConfig)
     workflow_path: Path | None = None
     warnings: tuple[ConfigWarning, ...] = ()
 
@@ -742,6 +745,71 @@ def _build_security(raw: dict[str, Any]) -> SecurityConfig:
     return SecurityConfig(profile=profile)
 
 
+def _build_remote(raw: dict[str, Any]) -> RemoteConfig:
+    """Build RemoteConfig from optional 'remote' section.
+
+    Remote execution is disabled by default. When enabled, required fields
+    (host, workspace_root, artifact_root, session_store) must be present.
+    """
+    location = "remote"
+    section = raw.get(location) or {}
+    if not isinstance(section, dict):
+        raise ConfigError(location, f"must be a mapping, got {type(section).__name__}")
+
+    enabled = _opt_bool(section, "enabled", location, default=False)
+    host = _opt_str(section, "host", location)
+    workspace_root = _opt_str(section, "workspace_root", location)
+    artifact_root = _opt_str(section, "artifact_root", location)
+    session_store = _opt_str(section, "session_store", location)
+    worker_timeout_ms = _opt_int(
+        section, "worker_timeout_ms", location, default=7_200_000
+    )
+    heartbeat_interval_ms = _opt_int(
+        section, "heartbeat_interval_ms", location, default=30_000
+    )
+    stall_timeout_ms = _opt_int(section, "stall_timeout_ms", location, default=300_000)
+
+    for key, value in (
+        ("worker_timeout_ms", worker_timeout_ms),
+        ("heartbeat_interval_ms", heartbeat_interval_ms),
+        ("stall_timeout_ms", stall_timeout_ms),
+    ):
+        if value < 1:
+            raise ConfigError(f"{location}.{key}", "must be >= 1")
+
+    if heartbeat_interval_ms >= stall_timeout_ms:
+        raise ConfigError(
+            f"{location}.heartbeat_interval_ms",
+            "must be less than remote.stall_timeout_ms",
+        )
+    if stall_timeout_ms > worker_timeout_ms:
+        raise ConfigError(
+            f"{location}.stall_timeout_ms",
+            "must be <= remote.worker_timeout_ms",
+        )
+
+    if enabled:
+        for key, value in (
+            ("host", host),
+            ("workspace_root", workspace_root),
+            ("artifact_root", artifact_root),
+            ("session_store", session_store),
+        ):
+            if not value:
+                raise ConfigError(f"{location}.{key}", "required when remote.enabled is true")
+
+    return RemoteConfig(
+        enabled=enabled,
+        host=host,
+        workspace_root=workspace_root,
+        artifact_root=artifact_root,
+        session_store=session_store,
+        worker_timeout_ms=worker_timeout_ms,
+        heartbeat_interval_ms=heartbeat_interval_ms,
+        stall_timeout_ms=stall_timeout_ms,
+    )
+
+
 # -- Public entry point -------------------------------------------------------
 
 
@@ -785,6 +853,7 @@ def build_config(
         polling=_build_polling(raw),
         retry=_build_retry(raw),
         logging=_build_logging(raw, base_dir),
+        remote=_build_remote(raw),
         workflow_path=workflow_path.resolve(),
         warnings=tuple(warnings),
     )
