@@ -22,7 +22,7 @@ Surface tested (mapping to #66 acceptance criteria):
 
 from __future__ import annotations
 
-import time
+import dataclasses
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -33,11 +33,10 @@ from symphony.cleanup import (
     CleanupAction,
     CleanupDecision,
     WorkspaceCleanupExecutor,
-    _workspace_key_from_identifier,
 )
 from symphony.config import WorkspaceCleanupConfig, WorkspaceConfig
 from symphony.models import Issue, Workspace
-from symphony.workspace import WorkspaceManager
+from symphony.workspace import WorkspaceManager, workspace_key_from_identifier
 
 # -- Fixtures ----------------------------------------------------------------
 
@@ -367,13 +366,13 @@ def test_workspace_key_from_identifier_matches_manager_naming(tmp_path: Path) ->
     mgr, _ = _make(tmp_path)
     issue = _issue(owner="acme", repo="proj", number=42)
     expected_key = mgr.workspace_path(issue).name
-    assert _workspace_key_from_identifier(issue.identifier) == expected_key
+    assert workspace_key_from_identifier(issue.identifier) == expected_key
 
 
 def test_workspace_key_from_identifier_handles_missing_hash() -> None:
     """Defensive: if a caller passes `owner/repo` without `#N`, the
     derived key should fall back gracefully (no crash)."""
-    assert _workspace_key_from_identifier("owner/repo") == "owner_repo"
+    assert workspace_key_from_identifier("owner/repo") == "owner_repo"
 
 
 # -- CleanupDecision shape --------------------------------------------------
@@ -388,7 +387,7 @@ def test_cleanup_decision_is_immutable_and_carries_metadata(tmp_path: Path) -> N
     assert decision.trigger == "terminal_issue"
     assert decision.workspace_path == workspace.path.resolve()
     # frozen dataclass: assignment must fail.
-    with pytest.raises((AttributeError, Exception)):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         decision.action = CleanupAction.KEPT_DISABLED  # type: ignore[misc]
 
 
@@ -620,7 +619,3 @@ async def test_orchestrator_terminal_cleanup_skipped_for_incomplete_outcome(
     # misleading-success run.
     expected_path = tmp_path / "ws" / "acme_proj_1"
     assert expected_path.exists()
-
-
-# Silence unused-import warnings.
-_unused = (time,)

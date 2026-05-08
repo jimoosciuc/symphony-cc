@@ -47,7 +47,7 @@ from pathlib import Path
 
 from symphony.config import WorkspaceCleanupConfig
 from symphony.models import Workspace
-from symphony.workspace import WorkspaceError, WorkspaceManager
+from symphony.workspace import WorkspaceManager, workspace_key_from_identifier
 
 _LOG = logging.getLogger("symphony.cleanup")
 
@@ -180,7 +180,7 @@ class WorkspaceCleanupExecutor:
         active = active_identifiers or set()
         # Pre-build the active workspace key set so we can compare with
         # `Path.name` without re-deriving owner/repo/number.
-        active_keys = {_workspace_key_from_identifier(i) for i in active}
+        active_keys = {workspace_key_from_identifier(i) for i in active}
         decisions: list[CleanupDecision] = []
         root = self._mgr.root
         if not root.is_dir():
@@ -289,10 +289,21 @@ class WorkspaceCleanupExecutor:
                 action=CleanupAction.KEPT_DRY_RUN,
                 reason=reason,
                 trigger=trigger,
+                decided_at=self._clock(),
             )
         try:
             shutil.rmtree(resolved)
         except OSError as exc:
+            # SPEC §17.7-style operator visibility: a failed deletion
+            # is operationally important — surface as WARNING (not just
+            # the KEPT_ERROR decision) so an operator running at
+            # `--log-level info` sees it without parsing artifacts.
+            _LOG.warning(
+                "cleanup failed to delete %s (trigger=%s): %s",
+                resolved,
+                trigger,
+                exc,
+            )
             return self._kept(
                 path,
                 CleanupAction.KEPT_ERROR,
@@ -310,33 +321,22 @@ class WorkspaceCleanupExecutor:
             action=CleanupAction.DELETED,
             reason=reason,
             trigger=trigger,
+            decided_at=self._clock(),
         )
 
-    @staticmethod
     def _kept(
-        path: Path, action: CleanupAction, reason: str, trigger: str
+        self, path: Path, action: CleanupAction, reason: str, trigger: str
     ) -> CleanupDecision:
         return CleanupDecision(
-            workspace_path=path, action=action, reason=reason, trigger=trigger
+            workspace_path=path,
+            action=action,
+            reason=reason,
+            trigger=trigger,
+            decided_at=self._clock(),
         )
 
 
 # -- Module helpers ----------------------------------------------------------
-
-
-def _workspace_key_from_identifier(identifier: str) -> str:
-    """Translate ``owner/repo#N`` → ``owner_repo_N`` (the workspace key).
-
-    Mirrors :func:`symphony.workspace._build_workspace_key`'s output
-    without re-importing the underscore-prefixed helper. Tests for the
-    sweep verify both forms produce the same key.
-    """
-    # ``owner/repo#N`` → ``owner_repo_N``
-    if "#" not in identifier:
-        return identifier.replace("/", "_")
-    issue_part, number = identifier.split("#", 1)
-    owner, _, repo = issue_part.partition("/")
-    return f"{owner}_{repo}_{number}"
 
 
 def _now_utc() -> datetime:
@@ -345,12 +345,6 @@ def _now_utc() -> datetime:
 
 def _seconds(*, days: int) -> timedelta:
     return timedelta(days=days)
-
-
-# Suppress unused-import warning when WorkspaceError isn't actually
-# raised here — kept in scope so the module's documented relationship
-# with WorkspaceManager.delete's safety guards is greppable.
-_unused = (WorkspaceError,)
 
 
 __all__ = [
