@@ -345,14 +345,25 @@ class EvidenceDetector:
         """Read-side PR lookup.
 
         Returns:
-        - A list of PRs (possibly empty) when the lookup ran.
-        - ``None`` when no GitHubClient is wired — distinguishes
-          "queried, found nothing" from "couldn't query at all".
-          The caller treats the None case as `unknown` to avoid
-          escalating an unverifiable run to operator-blocked (#62).
+        - A list of PRs (possibly empty) when the lookup completed
+          successfully — empty means "queried, found no PR".
+        - ``None`` when we could NOT verify PR absence — either no
+          GitHubClient is wired, OR the lookup raised a GitHubError
+          (transient 500 / rate limit / network blip / auth issue).
 
-        Tolerates GitHubError (logs + returns empty list, since we DID
-        try to query).
+        The ``None`` vs ``[]`` distinction is load-bearing for #62
+        routing: ``[]`` causes ``incomplete_no_evidence`` →
+        ``mark_issue_blocked`` (we verified no PR exists), while
+        ``None`` keeps the outcome at ``unknown`` (we couldn't verify
+        — don't escalate). A transient GitHub failure during a
+        completed run MUST NOT cause Symphony to mark the issue
+        blocked; the operator would then have to clear a label that
+        was applied because of an API blip rather than a real
+        misleading-success run.
+
+        Maintainer note: do NOT change the GitHubError path to
+        return ``[]``. The empty-list semantic is reserved for
+        verified-no-PR.
         """
         if self._client is None:
             return None
@@ -360,14 +371,18 @@ class EvidenceDetector:
             return find_linked_pull_requests(self._client, issue, self._github)
         except GitHubError as exc:
             # Detector failures should NOT crash the worker finally
-            # block — log and continue with no evidence so the run
-            # still ends cleanly.
+            # block AND must NOT be conflated with verified absence
+            # of a PR (#62 leader correction on PR #73). Returning
+            # None routes the outcome to ``unknown`` instead of
+            # ``incomplete_no_evidence``, so a transient GitHub
+            # failure does not falsely block the issue.
             _LOG.warning(
-                "evidence detector: PR lookup failed for %s: %s",
+                "evidence detector: PR lookup failed for %s: %s — "
+                "outcome will be `unknown` (cannot verify PR absence).",
                 issue.identifier,
                 exc,
             )
-            return []
+            return None
 
     def _detect_no_pr_sentinel(
         self,
