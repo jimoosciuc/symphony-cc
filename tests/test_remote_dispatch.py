@@ -147,6 +147,49 @@ def test_load_dispatch_request_invalid_field_types(tmp_path: Path):
         load_dispatch_request(dispatch_file)
 
 
+def test_load_dispatch_request_rejects_bool_int_fields(tmp_path: Path):
+    """Test loading dispatch request rejects bools for integer fields."""
+    dispatch_file = tmp_path / "bool-int.json"
+    dispatch_file.write_text(
+        json.dumps(
+            {
+                "owner": "test-owner",
+                "repo": "test-repo",
+                "issue_number": True,
+                "attempt": 1,
+                "workspace_path": "/remote/workspaces/test",
+                "artifact_path": "/remote/artifacts/test",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="field type errors"):
+        load_dispatch_request(dispatch_file)
+
+
+def test_load_dispatch_request_invalid_optional_field_type(tmp_path: Path):
+    """Test loading dispatch request rejects non-string optional fields."""
+    dispatch_file = tmp_path / "invalid-optional.json"
+    dispatch_file.write_text(
+        json.dumps(
+            {
+                "owner": "test-owner",
+                "repo": "test-repo",
+                "issue_number": 1,
+                "attempt": 1,
+                "workspace_path": "/remote/workspaces/test",
+                "artifact_path": "/remote/artifacts/test",
+                "branch": ["feature/test"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="branch must be str"):
+        load_dispatch_request(dispatch_file)
+
+
 def test_load_dispatch_request_invalid_issue_number(tmp_path: Path):
     """Test loading dispatch request with invalid issue_number."""
     dispatch_file = tmp_path / "invalid-issue.json"

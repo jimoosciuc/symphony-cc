@@ -81,7 +81,10 @@ def load_dispatch_request(path: Path) -> DispatchRequest:
     for field, expected_type in required_fields.items():
         if field not in raw:
             missing.append(field)
-        elif not isinstance(raw[field], expected_type):
+        elif (
+            expected_type is int
+            and (isinstance(raw[field], bool) or not isinstance(raw[field], int))
+        ) or (expected_type is not int and not isinstance(raw[field], expected_type)):
             invalid_types.append(
                 f"{field} must be {expected_type.__name__}, got {type(raw[field]).__name__}"
             )
@@ -110,6 +113,12 @@ def load_dispatch_request(path: Path) -> DispatchRequest:
 
     if not raw["artifact_path"].strip():
         raise ValueError("artifact_path cannot be empty")
+
+    for field in ("branch", "base_branch", "prompt_ref"):
+        if field in raw and raw[field] is not None and not isinstance(raw[field], str):
+            raise ValueError(f"{field} must be str when set, got {type(raw[field]).__name__}")
+        if isinstance(raw.get(field), str) and not raw[field].strip():
+            raise ValueError(f"{field} cannot be empty when set")
 
     # Build DispatchRequest with optional fields
     return DispatchRequest(

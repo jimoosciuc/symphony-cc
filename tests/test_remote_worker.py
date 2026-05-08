@@ -255,6 +255,33 @@ def test_worker_dispatch_request_error_redaction(tmp_path: Path):
     assert "ghp_secret_token_12345" not in result.stderr
 
 
+def test_worker_dispatch_path_error_redacts_token_shaped_path(tmp_path: Path):
+    """Test worker redacts token-shaped values from dispatch path errors."""
+    snapshot_path = tmp_path / "valid.json"
+    snapshot = _minimal_snapshot()
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    token_shaped = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    dispatch_path = tmp_path / token_shaped
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "symphony.remote.worker",
+            "--snapshot-path",
+            str(snapshot_path),
+            "--dispatch-path",
+            str(dispatch_path),
+            "--fake",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert token_shaped not in result.stderr
+    assert REDACTED in result.stderr
+
+
 def test_worker_error_output_redacts_tokens(tmp_path: Path):
     """Test worker redacts token-looking values from error output."""
     snapshot_path = tmp_path / "with-token.json"
