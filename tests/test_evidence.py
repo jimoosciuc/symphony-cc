@@ -485,10 +485,14 @@ def test_detector_result_to_terminal_fields_shape() -> None:
     assert "T" in fields["task_outcome_recorded_at"]
 
 
-def test_detector_with_no_client_short_circuits_pr_step(tmp_path: Path) -> None:
-    """Tests that build EvidenceDetector(github) without a client must still
-    work — they just won't see PR evidence. Used by orchestrator unit tests
-    that don't wire a real REST surface."""
+def test_detector_with_no_client_returns_unknown_not_incomplete(tmp_path: Path) -> None:
+    """When no GitHubClient is wired the detector cannot verify PR
+    absence, so a COMPLETED run with no other evidence MUST classify as
+    `unknown` (decided_by=derivation) rather than `incomplete_no_evidence`.
+
+    #62 routing treats `incomplete_*` as operator-must-intervene; an
+    unverifiable run must NOT be escalated. Tests using FakeGitHubTracker
+    (no `.client`) take this path."""
     detector = EvidenceDetector(_github(), client=None)
     result = detector.detect(
         issue=_issue(),
@@ -500,7 +504,8 @@ def test_detector_with_no_client_short_circuits_pr_step(tmp_path: Path) -> None:
         recent_assistant_text="",
         workspace_path=tmp_path,
     )
-    assert result.task_outcome == OUTCOME_INCOMPLETE_NO_EVIDENCE
+    assert result.task_outcome == OUTCOME_UNKNOWN
+    assert result.outcome_decided_by == DECIDED_BY_DERIVATION
 
 
 # -- collect_recent_assistant_text helper -----------------------------------
