@@ -181,6 +181,7 @@ The snapshot includes:
   event summary;
 - retry queue/backoff state;
 - recent finished workers retained in memory;
+- usage totals when normalized provider usage events were observed;
 - restart recovery decisions from startup.
 
 Security assumptions:
@@ -218,13 +219,38 @@ write_dashboard_html(snapshot, "/tmp/symphony-dashboard.html")
 Open `/tmp/symphony-dashboard.html` in a browser. The page shows summary
 state, active workers, retry queue, recently finished runs, recovery
 decisions, artifact paths, provider session ids, attempts, and last event
-summaries. Permission denials and failed/blocked outcomes are highlighted
-from the snapshot data when available.
+summaries. Usage totals, permission denials, and failed/blocked outcomes
+are highlighted from the snapshot data when available.
 
 Focused validation:
 
 ```bash
 PYTHONPATH=src pytest tests/test_dashboard.py -q
+```
+
+## Usage accounting
+
+Symphony aggregates usage from normalized provider events only. A provider
+may emit an event named `usage` with token/cost fields at top level, or
+another normalized event with a `payload.usage` mapping. Raw Claude SDK
+event shapes must stay inside the provider layer.
+
+When usage is present:
+
+- per-attempt `usage.json` is written under the attempt artifact
+  directory;
+- `terminal.json` includes the final usage summary;
+- `orchestrator.status_snapshot()` includes usage on active and recently
+  finished workers;
+- the static dashboard renders token totals and best-effort cost values.
+
+Cost values are provider-dependent and best-effort. Missing or malformed
+usage payloads are ignored and do not fail the run.
+
+Focused validation:
+
+```bash
+PYTHONPATH=src pytest tests/test_usage.py -q
 ```
 
 ## Stopping the daemon

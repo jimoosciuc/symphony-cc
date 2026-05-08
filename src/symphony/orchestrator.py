@@ -64,6 +64,7 @@ from symphony.recovery import (
 )
 from symphony.retry import RetryState, next_backoff_ms
 from symphony.status import build_status_snapshot
+from symphony.usage import UsageTotals
 from symphony.workflow_reload import WorkflowReloader
 from symphony.workspace import WorkspaceManager
 
@@ -101,6 +102,7 @@ class WorkerState:
     last_event: AgentEvent | None = None
     error: str | None = None
     timeout_subtype: str | None = None
+    usage: UsageTotals = field(default_factory=UsageTotals)
 
 
 @dataclass(slots=True)
@@ -1061,6 +1063,7 @@ class Orchestrator:
                     # surfaced so operators can grep terminal.json for
                     # incomplete runs without reparsing events.jsonl.
                     "permission_denials_count": permission_denials_count,
+                    "usage": worker.usage.to_json() if worker.usage.has_usage else None,
                     # SPEC §17.1 task-outcome row (M5.1 #61, populated by
                     # the M5.2 #60 detector). Routing decisions remain
                     # driven by terminal_state / retryable / blocked —
@@ -1238,6 +1241,8 @@ class Orchestrator:
         worker.last_event = event
         worker.session.last_event_at = event.timestamp
         worker.artifacts.append_event(event)
+        if worker.usage.apply_event(event):
+            worker.artifacts.write_json("usage.json", worker.usage.to_json())
 
     def _remember_finished(
         self,
@@ -1262,6 +1267,7 @@ class Orchestrator:
                     else None
                 ),
                 "error": worker.error,
+                "usage": worker.usage.to_json() if worker.usage.has_usage else None,
             }
         )
         del self.recent_finished[:-50]

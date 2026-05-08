@@ -82,6 +82,7 @@ def _worker_status(worker: Any) -> dict[str, Any]:
         "last_event": _event_summary(event),
         "error": worker.error,
         "timeout_subtype": worker.timeout_subtype,
+        "usage": worker.usage.to_json() if worker.usage.has_usage else None,
     }
 
 

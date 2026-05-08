@@ -187,12 +187,13 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
             f"<td>{_code(worker.get('provider_session_id'))}</td>"
             f"<td>{_text(worker.get('attempt'))}</td>"
             f"<td>{_code(worker.get('artifact_dir'))}</td>"
+            f"<td>{_usage_cell(worker.get('usage'))}</td>"
             f"<td>{_event_cell(last)}{warning}</td>"
             "</tr>"
         )
     return _table(
         "Active Workers",
-        ("Issue", "Provider Session", "Attempt", "Artifacts", "Last Event"),
+        ("Issue", "Provider Session", "Attempt", "Artifacts", "Usage", "Last Event"),
         rows,
     )
 
@@ -225,12 +226,21 @@ def _recent_finished(items: list[dict[str, Any]]) -> str:
             f"<td class=\"{css}\">{_text(item.get('task_outcome'))}</td>"
             f"<td>{_code(item.get('provider_session_id'))}</td>"
             f"<td>{_code(item.get('artifact_dir'))}</td>"
+            f"<td>{_usage_cell(item.get('usage'))}</td>"
             f"<td>{_text(item.get('last_event_at'))}</td>"
             "</tr>"
         )
     return _table(
         "Recent Finished",
-        ("Issue", "Terminal", "Task Outcome", "Provider Session", "Artifacts", "Last Event"),
+        (
+            "Issue",
+            "Terminal",
+            "Task Outcome",
+            "Provider Session",
+            "Artifacts",
+            "Usage",
+            "Last Event",
+        ),
         rows,
     )
 
@@ -288,6 +298,16 @@ def _event_cell(event: dict[str, Any]) -> str:
         f"<div>{escape(_text(event.get('event')))}</div>"
         f"<div class=\"muted\">{escape(_text(event.get('timestamp')))}</div>"
     )
+
+
+def _usage_cell(usage: Any) -> str:
+    if not isinstance(usage, dict):
+        return '<span class="muted">None</span>'
+    total = _text(usage.get("total_tokens"))
+    cost = _text(usage.get("cost_usd"))
+    if cost:
+        return f"<div>{escape(total)} tokens</div><div class=\"muted\">${escape(cost)}</div>"
+    return f"<div>{escape(total)} tokens</div>"
 
 
 def _outcome_class(item: dict[str, Any]) -> str:
