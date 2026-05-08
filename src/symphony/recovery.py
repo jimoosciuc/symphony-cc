@@ -147,6 +147,44 @@ def discover_persisted_records(
     return [(p, r) for _, p, r in out]
 
 
+def discover_workspace_records(
+    session_store: Path,
+) -> list[tuple[Path, SessionRecord]]:
+    """Scan ``session_store`` for records that can identify workspaces.
+
+    Unlike :func:`discover_persisted_records`, this includes terminal
+    records because workspace cleanup needs to consider completed runs
+    whose workspace directories are still on disk. Records are deduped
+    by ``issue_identifier`` with the newest session-record mtime winning.
+    """
+    if not session_store.exists():
+        return []
+    latest: dict[str, tuple[float, Path, SessionRecord]] = {}
+    for path in sorted(session_store.glob("*.json")):
+        if path.suffix == ".tmp" or path.name.endswith(".json.tmp"):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            _LOG.warning("recovery: skipping unreadable session record %s: %s", path, exc)
+            continue
+        try:
+            record = _hydrate_record(data)
+        except (KeyError, ValueError, TypeError) as exc:
+            _LOG.warning("recovery: skipping malformed session record %s: %s", path, exc)
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        existing = latest.get(record.issue_identifier)
+        if existing is None or mtime >= existing[0]:
+            latest[record.issue_identifier] = (mtime, path, record)
+
+    out = sorted(latest.values(), key=lambda item: item[0])
+    return [(p, r) for _, p, r in out]
+
+
 def _hydrate_record(data: dict[str, Any]) -> SessionRecord:
     """Reverse the snapshot written by ``provider.claude_code._persist_session``.
 
