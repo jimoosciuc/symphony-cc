@@ -81,6 +81,10 @@ For a human-readable local view, render that snapshot with
 `write_dashboard_html(...)`. The renderer produces static HTML only; it does
 not start a server or add write controls.
 
+Usage accounting is best-effort and provider-dependent. When normalized usage
+events are present, Symphony writes `usage.json`, includes usage in
+`terminal.json`, and surfaces totals in the status snapshot/dashboard.
+
 ### Tests
 
 ```bash
