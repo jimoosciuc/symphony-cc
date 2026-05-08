@@ -173,9 +173,17 @@ class ArtifactRetentionExecutor:
             mtime=mtime,
         )
 
-    def _write_report(self, report: ArtifactRetentionReport) -> Path:
+    def _write_report(self, report: ArtifactRetentionReport) -> Path | None:
         report_dir = self._root / REPORT_DIR_NAME
-        report_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            report_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _LOG.warning(
+                "artifact retention failed to create report directory %s: %s",
+                report_dir,
+                exc,
+            )
+            return None
         stamp = report.decided_at.strftime("%Y%m%dT%H%M%SZ")
         target = self._next_report_path(report_dir, stamp)
         payload = asdict(report)
@@ -193,7 +201,22 @@ class ArtifactRetentionExecutor:
             if decision["mtime"] is not None:
                 decision["mtime"] = decision["mtime"].isoformat()
         redacted = redact(payload, redact_keys=self._redact_keys)
-        target.write_text(json.dumps(redacted, indent=2, sort_keys=True), encoding="utf-8")
+        try:
+            target.write_text(
+                json.dumps(redacted, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            _LOG.warning("artifact retention failed to write report %s: %s", target, exc)
+            return None
+        _LOG.info(
+            "artifact retention sweep: considered=%d deleted=%d skipped=%d errors=%d report=%s",
+            report.considered,
+            report.deleted,
+            report.skipped,
+            report.errors,
+            target,
+        )
         return target
 
     def _next_report_path(self, report_dir: Path, stamp: str) -> Path:
