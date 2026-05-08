@@ -550,7 +550,16 @@ def test_collect_recent_assistant_text_concatenates_message_deltas() -> None:
     assert "tool_name" not in text  # tool_started has no .text
 
 
-def test_collect_recent_assistant_text_respects_limit() -> None:
+def test_collect_recent_assistant_text_returns_newest_in_chronological_order() -> None:
+    """The helper MUST return the most recent ``limit`` matches in
+    chronological order (oldest-of-the-tail first), not the first N
+    matches.
+
+    Bug history (#63): the M5.2 #60 implementation walked from the
+    start and stopped at ``limit``, returning the OLDEST chunks. A
+    sentinel in Claude's final message would slip past undetected on
+    any session longer than 16 deltas. Locked in here.
+    """
     from datetime import datetime, timezone
 
     events = [
@@ -566,9 +575,48 @@ def test_collect_recent_assistant_text_respects_limit() -> None:
         for i in range(20)
     ]
     text = collect_recent_assistant_text(events, limit=3)
-    assert "chunk0" in text
-    assert "chunk2" in text
-    assert "chunk5" not in text  # past the limit
+    # Newest 3 chunks are 17, 18, 19 — in chronological order.
+    assert text == "chunk17\nchunk18\nchunk19"
+    # And explicitly NOT the oldest three (use line equality to avoid
+    # the chunk1-as-substring-of-chunk17 false positive).
+    lines = text.splitlines()
+    assert "chunk0" not in lines
+    assert "chunk1" not in lines
+    assert "chunk2" not in lines
+
+
+def test_collect_recent_assistant_text_picks_up_sentinel_in_final_message() -> None:
+    """End-to-end regression for the bug carried from #72: a
+    `Symphony-No-PR:` sentinel in Claude's FINAL assistant message
+    must be returned by the helper even when the session has many
+    earlier message_delta chunks. Without the fix the helper would
+    return the first 16 chunks and miss the sentinel sitting in
+    chunk 17+.
+    """
+    from datetime import datetime, timezone
+
+    # 20 noise chunks then the sentinel — sentinel sits past the
+    # default limit of 16 deltas.
+    payloads = [f"thinking step {i}" for i in range(20)]
+    payloads.append("Symphony-No-PR: nothing to change here")
+    events = [
+        AgentEvent(
+            event="message_delta",
+            timestamp=datetime.now(timezone.utc),
+            session_id="s",
+            provider="fake",
+            issue_identifier="x",
+            attempt=1,
+            payload={"text": text},
+        )
+        for text in payloads
+    ]
+    text = collect_recent_assistant_text(events)
+    assert "Symphony-No-PR" in text
+    # And the sentinel regex picks it up cleanly.
+    match = NO_PR_SENTINEL.search(text)
+    assert match is not None
+    assert match.group("reason").strip() == "nothing to change here"
 
 
 # -- Orchestrator wiring smoke (terminal.json carries new fields) -----------

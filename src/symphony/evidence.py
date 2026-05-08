@@ -523,22 +523,35 @@ def _safe_int(value: str) -> int:
 
 
 def collect_recent_assistant_text(events: Iterable[AgentEvent], *, limit: int = 16) -> str:
-    """Concatenate the text of the most recent ``message_delta`` events.
+    """Concatenate the text of the **most recent** ``message_delta`` events.
 
-    The orchestrator does not retain a long event history (only
-    ``last_event``), but tests and the M5.3 wiring may want to scan a
-    short tail. Helper lives here so the sentinel-detection logic has
-    one canonical input shape.
+    Returns up to ``limit`` matches, preserving chronological order
+    (oldest-of-the-tail first). The detector's sentinel scan benefits
+    from the most recent assistant text — Claude's final
+    "Symphony-No-PR: …" declaration sits at the END of the transcript,
+    not the start, so a buggy "first N" walk would miss it on any
+    session longer than ``limit`` deltas.
+
+    Implemented with a bounded :class:`collections.deque` so memory
+    stays O(limit) regardless of transcript length — the orchestrator
+    may pass a long event tail in long-running sessions and we MUST
+    NOT pin the whole history just to scan the last few chunks.
+
+    Bug history: the M5.2 (#60) version walked from the start and
+    stopped at ``limit``, returning the OLDEST chunks — a sentinel in
+    Claude's final message would slip past undetected on any
+    session longer than 16 deltas. Fixed in #63 (M5.4) per leader
+    note carried from PR #72 and #73.
     """
-    chunks: list[str] = []
+    from collections import deque
+
+    chunks: deque[str] = deque(maxlen=limit)
     for event in events:
         if event.event != "message_delta":
             continue
         text = (event.payload or {}).get("text")
         if isinstance(text, str) and text:
             chunks.append(text)
-            if len(chunks) >= limit:
-                break
     return "\n".join(chunks)
 
 
