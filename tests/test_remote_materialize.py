@@ -128,6 +128,8 @@ def test_materialized_snapshot_can_carry_separate_git_token(tmp_path: Path):
     """Test snapshot can carry git-only token without exposing tracker token."""
     raw = _minimal_config(tmp_path)
     raw["remote"]["git_token"] = "git-only-token"
+    raw["github"]["base_branch"] = "develop"
+    raw["workspace"]["remote"] = "upstream"
     config = build_config(raw, workflow_path=tmp_path / "WORKFLOW.md")
     plan = build_remote_dispatch_plan(_issue(), attempt=1, config=config)
 
@@ -138,6 +140,9 @@ def test_materialized_snapshot_can_carry_separate_git_token(tmp_path: Path):
     assert config.tracker.token not in snapshot_text
     assert snapshot["tracker"]["token"] == REMOTE_TRACKER_TOKEN_PLACEHOLDER
     assert snapshot["remote"]["git_token"] == "git-only-token"
+    assert snapshot["workspace"]["populate"] == "git"
+    assert snapshot["workspace"]["remote"] == "upstream"
+    assert snapshot["github"]["base_branch"] == "develop"
     assert "git_token" in snapshot["logging"]["redact_keys"]
 
 
