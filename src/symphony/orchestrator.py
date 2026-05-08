@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from symphony.artifact_retention import ArtifactRetentionExecutor
 from symphony.artifacts import ArtifactWriter
 from symphony.cleanup import WorkspaceCleanupExecutor
 from symphony.config import WorkflowConfig
@@ -171,6 +172,12 @@ class Orchestrator:
             workspace_manager,
             self.config.workspace.cleanup,
         )
+        self._artifact_retention = ArtifactRetentionExecutor(
+            self.config.claude.artifact_store,
+            self.config.claude.artifact_retention,
+            redact_keys=self.config.logging.redact_keys,
+            clock=self._clock,
+        )
 
     # -- Public API ---------------------------------------------------------
 
@@ -186,8 +193,9 @@ class Orchestrator:
         # fresh workspaces (mtime=now) which can't be too-old anyway.
         # No-op when workspace.cleanup.enabled is False or max_age_days
         # is unset. Each decision is logged by the executor; we don't
-        # surface them in TickResult yet (#67 owns operator-facing
-        # reporting).
+        # surface workspace decisions in TickResult; artifact retention
+        # writes its own operator report under claude.artifact_store.
+        self._artifact_retention.sweep()
         self._cleanup.sweep_for_age(active_identifiers=set(self.active.keys()))
 
         # 0.5. M5.7 #66 / #82: closed/merged-PR workspace sweep, also

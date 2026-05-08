@@ -56,10 +56,11 @@ claude:
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
   retry_resume_policy: resume_same_session
-  # Optional artifact retention (M5.6). Defaults are off — artifacts
-  # are audit evidence and are kept forever unless the operator opts in.
-  # Only age-based retention is supported (no terminal/PR-close
-  # triggers). The executor lands in M5.8 (#67).
+  # Optional artifact retention. Defaults are off — artifacts are audit
+  # evidence and are kept forever unless the operator opts in. Only
+  # age-based retention is supported (no terminal/PR-close triggers).
+  # When enabled, Symphony writes retention reports under
+  # <artifact_store>/_retention_reports/.
   # artifact_retention:
   #   enabled: false
   #   max_age_days: null
