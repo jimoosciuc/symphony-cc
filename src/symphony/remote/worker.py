@@ -15,6 +15,7 @@ from typing import Any
 
 from symphony.artifacts import redact_text
 from symphony.config import WorkflowConfig, build_config
+from symphony.remote.dispatch import DispatchRequest, load_dispatch_request
 from symphony.remote.protocol import WorkerEvent, serialize_worker_event
 
 DEFAULT_REDACT_KEYS = ("token", "authorization", "api_key", "password", "secret")
@@ -42,6 +43,11 @@ def main() -> int:
         help="Path to config snapshot JSON file",
     )
     parser.add_argument(
+        "--dispatch-path",
+        type=Path,
+        help="Path to dispatch request JSON file (required for fake mode)",
+    )
+    parser.add_argument(
         "--fake",
         action="store_true",
         help="Run in fake/no-op mode (emit events without real execution)",
@@ -60,7 +66,19 @@ def main() -> int:
         return 1
 
     if args.fake:
-        return run_fake_worker(config)
+        # Fake mode requires dispatch request
+        if not args.dispatch_path:
+            print("Worker failed: --dispatch-path required for --fake mode", file=sys.stderr)
+            return 1
+
+        try:
+            dispatch = load_dispatch_request(args.dispatch_path)
+        except Exception as e:
+            error_msg = _redact_error_message(str(e), raw_snapshot)
+            print(f"Worker failed: {error_msg}", file=sys.stderr)
+            return 1
+
+        return run_fake_worker(config, dispatch)
 
     # Real worker execution not implemented yet
     print("Real worker execution not implemented", file=sys.stderr)
@@ -161,7 +179,7 @@ def _snapshot_secret_values(value: Any, *, redact_keys: tuple[str, ...]) -> list
     return found
 
 
-def run_fake_worker(config: WorkflowConfig) -> int:
+def run_fake_worker(config: WorkflowConfig, dispatch: DispatchRequest) -> int:
     """Run worker in fake/no-op mode.
 
     Emits valid protocol events to stdout without real execution.
@@ -169,14 +187,15 @@ def run_fake_worker(config: WorkflowConfig) -> int:
 
     Args:
         config: Validated workflow config
+        dispatch: Dispatch request with issue/workspace/artifact info
 
     Returns:
         0 on success
     """
     now = datetime.now(timezone.utc).isoformat()
     host = config.remote.host or "fake-host"
-    issue_id = "fake/repo#1"
-    attempt = 1
+    issue_id = dispatch.issue_identifier
+    attempt = dispatch.attempt
 
     # Emit worker_started
     event = WorkerEvent(
@@ -196,7 +215,7 @@ def run_fake_worker(config: WorkflowConfig) -> int:
         issue_identifier=issue_id,
         attempt=attempt,
         host=host,
-        fields={"workspace_path": f"{config.remote.workspace_root}/fake_repo_1"},
+        fields={"workspace_path": dispatch.workspace_path},
     )
     print(serialize_worker_event(event), flush=True)
 
@@ -231,7 +250,7 @@ def run_fake_worker(config: WorkflowConfig) -> int:
         host=host,
         fields={
             "exit_code": 0,
-            "artifact_path": f"{config.remote.artifact_root}/fake_repo_1/1",
+            "artifact_path": dispatch.artifact_path,
             "artifacts_ready": True,
         },
     )
