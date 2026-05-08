@@ -448,6 +448,20 @@ Branch naming SHOULD default to:
 <github.branch_prefix>/<owner>-<repo>-<issue_number>
 ```
 
+### 8.1 Remote Execution (M7.4)
+
+Symphony MAY support remote worker execution where the orchestrator dispatches work to remote hosts via SSH. Remote execution is OPTIONAL and disabled by default.
+
+When remote execution is enabled:
+
+- The orchestrator (coordinator) runs on the local host and manages tracker interactions, issue claims, and artifact collection.
+- Remote workers run on SSH-accessible hosts and execute provider sessions in isolated workspaces.
+- Remote workers use their own `workspace.root`, `claude.session_store`, and artifact directories independent of the coordinator.
+- The coordinator collects artifacts from remote workers after completion and applies redaction before local storage.
+- Remote workers MUST NOT interact with the tracker directly; all tracker operations remain coordinator responsibility.
+
+See `docs/remote-worker-design.md` for the complete remote execution protocol, auth boundaries, artifact collection, failure taxonomy, and testing strategy.
+
 ## 9. GitHub Tracker Contract
 
 ### 9.1 Required Operations
