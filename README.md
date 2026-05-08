@@ -76,6 +76,11 @@ Runtime status is available as a read-only in-memory Python API:
 It redacts configured secret keys and is intended as the data source for the
 future dashboard, not as a write-control surface.
 
+For a human-readable local view, render that snapshot with
+`symphony.dashboard.render_dashboard_html(...)` or
+`write_dashboard_html(...)`. The renderer produces static HTML only; it does
+not start a server or add write controls.
+
 ### Tests
 
 ```bash

@@ -200,6 +200,33 @@ Focused validation:
 PYTHONPATH=src pytest tests/test_status.py -q
 ```
 
+## Static dashboard rendering
+
+The dashboard renderer turns a status snapshot into a static HTML file.
+It is intentionally local and observational: no server, no write
+controls, no database, and no dependency on GitHub Projects.
+
+Example:
+
+```python
+from symphony.dashboard import write_dashboard_html
+
+snapshot = orchestrator.status_snapshot()
+write_dashboard_html(snapshot, "/tmp/symphony-dashboard.html")
+```
+
+Open `/tmp/symphony-dashboard.html` in a browser. The page shows summary
+state, active workers, retry queue, recently finished runs, recovery
+decisions, artifact paths, provider session ids, attempts, and last event
+summaries. Permission denials and failed/blocked outcomes are highlighted
+from the snapshot data when available.
+
+Focused validation:
+
+```bash
+PYTHONPATH=src pytest tests/test_dashboard.py -q
+```
+
 ## Stopping the daemon
 
 `Ctrl-C` (SIGINT). The CLI catches it, releases trackers, and exits
