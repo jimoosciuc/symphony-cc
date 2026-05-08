@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from symphony.artifact_retention import ArtifactRetentionExecutor
-from symphony.artifacts import ArtifactWriter
+from symphony.artifacts import ArtifactWriter, redact_text
 from symphony.cleanup import WorkspaceCleanupExecutor
 from symphony.config import WorkflowConfig
 from symphony.events import TERMINAL_TURN_EVENTS, AgentEvent
@@ -62,6 +62,8 @@ from symphony.recovery import (
     discover_workspace_records,
     issue_is_actionable,
 )
+from symphony.remote.dispatcher import RemoteIssueDispatcher
+from symphony.remote.runner import RemoteDispatchRunResult
 from symphony.retry import RetryState, next_backoff_ms
 from symphony.status import build_status_snapshot
 from symphony.usage import UsageTotals
@@ -139,6 +141,7 @@ class Orchestrator:
         clock: Callable[[], datetime] | None = None,
         evidence_detector: EvidenceDetector | None = None,
         workflow_reloader: WorkflowReloader | None = None,
+        remote_dispatcher: RemoteIssueDispatcher | None = None,
     ) -> None:
         self.config = config
         self.tracker = tracker
@@ -151,6 +154,7 @@ class Orchestrator:
             config,
             clock=self._clock,
         )
+        self.remote_dispatcher = remote_dispatcher
 
         # Mutable state.
         self.active: dict[str, WorkerState] = {}
@@ -749,6 +753,11 @@ class Orchestrator:
                     result.skipped_claim_conflict.append(issue.identifier)
                 continue
 
+            if self.config.remote.enabled:
+                await self._run_remote_dispatch(issue, retry=retry, result=result)
+                slots_open -= 1
+                continue
+
             try:
                 worker = await self._start_worker(issue, retry=retry)
             except ProviderRetryableError as exc:
@@ -774,6 +783,134 @@ class Orchestrator:
             # them serialized inside one tick keeps tests deterministic
             # without losing the concurrency-cap semantic.
             await self._run_worker(worker, result, claim)
+
+    async def _run_remote_dispatch(
+        self,
+        issue: Issue,
+        *,
+        retry: RetryState | None,
+        result: TickResult,
+    ) -> None:
+        attempt = (retry.attempts + 1) if retry else 1
+        artifacts = ArtifactWriter.for_attempt(
+            self.config.claude.artifact_store,
+            owner=issue.owner,
+            repo=issue.repo,
+            issue_number=issue.number,
+            attempt=attempt,
+            redact_keys=self.config.logging.redact_keys,
+        )
+        artifacts.write_json(
+            "request.json",
+            {
+                "issue_identifier": issue.identifier,
+                "attempt": attempt,
+                "execution": "remote",
+                "security_profile": self.config.security.profile,
+                "run_id": self.run_id,
+            },
+        )
+
+        result.dispatched.append(issue.identifier)
+        remote_result: RemoteDispatchRunResult | None = None
+        errors: tuple[str, ...] = ()
+        terminal_state = Terminal.COMPLETED
+        try:
+            if self.remote_dispatcher is None:
+                raise RuntimeError("remote.enabled=true but no remote dispatcher is configured")
+            remote_result = self.remote_dispatcher.dispatch(
+                issue,
+                attempt=attempt,
+                config=self.config,
+            )
+            errors = _redact_error_texts(remote_result.errors, self.config)
+            if remote_result.failed:
+                terminal_state = Terminal.FAILED
+        except Exception as exc:  # noqa: BLE001 - remote boundary must fail closed
+            terminal_state = Terminal.FAILED
+            errors = (
+                _redact_error_text(
+                    f"remote dispatch failed: {exc}",
+                    self.config,
+                ),
+            )
+
+        retryable = terminal_state != Terminal.COMPLETED
+        if retryable:
+            self._on_worker_failed(issue, "; ".join(errors), retryable=True)
+            retry_state = self.retry_states.get(issue.identifier)
+            if retry_state is not None and retry_state.next_attempt_at is not None:
+                result.retries_scheduled.append(issue.identifier)
+        else:
+            retry_state = self.retry_states.pop(issue.identifier, None)
+            if retry_state is not None:
+                retry_state.record_success(now=self._clock())
+
+        artifacts.write_json(
+            "remote-dispatch.json",
+            {
+                "ok": remote_result.ok if remote_result is not None else False,
+                "failed": remote_result.failed if remote_result is not None else True,
+                "errors": errors,
+                "transport_failed": (
+                    remote_result.transport.failed
+                    if remote_result is not None and remote_result.transport is not None
+                    else None
+                ),
+                "transport_stalled": (
+                    remote_result.transport.stalled
+                    if remote_result is not None and remote_result.transport is not None
+                    else None
+                ),
+                "artifacts_partial": (
+                    remote_result.artifacts.partial
+                    if remote_result is not None and remote_result.artifacts is not None
+                    else None
+                ),
+            },
+        )
+
+        should_block = False
+        if retryable:
+            retry_state = self.retry_states.get(issue.identifier)
+            should_block = (
+                retry_state is not None
+                and retry_state.attempts > 0
+                and retry_state.next_attempt_at is None
+            )
+
+        artifacts.write_json(
+            "terminal.json",
+            {
+                "security_profile": self.config.security.profile,
+                "terminal_state": terminal_state.value,
+                "reason": "remote_completed" if not retryable else "remote_failed",
+                "retryable": retryable and not should_block,
+                "blocked": should_block,
+                "error": "; ".join(errors) if errors else None,
+                "attempt": attempt,
+                "execution": "remote",
+            },
+        )
+
+        if should_block:
+            try:
+                self.tracker.mark_issue_blocked(
+                    issue,
+                    "; ".join(errors) or "remote dispatch failed",
+                )
+            except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
+                _LOG.warning("mark_issue_blocked failed for %s: %s", issue.identifier, exc)
+        else:
+            try:
+                self.tracker.release_issue(
+                    issue,
+                    "remote_completed" if not retryable else "remote_failed",
+                )
+            except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
+                _LOG.warning("release_issue failed for %s: %s", issue.identifier, exc)
+
+        result.finished.append(issue.identifier)
 
     async def _start_worker(
         self,
@@ -1306,6 +1443,21 @@ def _terminal_reason(worker: WorkerState) -> str:
     if worker.terminal_state is None:
         return "ended"
     return worker.terminal_state.value
+
+
+def _redact_error_texts(
+    errors: tuple[str, ...],
+    config: WorkflowConfig,
+) -> tuple[str, ...]:
+    return tuple(_redact_error_text(error, config) for error in errors)
+
+
+def _redact_error_text(error: str, config: WorkflowConfig) -> str:
+    return redact_text(
+        error,
+        redact_keys=config.logging.redact_keys,
+        extra_secrets=(config.tracker.token,),
+    )
 
 
 def _is_retryable(worker: WorkerState, retry: RetryState | None) -> bool:

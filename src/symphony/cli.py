@@ -104,6 +104,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from symphony.github import GitHubTracker
     from symphony.orchestrator import Orchestrator
     from symphony.provider import ClaudeCodeProvider
+    from symphony.remote.dispatcher import build_ssh_remote_issue_dispatcher
     from symphony.workflow import WorkflowError, load_workflow
     from symphony.workflow_reload import WorkflowReloader
     from symphony.workspace import WorkspaceManager
@@ -141,6 +142,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         provider=provider,
         workspace_manager=workspace_mgr,
         workflow_reloader=WorkflowReloader.from_workflow(workflow),
+        remote_dispatcher=build_ssh_remote_issue_dispatcher(config),
     )
 
     try:
