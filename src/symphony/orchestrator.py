@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from symphony.artifacts import ArtifactWriter
+from symphony.cleanup import WorkspaceCleanupExecutor
 from symphony.config import WorkflowConfig
 from symphony.events import TERMINAL_TURN_EVENTS, AgentEvent
 from symphony.evidence import (
@@ -159,11 +160,30 @@ class Orchestrator:
             self.config.github,
             client=getattr(tracker, "client", None),
         )
+        # M5.7 #66 cleanup executor. Disabled by default
+        # (workspace.cleanup.enabled=False keeps existing SPEC §8 reuse
+        # semantics). When enabled, the worker finally block triggers
+        # ``cleanup_for_terminal_issue`` and ``run_once`` triggers
+        # ``sweep_for_age``. ``cleanup_for_closed_pr`` is exposed on the
+        # executor but not auto-invoked from the orchestrator yet —
+        # requires a per-tick sweep that fetches linked PR state, which
+        # is intentionally deferred to a follow-up so #66 stays narrow.
+        self._cleanup = WorkspaceCleanupExecutor(
+            workspace_manager,
+            self.config.workspace.cleanup,
+        )
 
     # -- Public API ---------------------------------------------------------
 
     async def run_once(self) -> TickResult:
         result = TickResult()
+
+        # 0. M5.7 #66: age-based workspace sweep BEFORE reconcile so the
+        # active set reflects the current tick. No-op when
+        # workspace.cleanup.enabled is False or max_age_days is unset.
+        # Each decision is logged by the executor; we don't surface them
+        # in TickResult yet (#67 owns operator-facing reporting).
+        self._cleanup.sweep_for_age(active_identifiers=set(self.active.keys()))
 
         # 1. Reconcile currently-active workers against fresh issue state.
         await self._reconcile(result)
@@ -894,6 +914,18 @@ class Orchestrator:
                 rs = self.retry_states.pop(worker.issue.identifier, None)
                 if rs is not None:
                     rs.record_success(now=self._clock())
+                # M5.7 #66: terminal-issue cleanup trigger. Only fires
+                # for clean task outcomes (completed_with_pr /
+                # completed_no_pr_declared) — incomplete_* runs already
+                # routed to mark_issue_blocked above and the operator
+                # needs the workspace preserved for inspection. No-op
+                # when workspace.cleanup.enabled or on_terminal_issue
+                # is False.
+                if detector_result.task_outcome in {
+                    OUTCOME_COMPLETED_WITH_PR,
+                    OUTCOME_COMPLETED_NO_PR_DECLARED,
+                }:
+                    self._cleanup.cleanup_for_terminal_issue(worker.workspace)
 
     async def _run_one_turn(self, worker: WorkerState, message: str) -> str:
         """Drive one send_input turn to its terminal event.
