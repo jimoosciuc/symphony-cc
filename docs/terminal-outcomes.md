@@ -172,15 +172,54 @@ SPEC §17.7.
 
 | value | meaning |
 |---|---|
-| `detector` | The M5.2 evidence detector ran and found (or did not find) evidence in the world. The `task_outcome` reflects real observation. |
-| `derivation` | The detector did not run; `task_outcome` was computed from existing provider fields per SPEC §17.4. Treat with mild suspicion when classifying many runs — derivation can mislabel a `completed_with_pr` run as `incomplete_no_evidence` because it has no way to check GitHub. |
+| `detector` | The M5.2 evidence detector ran AND verified PR presence/absence via the GitHub API. The `task_outcome` reflects real observation. Trust it. |
+| `derivation` | The detector did not run, OR the detector ran but could not verify PR absence (no `GitHubClient` wired, OR PR lookup raised `GitHubError`). The `task_outcome` was computed from existing provider fields per SPEC §17.4. Treat with mild suspicion — `derivation` runs are NOT escalated to `mark_issue_blocked` even when they look like `incomplete_*`. |
 | `unknown` | Neither path applied. Treat as needing investigation. |
 
-For the M5.1 → M5.2 transition window, every new
-`terminal.json` will have `outcome_decided_by: "derivation"` until
-#60 ships. Operators auditing M5.1-window runs should rely on the
-provider-side fields (`permission_denials_count`, `terminal_state`,
-`blocked`) for now.
+The `detector` vs `derivation` distinction is load-bearing for #62
+routing: only `detector`-decided `incomplete_no_evidence` /
+`incomplete_permission_denied` triggers `mark_issue_blocked`. A
+transient GitHub failure that prevents PR verification (the #74
+correction) lands as `outcome_decided_by="derivation"` +
+`task_outcome="unknown"` — released, NOT blocked. Operators should
+NEVER see an issue blocked because of an API blip.
+
+## How the detector handles PR-lookup failures (#74 / #75)
+
+The `_detect_pull_requests` step has three outcomes the operator may
+see in practice:
+
+| internal state | `task_outcome` (no other evidence) | `outcome_decided_by` | routing |
+|---|---|---|---|
+| Lookup succeeded, found ≥1 PR matching the expected branch | `completed_with_pr` | `detector` | release_issue |
+| Lookup succeeded, returned `[]` (verified no PR exists) | `incomplete_no_evidence` | `detector` | **mark_issue_blocked** |
+| Lookup failed (`GitHubError`: 401/403/429/5xx/network) | `unknown` | `derivation` | release_issue |
+| No `GitHubClient` wired (test fakes only) | `unknown` | `derivation` | release_issue |
+
+The maintainer-facing rule, locked in by both `_detect_pull_requests`
+docstring and a regression test
+(`tests/test_routing.py::test_pr_lookup_failure_does_not_block_issue`):
+**API failure must NOT be conflated with verified-no-PR.** The
+detector returns `None` on `GitHubError`; `[]` is reserved for
+"queried successfully, no PR found".
+
+## Operator action by `task_outcome`
+
+What an operator should DO when they see a given outcome in
+`terminal.json` or in the `--log-level info` WARNING stream.
+Recommended triage in priority order:
+
+| `task_outcome` | What it means | Operator action |
+|---|---|---|
+| `completed_with_pr` | PR linked to the issue. Run did its job. | None — the orchestrator released the claim; the linked PR carries the work. Inspect the PR on GitHub. |
+| `completed_no_pr_declared` | Claude explicitly said no change is needed via `Symphony-No-PR: <reason>`. | Verify `no_pr_reason` is reasonable. If acceptable, close the issue manually (or let the next dispatch see no `symphony-ready` label). If Claude was wrong, re-open or re-prompt with stronger context. |
+| `incomplete_no_evidence` | Provider completed cleanly but Symphony verified no PR exists, no sentinel present. The misleading-success class. The issue is now **`symphony-blocked`**. | Open `events.jsonl` to see what Claude actually did. Common causes: prompt too vague, Claude wrote a draft answer instead of editing files, Claude couldn't push (check repo permissions for `tracker.token`). Fix the root cause, remove `symphony-blocked`, and re-dispatch. |
+| `incomplete_permission_denied` | Provider completed but `permission_denials_count > 0` and no PR/sentinel. The issue is **`symphony-blocked`**. | Inspect `task_evidence[].permission_denied.tool_names`. If the run needs Bash/git/gh/AskUserQuestion to make a PR (the typical case), switch the workflow to `claude.permission_mode: bypassPermissions` (only on trusted hosts), remove `symphony-blocked`, and re-dispatch. |
+| `blocked_operator_required` | Provider failed with a non-retryable error (auth, permission_mode rejected, invalid workflow, restore failure under `fail_closed`). Already blocked. | Read `error` and `reason` fields in `terminal.json`. Fix the underlying cause (rotate token, fix workflow, etc.), then remove `symphony-blocked`. |
+| `retryable_failure` | Transient failure (turn / stall timeout, provider crash, transient API). The orchestrator scheduled a retry per `RetryConfig`. | Usually no action — the next tick will re-dispatch with backoff. If retries exhaust without success, the worker will eventually surface as `blocked_operator_required`. |
+| `unknown` | Detector ran but could not verify outcome (PR lookup failed, OR no `GitHubClient` wired, OR derivation fell through). | Check the `outcome_decided_by` field. If `derivation`: a transient GitHub failure is the most likely cause — re-run usually resolves. Look at the WARNING log for "PR lookup failed" to confirm. |
+
+
 
 ## Migration / backward compatibility
 

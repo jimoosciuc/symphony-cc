@@ -171,6 +171,53 @@ Fill in this template and post as a comment on
 - **Workspace directory survives across runs** — by design (SPEC §8).
   Delete manually if you want a fresh checkout.
 
+## Triaging a run by `task_outcome`
+
+Every `terminal.json` (post-M5.1) carries a `task_outcome` that
+distinguishes provider turn completion from real task completion.
+Use this as the first triage signal — `terminal_state: "completed"`
+alone is no longer sufficient evidence the run did what it was
+supposed to do (SPEC §17.1, `docs/terminal-outcomes.md`).
+
+```bash
+# Quick triage of an artifact directory.
+jq '.task_outcome' <claude.artifact_store>/<owner>_<repo>_<n>/<attempt>/terminal.json
+```
+
+Possible values and what to do:
+
+- **`completed_with_pr`** — Done. The linked PR carries the work.
+  Inspect the PR on GitHub.
+- **`completed_no_pr_declared`** — Claude said no change is needed
+  via a `Symphony-No-PR: <reason>` sentinel. Verify the reason is
+  reasonable; if so, close the issue manually.
+- **`incomplete_no_evidence`** — Provider completed but Symphony
+  verified no PR exists. The issue is now `symphony-blocked`.
+  Open `events.jsonl` to see what Claude actually did. Common
+  causes: prompt too vague, draft answer instead of edits, push
+  permission missing on `tracker.token`. Fix root cause, remove
+  `symphony-blocked`, re-dispatch.
+- **`incomplete_permission_denied`** — Provider completed but tool
+  calls (typically Bash/git/gh/AskUserQuestion) were denied under
+  `claude.permission_mode`. The issue is `symphony-blocked`.
+  Switch the workflow to `permission_mode: bypassPermissions` (only
+  on trusted hosts), remove `symphony-blocked`, re-dispatch.
+- **`blocked_operator_required`** — Non-retryable provider failure.
+  Read `error` and `reason` for the cause (auth, invalid workflow,
+  restore failure under `fail_closed`).
+- **`retryable_failure`** — Transient failure; the orchestrator
+  scheduled a retry. Usually no action needed.
+- **`unknown`** — Detector couldn't verify. Most often a transient
+  GitHub failure during PR lookup (the WARNING log will say "PR
+  lookup failed"). Re-run usually resolves; the `outcome_decided_by`
+  field tells you which fallback path applied. **An issue is NEVER
+  marked blocked because of an `unknown` outcome** — that would be
+  the false-block bug from #74.
+
+The full schema and decision tree live in
+`docs/terminal-outcomes.md`. Operator-action recommendations per
+outcome are tabulated there.
+
 ## What's NOT covered by this runbook
 
 - Multi-issue concurrency (`agent.max_concurrency > 1`). Works in
