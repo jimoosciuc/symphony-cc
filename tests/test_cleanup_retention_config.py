@@ -10,8 +10,10 @@ Surface:
 - valid policies: each trigger combo (terminal / closed-PR / age,
   with/without dry_run) round-trips through `build_config`
 - invalid policies: enabled-with-no-trigger, negative max_age_days,
-  wrong types, mistyped section keys all fail at workflow load with
-  clear `ConfigError.location`
+  and wrong types fail at workflow load with clear `ConfigError.location`
+- unknown cleanup keys are ignored, consistent with the shared `_opt_*`
+  helper pattern, so this file pins the narrower dataclass surface rather
+  than strict unknown-key rejection
 - workspace cleanup vs artifact retention modeled separately —
   retention is age-only (no terminal/PR-close triggers)
 - path safety: cleanup config does NOT accept arbitrary paths
