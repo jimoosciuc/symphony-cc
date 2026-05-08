@@ -219,6 +219,129 @@ def test_polling_retry_logging_defaults_when_omitted(env_with_token: dict[str, s
     )
 
 
+def test_remote_config_defaults_disabled() -> None:
+    raw = _minimal_raw()
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.remote.enabled is False
+    assert cfg.remote.host is None
+    assert cfg.remote.workspace_root is None
+    assert cfg.remote.artifact_root is None
+    assert cfg.remote.session_store is None
+    assert cfg.remote.worker_timeout_ms == 7_200_000
+    assert cfg.remote.heartbeat_interval_ms == 30_000
+    assert cfg.remote.stall_timeout_ms == 300_000
+
+
+def test_remote_disabled_allows_missing_remote_roots() -> None:
+    raw = _minimal_raw()
+    raw["remote"] = {"enabled": False}
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.remote.enabled is False
+    assert cfg.remote.workspace_root is None
+
+
+def test_remote_enabled_valid_config_preserves_remote_paths() -> None:
+    raw = _minimal_raw()
+    raw["remote"] = {
+        "enabled": True,
+        "host": "builder-1",
+        "workspace_root": "relative/remote/ws",
+        "artifact_root": "/srv/symphony/artifacts",
+        "session_store": "relative/remote/sessions",
+        "worker_timeout_ms": 600_000,
+        "heartbeat_interval_ms": 10_000,
+        "stall_timeout_ms": 60_000,
+    }
+    cfg = build_config(raw, workflow_path=Path("/tmp/workflows/W.md"), env={})
+    assert cfg.remote.enabled is True
+    assert cfg.remote.host == "builder-1"
+    assert cfg.remote.workspace_root == "relative/remote/ws"
+    assert cfg.remote.artifact_root == "/srv/symphony/artifacts"
+    assert cfg.remote.session_store == "relative/remote/sessions"
+    assert cfg.remote.worker_timeout_ms == 600_000
+    assert cfg.remote.heartbeat_interval_ms == 10_000
+    assert cfg.remote.stall_timeout_ms == 60_000
+
+
+def test_remote_section_must_be_mapping() -> None:
+    raw = _minimal_raw()
+    raw["remote"] = True
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "remote"
+
+
+@pytest.mark.parametrize(
+    ("field", "location"),
+    [
+        ("host", "remote.host"),
+        ("workspace_root", "remote.workspace_root"),
+        ("artifact_root", "remote.artifact_root"),
+        ("session_store", "remote.session_store"),
+    ],
+)
+def test_remote_enabled_requires_fields(field: str, location: str) -> None:
+    raw = _minimal_raw()
+    raw["remote"] = {
+        "enabled": True,
+        "host": "builder-1",
+        "workspace_root": "/srv/ws",
+        "artifact_root": "/srv/artifacts",
+        "session_store": "/srv/sessions",
+    }
+    del raw["remote"][field]
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == location
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["worker_timeout_ms", "heartbeat_interval_ms", "stall_timeout_ms"],
+)
+def test_remote_timeout_fields_must_be_ints(field: str) -> None:
+    raw = _minimal_raw()
+    raw["remote"] = {field: "1000"}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == f"remote.{field}"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["worker_timeout_ms", "heartbeat_interval_ms", "stall_timeout_ms"],
+)
+def test_remote_timeout_fields_must_be_positive(field: str) -> None:
+    raw = _minimal_raw()
+    raw["remote"] = {field: 0}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == f"remote.{field}"
+
+
+def test_remote_heartbeat_must_be_less_than_stall() -> None:
+    raw = _minimal_raw()
+    raw["remote"] = {
+        "heartbeat_interval_ms": 60_000,
+        "stall_timeout_ms": 60_000,
+    }
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "remote.heartbeat_interval_ms"
+
+
+def test_remote_stall_must_not_exceed_worker_timeout() -> None:
+    raw = _minimal_raw()
+    raw["remote"] = {
+        "worker_timeout_ms": 30_000,
+        "heartbeat_interval_ms": 10_000,
+        "stall_timeout_ms": 60_000,
+    }
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "remote.stall_timeout_ms"
+
+
 # -- Validation: type and value constraints -----------------------------------
 
 
