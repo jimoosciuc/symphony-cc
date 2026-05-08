@@ -245,6 +245,38 @@ def test_ssh_artifact_collector_handles_copy_errors(tmp_path: Path):
     assert result.partial
 
 
+def test_ssh_artifact_collector_redacts_token_shaped_stderr(tmp_path: Path):
+    """Test SSH artifact collector redacts token-shaped scp stderr."""
+    artifact_store = tmp_path / "artifacts"
+    artifact_store.mkdir()
+
+    token_shaped = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    runner = FakeScpRunner(
+        error_files={
+            "events.jsonl": f"scp: auth failed for {token_shaped}",
+        },
+        missing_files={"request.json", "session.json", "terminal.json"},
+    )
+    collector = SSHArtifactCollector(
+        artifact_store=artifact_store,
+        redact_keys=("token",),
+        runner=runner,
+        host="user@remote-host",
+    )
+
+    result = collector.collect(
+        "/remote/artifacts/owner_repo_1/1",
+        owner="owner",
+        repo="repo",
+        issue_number=1,
+        attempt=1,
+    )
+
+    errors = "\n".join(result.errors)
+    assert token_shaped not in errors
+    assert "<redacted>" in errors
+
+
 def test_ssh_artifact_collector_handles_timeout(tmp_path: Path):
     """Test SSH artifact collector handles scp timeout."""
     artifact_store = tmp_path / "artifacts"
