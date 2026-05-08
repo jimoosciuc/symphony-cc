@@ -71,6 +71,11 @@ the last-known-good config active for current workers and pause new dispatch
 until the file is fixed. Reload evidence is written under
 `<claude.artifact_store>/_retention_reports/_reload_events.jsonl`.
 
+Runtime status is available as a read-only in-memory Python API:
+`orchestrator.status_snapshot()` or `symphony.status.build_status_snapshot(...)`.
+It redacts configured secret keys and is intended as the data source for the
+future dashboard, not as a write-control surface.
+
 ### Tests
 
 ```bash

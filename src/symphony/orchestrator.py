@@ -63,6 +63,7 @@ from symphony.recovery import (
     issue_is_actionable,
 )
 from symphony.retry import RetryState, next_backoff_ms
+from symphony.status import build_status_snapshot
 from symphony.workflow_reload import WorkflowReloader
 from symphony.workspace import WorkspaceManager
 
@@ -152,6 +153,7 @@ class Orchestrator:
         # Mutable state.
         self.active: dict[str, WorkerState] = {}
         self.retry_states: dict[str, RetryState] = {}
+        self.recent_finished: list[dict[str, Any]] = []
         # Recovery handoff: when restart recovery decides to drop a session
         # and let normal dispatch start a fresh one (the
         # ``new_session_with_summary`` policy), it stashes the prior
@@ -240,6 +242,10 @@ class Orchestrator:
             await self.run_once()
             interval = max(0.001, self.config.polling.interval_ms / 1000)
             await asyncio.sleep(interval)
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Return the read-only runtime status snapshot (#55)."""
+        return build_status_snapshot(self)
 
     def _maybe_reload_workflow(self):
         if self._workflow_reloader is None:
@@ -1064,6 +1070,7 @@ class Orchestrator:
             )
             self.active.pop(worker.issue.identifier, None)
             result.finished.append(worker.issue.identifier)
+            self._remember_finished(worker, detector_result)
             if worker.terminal_state == Terminal.COMPLETED:
                 rs = self.retry_states.pop(worker.issue.identifier, None)
                 if rs is not None:
@@ -1231,6 +1238,33 @@ class Orchestrator:
         worker.last_event = event
         worker.session.last_event_at = event.timestamp
         worker.artifacts.append_event(event)
+
+    def _remember_finished(
+        self,
+        worker: WorkerState,
+        detector_result: DetectorResult,
+    ) -> None:
+        self.recent_finished.append(
+            {
+                "issue_identifier": worker.issue.identifier,
+                "issue_url": worker.issue.url,
+                "artifact_dir": str(worker.artifacts.root),
+                "session_id": worker.session.session_id,
+                "provider_session_id": worker.session.provider_session_id,
+                "attempt": worker.session.attempt,
+                "terminal_state": (
+                    worker.terminal_state.value if worker.terminal_state else None
+                ),
+                "task_outcome": detector_result.task_outcome,
+                "last_event_at": (
+                    worker.last_event.timestamp.isoformat()
+                    if worker.last_event is not None
+                    else None
+                ),
+                "error": worker.error,
+            }
+        )
+        del self.recent_finished[:-50]
 
 
 # -- Helpers ------------------------------------------------------------------
