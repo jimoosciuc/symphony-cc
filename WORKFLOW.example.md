@@ -17,6 +17,16 @@ workspace:
   populate: git
   before_run: null
   after_run: null
+  # Optional cleanup policy (M5.6). Defaults are off — workspaces are
+  # preserved across runs (SPEC §8). Uncomment + enable to opt in.
+  # The executor lands in M5.7 (#66); until then `enabled: true` is
+  # accepted but has no effect at runtime.
+  # cleanup:
+  #   enabled: false
+  #   on_terminal_issue: false   # delete after issue closes/done
+  #   on_closed_pr: false        # delete after the linked PR closes/merges
+  #   max_age_days: null         # delete workspaces older than N days
+  #   dry_run: false             # log intent without deleting
 
 github:
   claim_label: symphony-running
@@ -46,6 +56,14 @@ claude:
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
   retry_resume_policy: resume_same_session
+  # Optional artifact retention (M5.6). Defaults are off — artifacts
+  # are audit evidence and are kept forever unless the operator opts in.
+  # Only age-based retention is supported (no terminal/PR-close
+  # triggers). The executor lands in M5.8 (#67).
+  # artifact_retention:
+  #   enabled: false
+  #   max_age_days: null
+  #   dry_run: false
 ---
 
 You are working unattended on {{ issue.identifier }}: {{ issue.title }}.

@@ -130,6 +130,32 @@ class AgentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceCleanupConfig:
+    """Workflow knob for workspace deletion (M5.6 #65 / parent #52).
+
+    Schema-only ticket. The executor that consumes these flags lands in
+    #66; this dataclass plus its validators in :func:`_build_workspace_cleanup`
+    are the contract that #66 builds against.
+
+    Defaults are **default-safe**: ``enabled=False`` preserves SPEC §8
+    "preserved workspaces MUST be reused" semantics. Existing workflows
+    without a ``workspace.cleanup`` section continue to behave identically.
+
+    Trigger fields (``on_terminal_issue`` / ``on_closed_pr`` / ``max_age_days``)
+    are inert when ``enabled=False`` — the executor (#66) MUST consult
+    ``enabled`` first. When ``enabled=True``, at least one trigger MUST
+    be set; the validator rejects an enabled-with-no-trigger combo
+    because such a config would never delete anything (operator error).
+    """
+
+    enabled: bool = False
+    on_terminal_issue: bool = False
+    on_closed_pr: bool = False
+    max_age_days: int | None = None
+    dry_run: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class WorkspaceConfig:
     root: Path
     populate: str = "git"
@@ -139,6 +165,7 @@ class WorkspaceConfig:
     after_run: str | None = None
     before_delete: str | None = None
     hook_timeout_ms: int = 300_000
+    cleanup: WorkspaceCleanupConfig = field(default_factory=WorkspaceCleanupConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +195,30 @@ class GitHubConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactRetentionConfig:
+    """Workflow knob for artifact-store retention (M5.6 #65 / parent #52).
+
+    Per the leader's "modeled separately from workspace cleanup"
+    requirement on #65: artifacts are audit evidence and follow simpler
+    retention rules. The only trigger is age — terminal-issue and
+    closed-PR triggers are intentionally NOT supported here because an
+    operator triaging a misleading-success run weeks later still needs
+    the `events.jsonl` and `terminal.json` from that attempt.
+
+    Defaults are **default-safe**: ``enabled=False`` preserves all
+    artifacts. Existing workflows without a ``claude.artifact_retention``
+    section continue to behave identically.
+
+    When ``enabled=True``, ``max_age_days`` MUST be set; the validator
+    rejects an enabled-with-no-trigger combo.
+    """
+
+    enabled: bool = False
+    max_age_days: int | None = None
+    dry_run: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ClaudeConfig:
     model: str
     permission_mode: str
@@ -178,6 +229,9 @@ class ClaudeConfig:
     read_timeout_ms: int = 30_000
     stall_timeout_ms: int = 300_000
     retry_resume_policy: str = "resume_same_session"
+    artifact_retention: ArtifactRetentionConfig = field(
+        default_factory=ArtifactRetentionConfig
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +454,9 @@ def _build_workspace(raw: dict[str, Any], base_dir: Path) -> WorkspaceConfig:
             f"{location}.populate",
             f"only 'git' is supported in this implementation (got {populate!r})",
         )
+    cleanup = _build_workspace_cleanup(
+        section.get("cleanup") or {}, location=f"{location}.cleanup"
+    )
     return WorkspaceConfig(
         root=_resolve_path(root_raw, base_dir),
         populate=populate,
@@ -409,6 +466,81 @@ def _build_workspace(raw: dict[str, Any], base_dir: Path) -> WorkspaceConfig:
         after_run=_opt_str(section, "after_run", location),
         before_delete=_opt_str(section, "before_delete", location),
         hook_timeout_ms=_opt_int(section, "hook_timeout_ms", location, default=300_000),
+        cleanup=cleanup,
+    )
+
+
+def _build_workspace_cleanup(raw: Any, *, location: str) -> WorkspaceCleanupConfig:
+    """Build the optional ``workspace.cleanup`` subtree (M5.6 #65).
+
+    Permissive on absence (defaults `enabled=False`); strict on shape so
+    a typo like ``on_terminal_issuee`` fails at workflow load instead of
+    being silently ignored. Validates the enabled-with-no-trigger combo
+    that #66's executor would treat as a no-op — reject at load time so
+    operators don't ship a config that never deletes anything.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError(location, f"must be a mapping, got {type(raw).__name__}")
+    enabled = _opt_bool(raw, "enabled", location, default=False)
+    on_terminal_issue = _opt_bool(raw, "on_terminal_issue", location, default=False)
+    on_closed_pr = _opt_bool(raw, "on_closed_pr", location, default=False)
+    max_age_days = _opt_int(raw, "max_age_days", location, default=0) or None
+    if max_age_days is not None and max_age_days < 1:
+        raise ConfigError(
+            f"{location}.max_age_days",
+            f"must be >= 1 when set, got {max_age_days}",
+        )
+    dry_run = _opt_bool(raw, "dry_run", location, default=False)
+    if enabled and not (on_terminal_issue or on_closed_pr or max_age_days is not None):
+        raise ConfigError(
+            location,
+            (
+                "enabled=true requires at least one trigger: set "
+                "on_terminal_issue, on_closed_pr, or max_age_days. An "
+                "enabled cleanup with no trigger would never delete "
+                "anything — drop enabled or add a trigger."
+            ),
+        )
+    return WorkspaceCleanupConfig(
+        enabled=enabled,
+        on_terminal_issue=on_terminal_issue,
+        on_closed_pr=on_closed_pr,
+        max_age_days=max_age_days,
+        dry_run=dry_run,
+    )
+
+
+def _build_artifact_retention(raw: Any, *, location: str) -> ArtifactRetentionConfig:
+    """Build the optional ``claude.artifact_retention`` subtree (M5.6 #65).
+
+    Same defensive shape as :func:`_build_workspace_cleanup` but with a
+    narrower trigger set — artifacts are audit evidence so only age
+    counts (per leader requirement on #65). Same enabled-with-no-trigger
+    rejection.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError(location, f"must be a mapping, got {type(raw).__name__}")
+    enabled = _opt_bool(raw, "enabled", location, default=False)
+    max_age_days = _opt_int(raw, "max_age_days", location, default=0) or None
+    if max_age_days is not None and max_age_days < 1:
+        raise ConfigError(
+            f"{location}.max_age_days",
+            f"must be >= 1 when set, got {max_age_days}",
+        )
+    dry_run = _opt_bool(raw, "dry_run", location, default=False)
+    if enabled and max_age_days is None:
+        raise ConfigError(
+            location,
+            (
+                "enabled=true requires max_age_days. An enabled retention "
+                "with no age trigger would never delete anything — drop "
+                "enabled or set max_age_days."
+            ),
+        )
+    return ArtifactRetentionConfig(
+        enabled=enabled,
+        max_age_days=max_age_days,
+        dry_run=dry_run,
     )
 
 
@@ -469,6 +601,10 @@ def _build_claude(
         read_timeout_ms=_opt_int(section, "read_timeout_ms", location, default=30_000),
         stall_timeout_ms=_opt_int(section, "stall_timeout_ms", location, default=300_000),
         retry_resume_policy=policy,
+        artifact_retention=_build_artifact_retention(
+            section.get("artifact_retention") or {},
+            location=f"{location}.artifact_retention",
+        ),
     )
 
 
