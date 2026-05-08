@@ -7,23 +7,30 @@ configured lifecycle hooks (``after_create``, ``before_run``, ``after_run``,
 ``before_delete``) before/after running the agent provider.
 
 This module owns all path sanitization and root-containment checks defined
-in ``SPEC.md`` §8. It does not perform git population — that boundary is
-documented (`prepare` returns a `Workspace.repo_path == Workspace.path`)
-and will be filled in by a later issue if needed.
+in ``SPEC.md`` §8. Repository population (``workspace.populate: git``) is
+delegated to a :class:`WorkspacePopulator` injected at construction time —
+when present, ``prepare`` calls it after creating/reusing the workspace
+directory. Production wires :class:`GitWorkspacePopulator`; tests can
+inject a stub or leave it ``None`` (the default), in which case ``prepare``
+keeps its prior empty-directory behavior.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
-from symphony.config import WorkspaceConfig
+from symphony.config import GitHubConfig, TrackerConfig, WorkspaceConfig
 from symphony.models import Issue, Workspace
+
+_LOG = logging.getLogger("symphony.workspace")
 
 HookName = Literal["after_create", "before_run", "after_run", "before_delete"]
 
@@ -115,6 +122,18 @@ def _build_workspace_key(issue: Issue) -> str:
 # -- Manager -------------------------------------------------------------------
 
 
+class WorkspacePopulator(Protocol):
+    """Boundary for filling a freshly-created or reused workspace directory.
+
+    The manager owns path safety; the populator owns whatever
+    ``workspace.populate`` strategy is configured. Implementations MUST
+    be safe to call on both fresh (empty) and reused (post-prior-run)
+    directories — ``prepare`` does not differentiate.
+    """
+
+    def populate(self, workspace_path: Path, issue: Issue, *, reused: bool) -> None: ...
+
+
 class WorkspaceManager:
     """Prepares and operates on per-issue workspaces.
 
@@ -128,10 +147,16 @@ class WorkspaceManager:
     the orchestrator's cleanup policy.
     """
 
-    def __init__(self, config: WorkspaceConfig) -> None:
+    def __init__(
+        self,
+        config: WorkspaceConfig,
+        *,
+        populator: WorkspacePopulator | None = None,
+    ) -> None:
         self.config = config
         # Resolve once so all containment checks compare absolute paths.
         self._root = Path(config.root).resolve()
+        self._populator = populator
 
     @property
     def root(self) -> Path:
@@ -189,6 +214,13 @@ class WorkspaceManager:
                 "workspace.path",
                 f"path {path} exists but is not a directory; refusing to clobber",
             )
+        # Run the configured population strategy (e.g., git clone/fetch+reset)
+        # AFTER the directory exists so the populator can assume an empty or
+        # previously-populated dir. ``populate: git`` without a populator wired
+        # is a no-op so existing tests that construct ``WorkspaceManager``
+        # without one keep working.
+        if self.config.populate == "git" and self._populator is not None:
+            self._populator.populate(path, issue, reused=reused)
         return Workspace(
             issue_identifier=issue.identifier,
             workspace_key=path.name,
@@ -301,3 +333,238 @@ def _decode_partial(data: bytes | str | None) -> str:
     if isinstance(data, bytes):
         return data.decode("utf-8", errors="replace")
     return data
+
+
+# -- Git populator (#44) ------------------------------------------------------
+
+
+GITHUB_HTTPS_HOST = "github.com"
+
+
+class GitWorkspacePopulator:
+    """Populate a workspace via ``git clone`` / ``git fetch`` (#44).
+
+    Wired by the CLI when ``workspace.populate: git`` is configured. The
+    populator owns:
+
+    - building the authenticated remote URL (token is passed via the URL
+      only at clone time, then scrubbed from ``.git/config`` so it does
+      not survive into the repo or operator artifacts);
+    - choosing between fresh clone (empty / no ``.git`` dir) and reuse
+      (fetch + reset to ``github.base_branch`` + clean untracked);
+    - raising :class:`WorkspaceError` on any git failure so the
+      orchestrator can mark the issue blocked instead of running Claude
+      against an empty / inconsistent workspace.
+
+    The token is sourced from :class:`TrackerConfig.token`; everything
+    Claude sees (the workspace's ``.git/config`` and any subsequent
+    ``git remote -v``) carries only the unauthenticated HTTPS URL.
+
+    Operator-side caveats (matching SPEC §8 reuse semantics):
+
+    - **Reuse is destructive of local state.** ``git fetch`` + ``git
+      reset --hard origin/<base>`` + ``git clean -fdx`` discards any
+      uncommitted edits the prior session made. That is the contract:
+      every run starts from a deterministic checkout of the base
+      branch. If an operator wants to inspect mid-run state, do it
+      before the next dispatch tick.
+    - The populator does NOT push. PR creation is agent-managed
+      (per ``docs/claude-provider.md``).
+    """
+
+    # Network operations get their own timeout so a hung clone does not
+    # block the orchestrator's poll loop. Workspace hook timeout would be
+    # too generous for an HTTPS clone of a small repo.
+    DEFAULT_TIMEOUT_SECONDS: float = 300.0
+
+    def __init__(
+        self,
+        tracker: TrackerConfig,
+        github: GitHubConfig,
+        *,
+        timeout_seconds: float | None = None,
+        host: str = GITHUB_HTTPS_HOST,
+    ) -> None:
+        self._tracker = tracker
+        self._github = github
+        self._timeout_seconds = timeout_seconds or self.DEFAULT_TIMEOUT_SECONDS
+        self._host = host
+
+    # -- Public surface ------------------------------------------------------
+
+    def populate(self, workspace_path: Path, issue: Issue, *, reused: bool) -> None:
+        """Populate ``workspace_path`` with a checkout of the configured repo.
+
+        Strategy:
+
+        - If a ``.git`` directory exists at ``workspace_path`` (regardless
+          of whether the manager flagged the dir as ``reused``), refresh
+          via ``fetch`` + ``reset`` + ``clean``. Defends against the case
+          where the manager reuses a directory operator-cloned manually.
+        - Otherwise, clone the configured repo into ``workspace_path``.
+
+        Raises :class:`WorkspaceError` (location ``workspace.populate``)
+        on any failure — operator-facing message, no token in it.
+        """
+        del reused  # presence of .git is the source of truth, not the manager flag
+        if (workspace_path / ".git").is_dir():
+            self._refresh_existing(workspace_path)
+        else:
+            self._fresh_clone(workspace_path)
+
+    # -- Internals -----------------------------------------------------------
+
+    def _fresh_clone(self, workspace_path: Path) -> None:
+        if any(workspace_path.iterdir()):
+            # Non-empty without .git is operator state we should not stomp.
+            raise WorkspaceError(
+                "workspace.populate",
+                (
+                    f"directory {workspace_path} is non-empty but has no .git; "
+                    "refusing to clobber operator state. Remove the directory "
+                    "or migrate it to a real git checkout."
+                ),
+            )
+        authed_url = self._authenticated_url()
+        public_url = self._public_url()
+        # ``git clone <url> .`` clones into the existing (empty) dir without
+        # creating a nested directory.
+        self._run_git(
+            ["clone", "--branch", self._github.base_branch, authed_url, "."],
+            cwd=workspace_path,
+            secret=self._tracker.token,
+        )
+        # Scrub the token from the persisted remote so subsequent ``git
+        # remote -v`` / ``.git/config`` reads from Claude or operator
+        # tooling never see it. The local credential helper for *this*
+        # checkout is intentionally not touched — there is none unless
+        # the operator added one.
+        self._run_git(
+            ["remote", "set-url", "origin", public_url],
+            cwd=workspace_path,
+            secret=self._tracker.token,
+        )
+
+    def _refresh_existing(self, workspace_path: Path) -> None:
+        authed_url = self._authenticated_url()
+        public_url = self._public_url()
+        # Set the remote to the authed URL only for the fetch, then scrub.
+        # Could be done with ``git -c http.extraheader=...`` but that
+        # leaks the token into the command line (visible via ``ps``);
+        # the temporary remote URL keeps it out of process listings.
+        self._run_git(
+            ["remote", "set-url", "origin", authed_url],
+            cwd=workspace_path,
+            secret=self._tracker.token,
+        )
+        try:
+            self._run_git(
+                ["fetch", "--prune", "origin", self._github.base_branch],
+                cwd=workspace_path,
+                secret=self._tracker.token,
+            )
+        finally:
+            # Even if fetch failed, restore the public URL so the token
+            # does not stay in .git/config across runs.
+            self._run_git(
+                ["remote", "set-url", "origin", public_url],
+                cwd=workspace_path,
+                secret=self._tracker.token,
+            )
+        self._run_git(
+            ["reset", "--hard", f"origin/{self._github.base_branch}"],
+            cwd=workspace_path,
+            secret=self._tracker.token,
+        )
+        self._run_git(
+            ["clean", "-fdx"],
+            cwd=workspace_path,
+            secret=self._tracker.token,
+        )
+
+    def _authenticated_url(self) -> str:
+        # GitHub PATs auth as ``oauth2:<token>``; installation tokens use
+        # ``x-access-token:<token>``. Both accept ``oauth2`` for clone.
+        # The token is URL-encoded defensively — PATs are alphanumeric
+        # today, but a future format with reserved characters would
+        # otherwise break the URL silently.
+        from urllib.parse import quote
+
+        token = quote(self._tracker.token, safe="")
+        return (
+            f"https://oauth2:{token}@{self._host}/"
+            f"{self._tracker.owner}/{self._tracker.repo}.git"
+        )
+
+    def _public_url(self) -> str:
+        return f"https://{self._host}/{self._tracker.owner}/{self._tracker.repo}.git"
+
+    def _run_git(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path,
+        secret: str,
+    ) -> None:
+        """Run ``git`` with the supplied args; raise WorkspaceError on failure.
+
+        Suppresses interactive credential prompts (so a misconfigured
+        token fails fast instead of hanging the daemon). Strips the
+        token from any captured stderr before raising — operator logs
+        and CLI surfaces never carry the secret.
+        """
+        env = dict(os.environ)
+        # Prevent SSH/HTTPS prompts from blocking the daemon.
+        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+        env.setdefault("GIT_ASKPASS", "/bin/echo")
+        try:
+            completed = subprocess.run(  # noqa: S603 — argv list, no shell
+                ["git", *argv],
+                cwd=str(cwd),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise WorkspaceError(
+                "workspace.populate",
+                f"git {argv[0]} timed out after {self._timeout_seconds}s: {exc}",
+            ) from exc
+        except OSError as exc:
+            raise WorkspaceError(
+                "workspace.populate",
+                f"git {argv[0]} could not be invoked ({exc.__class__.__name__}: {exc})",
+            ) from exc
+        if completed.returncode != 0:
+            stderr = _scrub_secret(completed.stderr or "", secret)
+            stdout = _scrub_secret(completed.stdout or "", secret)
+            raise WorkspaceError(
+                "workspace.populate",
+                (
+                    f"git {argv[0]} failed (exit {completed.returncode}). "
+                    f"stderr: {stderr.strip()[:500]}"
+                    + (f" | stdout: {stdout.strip()[:200]}" if stdout.strip() else "")
+                ),
+            )
+        _LOG.debug("git %s succeeded in %s", argv[0], cwd)
+
+
+def _scrub_secret(text: str, secret: str) -> str:
+    """Remove the literal token (and its URL-encoded form) from ``text``.
+
+    Defense in depth: git output should not echo the token via the
+    authenticated URL because we never put the token on the command
+    line, but a future code path that does (or a git version that
+    quotes the URL into an error message) would otherwise leak.
+    """
+    if not secret:
+        return text
+    from urllib.parse import quote
+
+    cleaned = text.replace(secret, "<redacted>")
+    encoded = quote(secret, safe="")
+    if encoded != secret:
+        cleaned = cleaned.replace(encoded, "<redacted>")
+    return cleaned

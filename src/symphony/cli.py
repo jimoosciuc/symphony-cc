@@ -130,7 +130,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     tracker = GitHubTracker(config.tracker, config.github)
     provider = ClaudeCodeProvider(tool_registry=_build_tool_registry(config, tracker))
-    workspace_mgr = WorkspaceManager(config.workspace)
+    workspace_mgr = WorkspaceManager(
+        config.workspace,
+        populator=_build_workspace_populator(config),
+    )
     orchestrator = Orchestrator(
         config,
         tracker=tracker,
@@ -221,6 +224,24 @@ def _build_tool_registry(config: object, tracker: object) -> object | None:
     registry = ToolRegistry()
     registry.register_github_graphql(GitHubGraphQLTool(tracker.client))  # type: ignore[attr-defined]
     return registry
+
+
+def _build_workspace_populator(config: object) -> object | None:
+    """Construct the workspace populator honoring ``workspace.populate``.
+
+    Returns ``None`` when no real population strategy is configured so the
+    :class:`WorkspaceManager` keeps its empty-directory contract for
+    test wiring. Production picks up the git populator whenever
+    ``workspace.populate: git`` is set, sourcing the token from
+    ``tracker`` and the base branch from ``github``.
+    """
+    workspace_cfg = getattr(config, "workspace", None)
+    populate = getattr(workspace_cfg, "populate", None)
+    if populate != "git":
+        return None
+    from symphony.workspace import GitWorkspacePopulator
+
+    return GitWorkspacePopulator(config.tracker, config.github)  # type: ignore[attr-defined]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
