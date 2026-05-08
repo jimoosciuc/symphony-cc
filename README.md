@@ -61,12 +61,15 @@ pip install -e ".[dev]"
 ```bash
 symphony --help
 symphony --version
-symphony run --workflow WORKFLOW.example.md
+symphony run --workflow WORKFLOW.example.md --once
 ```
 
-The `run` subcommand parses arguments today and exits with a clear
-`not yet implemented` message. Behavior will be wired up by the M1 issues
-(workflow loader, workspace manager, orchestrator).
+The `run` subcommand loads the workflow, performs restart recovery, then runs
+one poll tick with `--once` or keeps polling without it. Long-running mode
+reloads valid `WORKFLOW.md` edits on poll-cycle boundaries; invalid edits keep
+the last-known-good config active for current workers and pause new dispatch
+until the file is fixed. Reload evidence is written under
+`<claude.artifact_store>/_retention_reports/_reload_events.jsonl`.
 
 ### Tests
 
