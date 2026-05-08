@@ -78,7 +78,13 @@ class RemoteDispatchRunResult:
 
     @property
     def failed(self) -> bool:
-        return bool(self.errors or (self.transport is not None and self.transport.failed))
+        return bool(
+            self.errors
+            or (
+                self.transport is not None
+                and (self.transport.failed or self.transport.stalled)
+            )
+        )
 
 
 @dataclass(slots=True)
