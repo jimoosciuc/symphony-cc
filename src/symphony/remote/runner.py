@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from symphony.artifacts import redact_text
 from symphony.config import WorkflowConfig
+from symphony.remote.artifacts import ArtifactCollectionResult
 from symphony.remote.materialize import (
     MaterializedRemoteDispatch,
     materialize_remote_dispatch_plan,
@@ -44,6 +46,22 @@ class RemoteTransportFactory(Protocol):
         ...
 
 
+class ArtifactCollector(Protocol):
+    """Collects artifacts from remote worker execution."""
+
+    def collect(
+        self,
+        remote_root: str,
+        *,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        attempt: int,
+    ) -> ArtifactCollectionResult:
+        """Collect artifacts from remote path to local artifact store."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class RemoteDispatchRunResult:
     """Combined result for a pre-orchestrator remote dispatch run."""
@@ -51,6 +69,7 @@ class RemoteDispatchRunResult:
     materialized: MaterializedRemoteDispatch | None = None
     upload: PayloadUploadResult | None = None
     transport: RemoteRunResult | None = None
+    artifacts: ArtifactCollectionResult | None = None
     errors: tuple[str, ...] = ()
 
     @property
@@ -64,10 +83,11 @@ class RemoteDispatchRunResult:
 
 @dataclass(slots=True)
 class RemoteDispatchRunner:
-    """Composes materialization, payload upload, and SSH transport execution."""
+    """Composes materialization, payload upload, SSH transport, and artifact collection."""
 
     uploader: PayloadUploader
     transport_factory: RemoteTransportFactory
+    artifact_collector: ArtifactCollector | None = None
 
     def run(self, plan: RemoteDispatchPlan, config: WorkflowConfig) -> RemoteDispatchRunResult:
         """Run one remote dispatch plan without orchestrator scheduling."""
@@ -90,9 +110,42 @@ class RemoteDispatchRunner:
         )
         transport_result = transport.run(config)
 
+        # Collect artifacts after transport completes (even if transport failed)
+        artifacts_result = None
+        if self.artifact_collector:
+            try:
+                artifacts_result = self.artifact_collector.collect(
+                    plan.remote_artifact_path,
+                    owner=plan.dispatch_request.owner,
+                    repo=plan.dispatch_request.repo,
+                    issue_number=plan.dispatch_request.issue_number,
+                    attempt=plan.dispatch_request.attempt,
+                )
+            except Exception as exc:
+                error = redact_text(
+                    f"artifact collection failed: {exc}",
+                    redact_keys=("token", "authorization", "api_key", "password", "secret"),
+                    extra_secrets=(config.tracker.token,),
+                )
+                artifacts_result = ArtifactCollectionResult(
+                    local_root=_local_artifact_root(plan, config),
+                    errors=(error,),
+                )
+        artifact_errors = artifacts_result.errors if artifacts_result is not None else ()
+
         return RemoteDispatchRunResult(
             materialized=materialized,
             upload=upload,
             transport=transport_result,
-            errors=transport_result.errors,
+            artifacts=artifacts_result,
+            errors=transport_result.errors + artifact_errors,
         )
+
+
+def _local_artifact_root(plan: RemoteDispatchPlan, config: WorkflowConfig):
+    request = plan.dispatch_request
+    return (
+        config.claude.artifact_store
+        / f"{request.owner}_{request.repo}_{request.issue_number}"
+        / str(request.attempt)
+    )
