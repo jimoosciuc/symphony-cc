@@ -30,7 +30,7 @@ github:
   pr_link_comment: true
 
 claude:
-  model: claude-sonnet-4-5
+  model: claude-opus-4-7
   permission_mode: acceptEdits
   session_store: .symphony/sessions
   transcript_store: .symphony/transcripts

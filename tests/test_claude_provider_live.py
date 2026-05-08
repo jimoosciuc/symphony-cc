@@ -53,7 +53,7 @@ def _live_issue() -> Issue:
 
 def _live_config(tmp_path: Path) -> ClaudeConfig:
     return ClaudeConfig(
-        model=os.environ.get("SYMPHONY_CLAUDE_TEST_MODEL", "claude-sonnet-4-5"),
+        model=os.environ.get("SYMPHONY_CLAUDE_TEST_MODEL", "claude-opus-4-7"),
         permission_mode="acceptEdits",
         session_store=tmp_path / "sessions",
         transcript_store=tmp_path / "transcripts",

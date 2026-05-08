@@ -175,7 +175,7 @@ def _issue(*, number: int = 1) -> Issue:
 
 def _claude_config(tmp_path: Path) -> ClaudeConfig:
     return ClaudeConfig(
-        model="claude-sonnet-4-5",
+        model="claude-opus-4-7",
         permission_mode="acceptEdits",
         session_store=tmp_path / "sessions",
         transcript_store=tmp_path / "transcripts",
@@ -272,7 +272,7 @@ def test_start_session_options_match_config(tmp_path: Path) -> None:
     asyncio.run(provider.start_session(_issue(), workspace, cfg))
     opts = clients[0].options
     assert opts["cwd"] == str(workspace)
-    assert opts["model"] == "claude-sonnet-4-5"
+    assert opts["model"] == "claude-opus-4-7"
     assert opts["permission_mode"] == "acceptEdits"
     assert opts["fork_session"] is False
     assert opts["continue_conversation"] is False
@@ -295,7 +295,7 @@ async def test_first_send_input_after_start_emits_session_started(tmp_path: Path
         AssistantMessage(
             content=[TextBlock(text="hello")],
             session_id="claude-pid-abc",
-            model="claude-sonnet-4-5",
+            model="claude-opus-4-7",
             message_id="msg_1",
         ),
         ResultMessage(is_error=False, result="ok", session_id="claude-pid-abc"),
@@ -308,7 +308,7 @@ async def test_first_send_input_after_start_emits_session_started(tmp_path: Path
     # session_started MUST be the first event of the first send_input.
     assert names[0] == "session_started"
     assert events[0].payload["session_id"] == "claude-pid-abc"
-    assert events[0].payload["model"] == "claude-sonnet-4-5"
+    assert events[0].payload["model"] == "claude-opus-4-7"
     # Then content (message_delta + message_completed) and finally turn_completed.
     assert "message_delta" in names
     assert "message_completed" in names
