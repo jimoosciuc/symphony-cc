@@ -34,6 +34,8 @@ from symphony.events import TERMINAL_TURN_EVENTS, AgentEvent
 from symphony.evidence import (
     OUTCOME_COMPLETED_NO_PR_DECLARED,
     OUTCOME_COMPLETED_WITH_PR,
+    OUTCOME_INCOMPLETE_NO_EVIDENCE,
+    OUTCOME_INCOMPLETE_PERMISSION_DENIED,
     DetectorResult,
     EvidenceDetector,
 )
@@ -787,6 +789,17 @@ class Orchestrator:
             # other outcomes (success, retryable failure, timeout, crash,
             # reconcile-cancel) just release the claim and let the
             # retry-state machine drive what comes next.
+            #
+            # SPEC §17.2 / #62 (M5.3) extension: clean provider runs whose
+            # task_outcome is `incomplete_no_evidence` or
+            # `incomplete_permission_denied` are also blocked. The provider
+            # said "done" but Symphony observed no PR / no declaration / no
+            # successful tool calls — auto-retrying would just spin, so the
+            # operator must intervene (change permission_mode, fix the
+            # workflow, or close the issue). The detector's `unknown`
+            # outcome (no GitHubClient wired, can't verify) is intentionally
+            # NOT in the block-set — we don't escalate runs we couldn't
+            # verify.
             outcome_reason = worker.terminal_state.value if worker.terminal_state else "ended"
             retry = self.retry_states.get(worker.issue.identifier)
             non_retryable_failure = (
@@ -795,11 +808,36 @@ class Orchestrator:
                 and retry.attempts > 0
                 and retry.next_attempt_at is None
             )
-            if non_retryable_failure:
+
+            # Run the evidence detector BEFORE the routing decision so its
+            # task_outcome can drive blocking for misleading-success runs.
+            permission_denials_count = _extract_permission_denials_count(worker)
+            detector_result = self._evidence.detect(
+                issue=worker.issue,
+                terminal_state=worker.terminal_state,
+                retryable=_is_retryable(worker, retry),
+                blocked=non_retryable_failure,
+                permission_denials_count=permission_denials_count,
+                last_event=worker.last_event,
+                # M5.2 detector reads last_event payload directly;
+                # M5.4 may pass a longer assistant-text tail.
+                recent_assistant_text="",
+                workspace_path=worker.workspace.path,
+            )
+            completion_blocked = detector_result.task_outcome in {
+                OUTCOME_INCOMPLETE_NO_EVIDENCE,
+                OUTCOME_INCOMPLETE_PERMISSION_DENIED,
+            }
+            should_block = non_retryable_failure or completion_blocked
+            _maybe_log_task_outcome(worker, detector_result)
+
+            if should_block:
+                block_reason = (
+                    worker.error
+                    or f"task_outcome={detector_result.task_outcome}"
+                )
                 try:
-                    self.tracker.mark_issue_blocked(
-                        worker.issue, worker.error or "non-retryable failure"
-                    )
+                    self.tracker.mark_issue_blocked(worker.issue, block_reason)
                 except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
                     _LOG.warning(
                         "mark_issue_blocked failed for %s: %s",
@@ -816,20 +854,6 @@ class Orchestrator:
                         exc,
                     )
 
-            permission_denials_count = _extract_permission_denials_count(worker)
-            detector_result = self._evidence.detect(
-                issue=worker.issue,
-                terminal_state=worker.terminal_state,
-                retryable=_is_retryable(worker, retry),
-                blocked=non_retryable_failure,
-                permission_denials_count=permission_denials_count,
-                last_event=worker.last_event,
-                # M5.2 detector reads last_event payload directly;
-                # M5.4 may pass a longer assistant-text tail.
-                recent_assistant_text="",
-                workspace_path=worker.workspace.path,
-            )
-            _maybe_log_task_outcome(worker, detector_result)
             worker.artifacts.write_json(
                 "terminal.json",
                 {
@@ -839,7 +863,12 @@ class Orchestrator:
                     "reason": _terminal_reason(worker),
                     "retryable": _is_retryable(worker, retry),
                     "subtype": worker.timeout_subtype,
-                    "blocked": non_retryable_failure,
+                    # `blocked` reflects the unified decision: either a
+                    # non-retryable provider failure (existing semantics)
+                    # OR a misleading-success run that #62 escalated. The
+                    # `task_outcome` field below tells the operator which
+                    # path triggered it.
+                    "blocked": should_block,
                     "last_event_at": (worker.last_event.timestamp if worker.last_event else None),
                     "provider_session_id": worker.session.provider_session_id,
                     "error": worker.error,

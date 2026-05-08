@@ -199,7 +199,14 @@ class EvidenceDetector:
         evidence: list[dict[str, Any]] = []
         # 1. Linked PR — strongest signal.
         prs = self._detect_pull_requests(issue)
-        for pr in prs:
+        # ``prs is None`` means we could not query GitHub at all (no client
+        # wired). That is distinct from "queried, found nothing" (empty
+        # list) — we MUST NOT downgrade an unverifiable run to
+        # ``incomplete_no_evidence`` because routing in #62 treats that
+        # value as operator-must-intervene. Tracked separately so the
+        # final decision below can return ``unknown`` rather than block.
+        pr_query_ran = prs is not None
+        for pr in prs or []:
             evidence.append(
                 {
                     "type": "pr_linked",
@@ -281,11 +288,22 @@ class EvidenceDetector:
                 task_evidence=evidence,
                 outcome_decided_by=DECIDED_BY_DETECTOR,
             )
-        # No PR, no declaration, no denials — misleading-success.
+        # No PR (queried), no declaration, no denials → real
+        # misleading-success. #62 routes this to mark_issue_blocked.
+        if pr_query_ran:
+            return DetectorResult(
+                task_outcome=OUTCOME_INCOMPLETE_NO_EVIDENCE,
+                task_evidence=evidence,
+                outcome_decided_by=DECIDED_BY_DETECTOR,
+            )
+        # No PR query happened (no GitHubClient wired). We cannot
+        # confidently call this misleading-success — return ``unknown``
+        # so #62 routing does NOT mark the issue blocked. Tests using
+        # FakeGitHubTracker (which has no `.client`) take this path.
         return DetectorResult(
-            task_outcome=OUTCOME_INCOMPLETE_NO_EVIDENCE,
+            task_outcome=OUTCOME_UNKNOWN,
             task_evidence=evidence,
-            outcome_decided_by=DECIDED_BY_DETECTOR,
+            outcome_decided_by=DECIDED_BY_DERIVATION,
         )
 
     # -- Internals -----------------------------------------------------------
@@ -323,10 +341,21 @@ class EvidenceDetector:
             outcome_decided_by=DECIDED_BY_DERIVATION,
         )
 
-    def _detect_pull_requests(self, issue: Issue) -> list[PullRequest]:
-        """Read-side PR lookup. Tolerates a missing client (returns [])."""
+    def _detect_pull_requests(self, issue: Issue) -> list[PullRequest] | None:
+        """Read-side PR lookup.
+
+        Returns:
+        - A list of PRs (possibly empty) when the lookup ran.
+        - ``None`` when no GitHubClient is wired — distinguishes
+          "queried, found nothing" from "couldn't query at all".
+          The caller treats the None case as `unknown` to avoid
+          escalating an unverifiable run to operator-blocked (#62).
+
+        Tolerates GitHubError (logs + returns empty list, since we DID
+        try to query).
+        """
         if self._client is None:
-            return []
+            return None
         try:
             return find_linked_pull_requests(self._client, issue, self._github)
         except GitHubError as exc:
