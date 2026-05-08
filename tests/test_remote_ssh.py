@@ -100,6 +100,48 @@ def test_ssh_transport_builds_correct_command(tmp_path: Path):
     assert "symphony-worker" in runner.last_args
     assert "--snapshot-path" in runner.last_args
     assert "--fake" not in runner.last_args
+    assert "--dispatch-path" not in runner.last_args  # Not provided
+
+
+def test_ssh_transport_includes_dispatch_path_when_provided(tmp_path: Path):
+    """Test SSH transport includes --dispatch-path when provided."""
+    raw = _minimal_config(tmp_path)
+    config = build_config(raw, workflow_path=tmp_path / "WORKFLOW.md")
+
+    runner = FakeSubprocessRunner(stdout="", returncode=0)
+    snapshot_path = tmp_path / "snapshot.json"
+    dispatch_path = tmp_path / "dispatch.json"
+    transport = SSHRemoteTransport(
+        runner=runner, snapshot_path=snapshot_path, dispatch_path=dispatch_path
+    )
+
+    transport.run(config)
+
+    assert runner.last_args is not None
+    assert "--dispatch-path" in runner.last_args
+    dispatch_idx = runner.last_args.index("--dispatch-path")
+    assert runner.last_args[dispatch_idx + 1] == str(dispatch_path)
+    assert "--fake" not in runner.last_args  # Still no --fake in production command
+
+
+def test_ssh_transport_no_tracker_token_in_command_with_dispatch(tmp_path: Path):
+    """Test SSH transport doesn't include tracker token in command with dispatch path."""
+    raw = _minimal_config(tmp_path)
+    config = build_config(raw, workflow_path=tmp_path / "WORKFLOW.md")
+
+    runner = FakeSubprocessRunner(stdout="", returncode=0)
+    snapshot_path = tmp_path / "snapshot.json"
+    dispatch_path = tmp_path / "dispatch.json"
+    transport = SSHRemoteTransport(
+        runner=runner, snapshot_path=snapshot_path, dispatch_path=dispatch_path
+    )
+
+    transport.run(config)
+
+    # Check that no token-like values appear in command
+    command_str = " ".join(runner.last_args or [])
+    assert "ghp_" not in command_str
+    assert config.tracker.token not in command_str
 
 
 def test_ssh_transport_snapshot_omits_coordinator_tracker_token(tmp_path: Path):

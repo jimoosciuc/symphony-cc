@@ -69,6 +69,7 @@ class SSHRemoteTransport:
 
     runner: SubprocessRunner
     snapshot_path: Path | None = None
+    dispatch_path: Path | None = None
 
     def run(self, config: WorkflowConfig) -> RemoteRunResult:
         """Execute remote worker via SSH and parse protocol events.
@@ -164,6 +165,10 @@ class SSHRemoteTransport:
             "--snapshot-path",
             remote_snapshot_path,
         ]
+
+        # Add dispatch path if provided
+        if self.dispatch_path:
+            ssh_args.extend(["--dispatch-path", str(self.dispatch_path)])
 
         return ssh_args
 
