@@ -49,7 +49,15 @@ def build_config_snapshot(
             "token": REMOTE_TRACKER_TOKEN_PLACEHOLDER,
         },
         "agent": {"provider": config.agent.provider},
-        "workspace": {"root": snapshot_workspace_root},
+        "workspace": {
+            "root": snapshot_workspace_root,
+            "populate": config.workspace.populate,
+            "remote": config.workspace.remote,
+            "after_create": config.workspace.after_create,
+            "before_run": config.workspace.before_run,
+            "after_run": config.workspace.after_run,
+            "hook_timeout_ms": config.workspace.hook_timeout_ms,
+        },
         "claude": {
             "model": config.claude.model,
             "permission_mode": config.claude.permission_mode,
@@ -57,7 +65,10 @@ def build_config_snapshot(
             "transcript_store": str(config.claude.transcript_store),
             "artifact_store": str(config.claude.artifact_store),
         },
-        "github": {},
+        "github": {
+            "branch_prefix": config.github.branch_prefix,
+            "base_branch": config.github.base_branch,
+        },
         "logging": {
             "redact_keys": tuple(
                 dict.fromkeys((*config.logging.redact_keys, "git_token"))
