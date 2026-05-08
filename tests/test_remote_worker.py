@@ -5,7 +5,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from symphony.artifacts import REDACTED
 from symphony.remote.protocol import parse_worker_event
+from symphony.remote.worker import _redact_error_message
 
 
 def _minimal_snapshot() -> dict:
@@ -200,6 +202,51 @@ def test_worker_error_output_redacts_tokens(tmp_path: Path):
     # Token should not appear in stderr
     assert "ghp_secret123456789" not in result.stderr
     assert "secret" not in result.stderr.lower()
+
+
+def test_worker_error_output_redacts_token_shaped_non_tracker_value(tmp_path: Path):
+    """Worker stderr redacts token-shaped values even outside tracker.token."""
+    snapshot_path = tmp_path / "token-shaped-permission.json"
+    token_shaped_value = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    snapshot = _minimal_snapshot()
+    snapshot["claude"]["permission_mode"] = token_shaped_value
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "symphony.remote.worker",
+            "--snapshot-path",
+            str(snapshot_path),
+            "--fake",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert token_shaped_value not in result.stderr
+    assert REDACTED in result.stderr
+
+
+def test_worker_error_redaction_uses_snapshot_secrets_before_config_exists():
+    """Failure-path redaction works before WorkflowConfig is available."""
+    raw_snapshot = {"tracker": {"token": "plain-secret-token"}}
+    message = "snapshot validation failed for plain-secret-token"
+    redacted = _redact_error_message(message, raw_snapshot)
+    assert "plain-secret-token" not in redacted
+    assert REDACTED in redacted
+
+
+def test_worker_error_redaction_respects_snapshot_redact_keys():
+    """Custom redact keys are honored for free-form worker errors."""
+    raw_snapshot = {
+        "logging": {"redact_keys": ["private_value"]},
+        "remote": {"private_value": "custom-secret-value"},
+    }
+    message = "remote setup failed with custom-secret-value"
+    redacted = _redact_error_message(message, raw_snapshot)
+    assert "custom-secret-value" not in redacted
+    assert REDACTED in redacted
 
 
 def test_worker_has_no_tracker_api_dependency():

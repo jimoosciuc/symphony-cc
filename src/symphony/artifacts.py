@@ -49,6 +49,26 @@ def redact(value: Any, *, redact_keys: tuple[str, ...]) -> Any:
     return _redact_inner(value, deny=deny)
 
 
+def redact_text(
+    value: str,
+    *,
+    redact_keys: tuple[str, ...],
+    extra_secrets: tuple[str, ...] = (),
+) -> str:
+    """Redact secrets from free-form operator text.
+
+    ``redact_keys`` is accepted for API symmetry with :func:`redact`; key-based
+    redaction requires structured data, so text redaction applies token-shape
+    masking and any explicit secret values supplied by the caller.
+    """
+    _ = redact_keys
+    redacted = _redact_string(value)
+    for secret in extra_secrets:
+        if secret:
+            redacted = redacted.replace(secret, REDACTED)
+    return redacted
+
+
 def _redact_inner(value: Any, *, deny: frozenset[str]) -> Any:
     if isinstance(value, dict):
         out: dict[str, Any] = {}
