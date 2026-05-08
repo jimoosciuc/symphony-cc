@@ -140,6 +140,23 @@ def test_worker_fake_mode_emits_valid_protocol_events(tmp_path: Path):
     snapshot_path = tmp_path / "valid.json"
     snapshot = _minimal_snapshot()
     snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    # Create dispatch request
+    dispatch_path = tmp_path / "dispatch.json"
+    dispatch_path.write_text(
+        json.dumps(
+            {
+                "owner": "test-owner",
+                "repo": "test-repo",
+                "issue_number": 42,
+                "attempt": 2,
+                "workspace_path": "/remote/workspaces/test-owner_test-repo_42",
+                "artifact_path": "/remote/artifacts/test-owner_test-repo_42/2",
+            }
+        ),
+        encoding="utf-8",
+    )
+
     result = subprocess.run(
         [
             sys.executable,
@@ -147,6 +164,8 @@ def test_worker_fake_mode_emits_valid_protocol_events(tmp_path: Path):
             "symphony.remote.worker",
             "--snapshot-path",
             str(snapshot_path),
+            "--dispatch-path",
+            str(dispatch_path),
             "--fake",
         ],
         capture_output=True,
@@ -170,12 +189,70 @@ def test_worker_fake_mode_emits_valid_protocol_events(tmp_path: Path):
     assert events[3].event == "heartbeat"
     assert events[4].event == "worker_completed"
 
-    # Check common fields
+    # Check that events use dispatch request fields
     for event in events:
         assert event.timestamp
-        assert event.issue_identifier
-        assert event.attempt >= 1
+        assert event.issue_identifier == "test-owner/test-repo#42"
+        assert event.attempt == 2
         assert event.host
+
+    # Check workspace_ready uses dispatch workspace_path
+    assert events[1].fields["workspace_path"] == "/remote/workspaces/test-owner_test-repo_42"
+
+    # Check worker_completed uses dispatch artifact_path
+    assert events[4].fields["artifact_path"] == "/remote/artifacts/test-owner_test-repo_42/2"
+
+
+def test_worker_fake_mode_requires_dispatch_path(tmp_path: Path):
+    """Test worker --fake requires --dispatch-path."""
+    snapshot_path = tmp_path / "valid.json"
+    snapshot = _minimal_snapshot()
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "symphony.remote.worker",
+            "--snapshot-path",
+            str(snapshot_path),
+            "--fake",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "dispatch-path required" in result.stderr.lower()
+
+
+def test_worker_dispatch_request_error_redaction(tmp_path: Path):
+    """Test worker redacts secrets from dispatch request errors."""
+    snapshot_path = tmp_path / "valid.json"
+    snapshot = _minimal_snapshot()
+    snapshot["tracker"]["token"] = "ghp_secret_token_12345"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    # Create malformed dispatch request
+    dispatch_path = tmp_path / "malformed.json"
+    dispatch_path.write_text("{invalid json", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "symphony.remote.worker",
+            "--snapshot-path",
+            str(snapshot_path),
+            "--dispatch-path",
+            str(dispatch_path),
+            "--fake",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    # Token should not appear in stderr
+    assert "ghp_secret_token_12345" not in result.stderr
 
 
 def test_worker_error_output_redacts_tokens(tmp_path: Path):
