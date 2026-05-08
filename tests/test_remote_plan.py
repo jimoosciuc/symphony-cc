@@ -74,6 +74,12 @@ def test_build_remote_dispatch_plan_basic(tmp_path: Path):
     assert plan.dispatch_request.artifact_path == (
         "/remote/artifacts/test-owner/test-repo/42/attempt-1"
     )
+    assert plan.remote_snapshot_path == (
+        "/remote/workspaces/test-owner/test-repo/42/.symphony/attempt-1/snapshot.json"
+    )
+    assert plan.remote_dispatch_path == (
+        "/remote/workspaces/test-owner/test-repo/42/.symphony/attempt-1/dispatch.json"
+    )
     assert plan.dispatch_request.branch == "symphony/test-owner-test-repo-42"
     assert plan.dispatch_request.base_branch == "main"
 
@@ -90,6 +96,8 @@ def test_build_remote_dispatch_plan_paths_deterministic(tmp_path: Path):
     assert plan1.remote_artifact_path == plan2.remote_artifact_path
     assert plan1.local_snapshot_path == plan2.local_snapshot_path
     assert plan1.local_dispatch_path == plan2.local_dispatch_path
+    assert plan1.remote_snapshot_path == plan2.remote_snapshot_path
+    assert plan1.remote_dispatch_path == plan2.remote_dispatch_path
 
 
 def test_build_remote_dispatch_plan_different_attempts(tmp_path: Path):
@@ -106,6 +114,10 @@ def test_build_remote_dispatch_plan_different_attempts(tmp_path: Path):
     assert plan2.remote_artifact_path.endswith("/attempt-2")
     assert plan1.local_snapshot_path != plan2.local_snapshot_path
     assert plan1.local_dispatch_path != plan2.local_dispatch_path
+    assert plan1.remote_snapshot_path.endswith("/attempt-1/snapshot.json")
+    assert plan2.remote_snapshot_path.endswith("/attempt-2/snapshot.json")
+    assert plan1.remote_dispatch_path.endswith("/attempt-1/dispatch.json")
+    assert plan2.remote_dispatch_path.endswith("/attempt-2/dispatch.json")
 
 
 def test_build_remote_dispatch_plan_local_paths_under_workspace_root(tmp_path: Path):
@@ -132,6 +144,8 @@ def test_build_remote_dispatch_plan_remote_paths_under_remote_roots(tmp_path: Pa
 
     assert plan.remote_workspace_path.startswith(config.remote.workspace_root)
     assert plan.remote_artifact_path.startswith(config.remote.artifact_root)
+    assert plan.remote_snapshot_path.startswith(plan.remote_workspace_path)
+    assert plan.remote_dispatch_path.startswith(plan.remote_workspace_path)
 
 
 def test_build_remote_dispatch_plan_no_tracker_token_in_dispatch_request(tmp_path: Path):

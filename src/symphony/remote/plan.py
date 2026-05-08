@@ -26,6 +26,8 @@ class RemoteDispatchPlan:
     local_dispatch_path: Path
     remote_workspace_path: str
     remote_artifact_path: str
+    remote_snapshot_path: str
+    remote_dispatch_path: str
 
     def serialize_dispatch_request(self) -> str:
         """Serialize the remote-bound dispatch request."""
@@ -82,6 +84,18 @@ def build_remote_dispatch_plan(
         issue,
         attempt_segment,
     )
+    remote_snapshot_path = _join_remote_path(
+        remote_workspace_path,
+        ".symphony",
+        attempt_segment,
+        "snapshot.json",
+    )
+    remote_dispatch_path = _join_remote_path(
+        remote_workspace_path,
+        ".symphony",
+        attempt_segment,
+        "dispatch.json",
+    )
     local_snapshot_path = local_issue_path(
         config.workspace.root,
         issue,
@@ -112,6 +126,8 @@ def build_remote_dispatch_plan(
         local_dispatch_path=local_dispatch_path,
         remote_workspace_path=remote_workspace_path,
         remote_artifact_path=remote_artifact_path,
+        remote_snapshot_path=remote_snapshot_path,
+        remote_dispatch_path=remote_dispatch_path,
     )
 
 
