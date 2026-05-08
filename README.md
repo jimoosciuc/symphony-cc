@@ -71,19 +71,27 @@ The `run` subcommand parses arguments today and exits with a clear
 ### Tests
 
 ```bash
-pytest
+make ci
 ```
 
-Tests live under `tests/` and are pure-unit until later issues add fakes for
-GitHub and Claude Code. Live integration tests (when added) will be skipped
-unless their opt-in environment variables are set:
+`make ci` is the same validation entry point used by required PR CI. It runs
+`ruff check src/ tests/` and the default pytest suite, including fake
+provider/tracker integration tests. Live integration tests are skipped unless
+their opt-in environment variables are set:
 
 - `SYMPHONY_RUN_GITHUB_INTEGRATION=1`
+- `SYMPHONY_RUN_GRAPHQL_TOOL_INTEGRATION=1`
 - `SYMPHONY_RUN_CLAUDE_INTEGRATION=1`
+
+Live tests can be run locally through `make live-integration` or individually
+with `make live-github`, `make live-graphql`, and `make live-claude`. They are
+also available in GitHub Actions through the manual `live-integration` workflow;
+they are not required for default PR CI because they need credentials and real
+external services.
 
 ### Lint and format
 
 ```bash
-ruff check .
+make lint
 ruff format .
 ```

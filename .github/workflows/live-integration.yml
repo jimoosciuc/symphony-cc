@@ -1,0 +1,54 @@
+name: live-integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Live integration target to run"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - github
+          - graphql
+          - claude
+
+jobs:
+  live-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: make setup
+
+      - name: Run live GitHub tracker tests
+        if: ${{ inputs.target == 'all' || inputs.target == 'github' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.SYMPHONY_GITHUB_TOKEN || github.token }}
+          SYMPHONY_GITHUB_TEST_OWNER: ${{ vars.SYMPHONY_GITHUB_TEST_OWNER }}
+          SYMPHONY_GITHUB_TEST_REPO: ${{ vars.SYMPHONY_GITHUB_TEST_REPO }}
+        run: make live-github
+
+      - name: Run live GitHub GraphQL tool tests
+        if: ${{ inputs.target == 'all' || inputs.target == 'graphql' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.SYMPHONY_GITHUB_TOKEN || github.token }}
+        run: make live-graphql
+
+      - name: Run live Claude provider tests
+        if: ${{ inputs.target == 'all' || inputs.target == 'claude' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+        run: make live-claude
