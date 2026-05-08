@@ -162,6 +162,40 @@ Design rules for implementation issues:
 - Surface reload success/failure through structured logs and artifacts.
 - Keep the status API optional; reload must not depend on dashboard work.
 
+## Security Profiles (M7.1)
+
+Security profiles validate `claude.permission_mode` against operator intent at
+config load time. Profiles are NOT host-level sandbox guarantees; they describe
+intended trust boundaries and reject obviously unsafe configurations.
+
+Config field: `security.profile` (optional, defaults to `conservative`)
+
+Supported profiles:
+
+- **conservative** (default): Human-safer profile compatible with `acceptEdits`.
+  Permission denials remain operator-visible through terminal outcome gates.
+  Recommended for most workflows.
+- **trusted_unattended**: Intended for trusted repos/issues on trusted hosts.
+  Allows unattended work and may use `bypassPermissions` when explicitly
+  configured. Emits high-risk warning when combined with `bypassPermissions`.
+- **restricted**: Read-only / no privileged tool posture. Rejects
+  `bypassPermissions`. Task completion may require handoff or blocked outcomes.
+  Use when Claude should not execute privileged operations.
+
+Validation rules:
+
+- `restricted` + `claude.permission_mode: bypassPermissions` is a config error.
+- `trusted_unattended` + `bypassPermissions` is allowed but emits a high-risk warning.
+- `conservative` + `bypassPermissions` keeps the existing `bypassPermissions` warning.
+- Unknown profile names are config errors.
+
+Implementation notes:
+
+- Validation happens in `build_config()` via `_validate_security_profile()`.
+- Cross-field validation runs after all section builders complete.
+- Profiles do not affect runtime behavior; validation is config-time only.
+- The provider does not enforce profiles; it passes `permission_mode` unchanged.
+
 ## Event Contract
 
 Every provider event should include:

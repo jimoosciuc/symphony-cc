@@ -358,12 +358,12 @@ Possible values and what to do:
 - **`incomplete_permission_denied`** — Provider completed but tool
   calls (typically Bash/git/gh/AskUserQuestion) were denied under
   `claude.permission_mode`. The issue is `symphony-blocked`.
-  
+
   **M7.1 security profiles**: If using `security.profile: restricted`,
   this is expected behavior — the profile intentionally rejects
   `bypassPermissions`. Consider switching to `conservative` or
   `trusted_unattended` profile if unattended execution is needed.
-  
+
   For `conservative` or `trusted_unattended` profiles: switch the
   workflow to `permission_mode: bypassPermissions` (only on trusted
   hosts with trusted repos/issues), remove `symphony-blocked`,
