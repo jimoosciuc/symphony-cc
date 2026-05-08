@@ -812,9 +812,9 @@ def _validate_security_profile(config: WorkflowConfig, warnings: list[ConfigWarn
         raise ConfigError(
             "security.profile",
             (
-                f"profile 'restricted' is incompatible with "
-                f"claude.permission_mode='bypassPermissions' — restricted profile "
-                f"requires permission prompts to remain active"
+                "profile 'restricted' is incompatible with "
+                "claude.permission_mode='bypassPermissions' — restricted profile "
+                "requires permission prompts to remain active"
             ),
         )
 
