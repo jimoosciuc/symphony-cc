@@ -13,6 +13,7 @@ on:
           - github
           - graphql
           - claude
+          - remote
 
 jobs:
   live-integration:
@@ -52,3 +53,13 @@ jobs:
           ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
         run: make live-claude
+
+      - name: Run live remote execution tests
+        if: ${{ inputs.target == 'all' || inputs.target == 'remote' }}
+        env:
+          SYMPHONY_REMOTE_TEST_HOST: ${{ vars.SYMPHONY_REMOTE_TEST_HOST }}
+          SYMPHONY_REMOTE_WORKSPACE_ROOT: ${{ vars.SYMPHONY_REMOTE_WORKSPACE_ROOT }}
+          SYMPHONY_REMOTE_ARTIFACT_ROOT: ${{ vars.SYMPHONY_REMOTE_ARTIFACT_ROOT }}
+          SYMPHONY_REMOTE_SESSION_STORE: ${{ vars.SYMPHONY_REMOTE_SESSION_STORE }}
+          SYMPHONY_REMOTE_GIT_TOKEN: ${{ secrets.SYMPHONY_REMOTE_GIT_TOKEN }}
+        run: make live-remote
