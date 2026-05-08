@@ -153,6 +153,53 @@ resolution through the normal workflow loader, restart-required rejection,
 and active-worker isolation. The default `make ci` target runs the same
 tests with the rest of the fake provider/tracker suite.
 
+## Runtime status snapshot
+
+The runtime status snapshot is a read-only in-memory API for operators
+and future dashboard code. It does not start an HTTP server, does not
+write controls back into the daemon, and does not require a database.
+
+Programmatic access:
+
+```python
+snapshot = orchestrator.status_snapshot()
+```
+
+or:
+
+```python
+from symphony.status import build_status_snapshot
+
+snapshot = build_status_snapshot(orchestrator)
+```
+
+The snapshot includes:
+
+- daemon `run_id`, state, workflow revision/path, and concurrency;
+- active workers with issue links, workspace paths, artifact paths,
+  session ids, provider session ids, attempts, terminal state, and last
+  event summary;
+- retry queue/backoff state;
+- recent finished workers retained in memory;
+- restart recovery decisions from startup.
+
+Security assumptions:
+
+- The snapshot is observational only. Do not add write actions to this
+  API without a separate design.
+- Values pass through Symphony's configured redaction keys before being
+  returned.
+- The snapshot intentionally omits raw tracker tokens and other config
+  secrets.
+- If exposed over HTTP by a future dashboard, bind it to localhost or
+  protect it with operator-controlled auth.
+
+Focused validation:
+
+```bash
+PYTHONPATH=src pytest tests/test_status.py -q
+```
+
 ## Stopping the daemon
 
 `Ctrl-C` (SIGINT). The CLI catches it, releases trackers, and exits
