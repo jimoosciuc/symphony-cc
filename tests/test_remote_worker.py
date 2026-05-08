@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from symphony.artifacts import REDACTED
@@ -69,6 +70,17 @@ def _dispatch(tmp_path: Path, *, workspace_path: Path | None = None) -> Dispatch
         branch="symphony/42-test-issue",
         base_branch="main",
     )
+
+
+class FakePopulator:
+    def __init__(self, *, fail_with: str | None = None) -> None:
+        self.fail_with = fail_with
+        self.calls: list[tuple[Path, str, bool]] = []
+
+    def populate(self, workspace_path: Path, issue, *, reused: bool) -> None:
+        self.calls.append((workspace_path, issue.identifier, reused))
+        if self.fail_with:
+            raise RuntimeError(self.fail_with)
 
 
 def test_worker_cli_help():
@@ -313,6 +325,126 @@ async def test_real_worker_prepares_dispatch_workspace_and_artifacts(tmp_path: P
     ]
     assert events[1].fields["workspace_path"] == dispatch.workspace_path
     assert events[-1].fields["artifact_path"] == dispatch.artifact_path
+
+
+async def test_real_worker_runs_workspace_hooks_with_workspace_cwd(tmp_path: Path):
+    """Real worker runs workspace lifecycle hooks in the dispatch workspace."""
+    config = _real_worker_config(tmp_path)
+    after_create = tmp_path / "after_create.txt"
+    before_run = tmp_path / "before_run.txt"
+    after_run = tmp_path / "after_run.txt"
+    config = replace(
+        config,
+        workspace=replace(
+            config.workspace,
+            after_create=f"pwd >> {after_create}",
+            before_run=f"pwd >> {before_run}",
+            after_run=f"pwd >> {after_run}",
+        ),
+    )
+    dispatch = _dispatch(tmp_path)
+
+    code = await run_real_worker(
+        config,
+        dispatch,
+        provider_factory=lambda config: FakeProvider(),
+        emit=lambda line: None,
+    )
+
+    assert code == 0
+    assert after_create.read_text().strip() == dispatch.workspace_path
+    assert before_run.read_text().strip() == dispatch.workspace_path
+    assert after_run.read_text().strip() == dispatch.workspace_path
+
+
+async def test_real_worker_after_create_only_runs_for_fresh_workspace(tmp_path: Path):
+    """after_create runs only for a fresh remote workspace."""
+    config = _real_worker_config(tmp_path)
+    after_create = tmp_path / "after_create.txt"
+    config = replace(
+        config,
+        workspace=replace(config.workspace, after_create=f"echo created >> {after_create}"),
+    )
+    dispatch = _dispatch(tmp_path)
+
+    for _ in range(2):
+        code = await run_real_worker(
+            config,
+            dispatch,
+            provider_factory=lambda config: FakeProvider(),
+            emit=lambda line: None,
+        )
+        assert code == 0
+
+    assert after_create.read_text().splitlines() == ["created"]
+
+
+async def test_real_worker_calls_fake_populator_for_git_population(tmp_path: Path):
+    """Injected populator runs for workspace.populate=git without network access."""
+    config = _real_worker_config(tmp_path)
+    config = replace(config, workspace=replace(config.workspace, populate="git"))
+    dispatch = _dispatch(tmp_path)
+    populator = FakePopulator()
+
+    code = await run_real_worker(
+        config,
+        dispatch,
+        provider_factory=lambda config: FakeProvider(),
+        workspace_populator=populator,
+        emit=lambda line: None,
+    )
+
+    assert code == 0
+    assert populator.calls == [
+        (Path(dispatch.workspace_path), dispatch.issue_identifier, False)
+    ]
+
+
+async def test_real_worker_populator_failure_is_failed_terminal(tmp_path: Path):
+    """Populator failure emits worker_failed and writes failed terminal."""
+    config = _real_worker_config(tmp_path)
+    config = replace(config, workspace=replace(config.workspace, populate="git"))
+    dispatch = _dispatch(tmp_path)
+    populator = FakePopulator(fail_with=f"clone failed {config.tracker.token}")
+    lines: list[str] = []
+
+    code = await run_real_worker(
+        config,
+        dispatch,
+        provider_factory=lambda config: FakeProvider(),
+        workspace_populator=populator,
+        emit=lines.append,
+    )
+
+    assert code == 1
+    events = [parse_worker_event(line) for line in lines]
+    assert events[-1].event == "worker_failed"
+    assert config.tracker.token not in events[-1].fields["message"]
+    terminal = json.loads((Path(dispatch.artifact_path) / "terminal.json").read_text())
+    assert terminal["terminal_state"] == "failed"
+    assert config.tracker.token not in terminal["error"]
+
+
+async def test_real_worker_hook_failure_is_failed_terminal(tmp_path: Path):
+    """Hook failure is explicit and does not count as worker success."""
+    config = _real_worker_config(tmp_path)
+    config = replace(config, workspace=replace(config.workspace, before_run="exit 7"))
+    dispatch = _dispatch(tmp_path)
+    lines: list[str] = []
+
+    code = await run_real_worker(
+        config,
+        dispatch,
+        provider_factory=lambda config: FakeProvider(),
+        emit=lines.append,
+    )
+
+    assert code == 1
+    events = [parse_worker_event(line) for line in lines]
+    assert events[-1].event == "worker_failed"
+    assert "before_run hook failed" in events[-1].fields["message"]
+    terminal = json.loads((Path(dispatch.artifact_path) / "terminal.json").read_text())
+    assert terminal["terminal_state"] == "failed"
 
 
 async def test_real_worker_rejects_workspace_outside_remote_root(tmp_path: Path):

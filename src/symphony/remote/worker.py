@@ -18,10 +18,11 @@ from typing import Any
 from symphony.artifacts import ArtifactWriter, redact_text
 from symphony.config import WorkflowConfig, build_config
 from symphony.events import TERMINAL_TURN_EVENTS, AgentEvent
-from symphony.models import Issue
+from symphony.models import Issue, Workspace
 from symphony.provider.base import AgentProviderProtocol, SessionRecord, Terminal
 from symphony.remote.dispatch import DispatchRequest, load_dispatch_request
 from symphony.remote.protocol import WorkerEvent, serialize_worker_event
+from symphony.workspace import WorkspaceManager, WorkspacePopulator
 
 DEFAULT_REDACT_KEYS = ("token", "authorization", "api_key", "password", "secret")
 
@@ -270,6 +271,7 @@ async def run_real_worker(
     dispatch: DispatchRequest,
     *,
     provider_factory: ProviderFactory | None = None,
+    workspace_populator: WorkspacePopulator | None = None,
     emit: EmitLine | None = None,
 ) -> int:
     """Run a real worker attempt with injectable provider I/O for tests."""
@@ -284,9 +286,9 @@ async def run_real_worker(
     terminal_state = Terminal.FAILED
     terminal_reason = "worker_failed"
     error: str | None = None
+    workspace: Workspace | None = None
 
     try:
-        workspace_path = _validated_workspace_path(dispatch, config)
         _emit_worker_event(
             "worker_started",
             config=config,
@@ -295,7 +297,17 @@ async def run_real_worker(
             emit=emit,
             fields={"worker_id": f"{dispatch.issue_identifier}:{dispatch.attempt}"},
         )
-        workspace_path.mkdir(parents=True, exist_ok=True)
+        workspace = prepare_worker_workspace(
+            config,
+            dispatch,
+            issue,
+            populator=workspace_populator,
+        )
+        workspace_path = workspace.path
+        manager = WorkspaceManager(config.workspace)
+        if not workspace.reused:
+            _ensure_hook_ok(manager.run_hook("after_create", workspace))
+        _ensure_hook_ok(manager.run_hook("before_run", workspace))
         _emit_worker_event(
             "workspace_ready",
             config=config,
@@ -385,10 +397,14 @@ async def run_real_worker(
                     "artifacts_ready": True,
                 },
             )
+            if workspace is not None:
+                _ensure_hook_ok(manager.run_hook("after_run", workspace))
             return 0
 
         terminal_reason = terminal_event.event
         error = terminal_event.payload.get("reason") or terminal_event.event
+        if workspace is not None:
+            _ensure_hook_ok(manager.run_hook("after_run", workspace))
         _emit_worker_failed(
             config=config,
             dispatch=dispatch,
@@ -428,6 +444,41 @@ async def run_real_worker(
                 "execution": "remote",
             },
         )
+
+
+def prepare_worker_workspace(
+    config: WorkflowConfig,
+    dispatch: DispatchRequest,
+    issue: Issue,
+    *,
+    populator: WorkspacePopulator | None = None,
+) -> Workspace:
+    """Prepare the exact dispatch workspace path with workspace boundary semantics."""
+    workspace_path = _validated_workspace_path(dispatch, config)
+    workspace_path.parent.mkdir(parents=True, exist_ok=True)
+    reused = workspace_path.exists()
+    if not reused:
+        workspace_path.mkdir(parents=True, exist_ok=False)
+    elif not workspace_path.is_dir():
+        raise ValueError(f"workspace path exists but is not a directory: {workspace_path}")
+    if config.workspace.populate == "git" and populator is not None:
+        populator.populate(workspace_path, issue, reused=reused)
+    return Workspace(
+        issue_identifier=issue.identifier,
+        workspace_key=workspace_path.name,
+        path=workspace_path,
+        repo_path=workspace_path,
+        created_at=datetime.now(timezone.utc),
+        reused=reused,
+    )
+
+
+def _ensure_hook_ok(result) -> None:
+    if result is None or result.succeeded:
+        return
+    if result.timed_out:
+        raise RuntimeError(f"{result.name} hook timed out after {result.duration_ms}ms")
+    raise RuntimeError(f"{result.name} hook failed with exit code {result.returncode}")
 
 
 def _default_provider_factory(config: WorkflowConfig) -> AgentProviderProtocol:
