@@ -178,11 +178,17 @@ class Orchestrator:
     async def run_once(self) -> TickResult:
         result = TickResult()
 
-        # 0. M5.7 #66: age-based workspace sweep BEFORE reconcile so the
-        # active set reflects the current tick. No-op when
-        # workspace.cleanup.enabled is False or max_age_days is unset.
-        # Each decision is logged by the executor; we don't surface them
-        # in TickResult yet (#67 owns operator-facing reporting).
+        # 0. M5.7 #66: age-based workspace sweep BEFORE reconcile.
+        # ``self.active`` here reflects the *previous* tick's workers
+        # (reconcile hasn't run yet for this tick) — that's intentional:
+        # the workers carried over from last tick are exactly the ones
+        # currently holding workspaces on disk. Reconcile may extend
+        # ``self.active`` further down, but those new workers will create
+        # fresh workspaces (mtime=now) which can't be too-old anyway.
+        # No-op when workspace.cleanup.enabled is False or max_age_days
+        # is unset. Each decision is logged by the executor; we don't
+        # surface them in TickResult yet (#67 owns operator-facing
+        # reporting).
         self._cleanup.sweep_for_age(active_identifiers=set(self.active.keys()))
 
         # 1. Reconcile currently-active workers against fresh issue state.

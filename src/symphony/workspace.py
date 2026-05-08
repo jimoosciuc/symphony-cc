@@ -119,6 +119,27 @@ def _build_workspace_key(issue: Issue) -> str:
     return f"{owner}_{repo}_{issue.number}"
 
 
+def workspace_key_from_identifier(identifier: str) -> str:
+    """Translate ``owner/repo#N`` → ``owner_repo_N`` (the workspace key).
+
+    Public counterpart to :func:`_build_workspace_key` that operates on
+    the string identifier instead of a full :class:`Issue`. Symphony's
+    cleanup executor (#66) needs to derive the on-disk workspace key
+    from active workers' identifiers without rebuilding `Issue` objects;
+    sharing the format with this single helper keeps the two callers
+    in lockstep so a future workspace-naming change can't desync them.
+
+    Defensive on shape: a missing ``#N`` separator falls back to a
+    flat ``owner_repo`` mapping (no crash) — used by tests that
+    pass non-issue identifiers through the cleanup sweep filter.
+    """
+    if "#" not in identifier:
+        return identifier.replace("/", "_")
+    issue_part, number = identifier.split("#", 1)
+    owner, _, repo = issue_part.partition("/")
+    return f"{owner}_{repo}_{number}"
+
+
 # -- Manager -------------------------------------------------------------------
 
 
