@@ -6,8 +6,11 @@ import sys
 from pathlib import Path
 
 from symphony.artifacts import REDACTED
+from symphony.config import build_config
+from symphony.provider.fake import FakeProvider, FakeTurnScript
+from symphony.remote.dispatch import DispatchRequest
 from symphony.remote.protocol import parse_worker_event
-from symphony.remote.worker import _redact_error_message
+from symphony.remote.worker import _redact_error_message, run_real_worker
 
 
 def _minimal_snapshot() -> dict:
@@ -37,6 +40,35 @@ def _minimal_snapshot() -> dict:
             "session_store": "/remote/sessions",
         },
     }
+
+
+def _real_worker_config(tmp_path: Path):
+    snapshot = _minimal_snapshot()
+    snapshot["tracker"]["token"] = "remote-worker-no-tracker-token"
+    snapshot["workspace"]["root"] = str(tmp_path / "remote" / "workspaces")
+    snapshot["claude"]["session_store"] = str(tmp_path / "remote" / "sessions")
+    snapshot["claude"]["transcript_store"] = str(tmp_path / "remote" / "transcripts")
+    snapshot["claude"]["artifact_store"] = str(tmp_path / "remote" / "artifacts")
+    snapshot["remote"]["workspace_root"] = str(tmp_path / "remote" / "workspaces")
+    snapshot["remote"]["artifact_root"] = str(tmp_path / "remote" / "artifacts")
+    snapshot["remote"]["session_store"] = str(tmp_path / "remote" / "sessions")
+    return build_config(snapshot, workflow_path=tmp_path / "WORKFLOW.md")
+
+
+def _dispatch(tmp_path: Path, *, workspace_path: Path | None = None) -> DispatchRequest:
+    workspace = workspace_path or (
+        tmp_path / "remote" / "workspaces" / "test-owner" / "test-repo" / "42"
+    )
+    return DispatchRequest(
+        owner="test-owner",
+        repo="test-repo",
+        issue_number=42,
+        attempt=2,
+        workspace_path=str(workspace),
+        artifact_path=str(tmp_path / "remote" / "artifacts" / "test-owner_test-repo_42" / "2"),
+        branch="symphony/42-test-issue",
+        base_branch="main",
+    )
 
 
 def test_worker_cli_help():
@@ -223,6 +255,145 @@ def test_worker_fake_mode_requires_dispatch_path(tmp_path: Path):
     )
     assert result.returncode == 1
     assert "dispatch-path required" in result.stderr.lower()
+
+
+def test_worker_real_mode_requires_dispatch_path(tmp_path: Path):
+    """Test non-fake worker mode requires --dispatch-path."""
+    snapshot_path = tmp_path / "valid.json"
+    snapshot = _minimal_snapshot()
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "symphony.remote.worker",
+            "--snapshot-path",
+            str(snapshot_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "dispatch-path required" in result.stderr.lower()
+
+
+async def test_real_worker_prepares_dispatch_workspace_and_artifacts(tmp_path: Path):
+    """Real worker path prepares dispatch workspace and writes artifacts."""
+    config = _real_worker_config(tmp_path)
+    dispatch = _dispatch(tmp_path)
+    provider = FakeProvider()
+    lines: list[str] = []
+
+    code = await run_real_worker(
+        config,
+        dispatch,
+        provider_factory=lambda config: provider,
+        emit=lines.append,
+    )
+
+    assert code == 0
+    assert Path(dispatch.workspace_path).is_dir()
+    artifact_root = Path(dispatch.artifact_path)
+    assert (artifact_root / "request.json").exists()
+    assert (artifact_root / "session.json").exists()
+    assert (artifact_root / "events.jsonl").exists()
+    terminal = json.loads((artifact_root / "terminal.json").read_text())
+    assert terminal["terminal_state"] == "completed"
+
+    events = [parse_worker_event(line) for line in lines]
+    assert [event.event for event in events] == [
+        "worker_started",
+        "workspace_ready",
+        "session_started",
+        "heartbeat",
+        "turn_completed",
+        "worker_completed",
+    ]
+    assert events[1].fields["workspace_path"] == dispatch.workspace_path
+    assert events[-1].fields["artifact_path"] == dispatch.artifact_path
+
+
+async def test_real_worker_rejects_workspace_outside_remote_root(tmp_path: Path):
+    """Real worker path rejects dispatch workspace outside remote root."""
+    config = _real_worker_config(tmp_path)
+    dispatch = _dispatch(tmp_path, workspace_path=tmp_path / "outside" / "workspace")
+    lines: list[str] = []
+
+    code = await run_real_worker(
+        config,
+        dispatch,
+        provider_factory=lambda config: FakeProvider(),
+        emit=lines.append,
+    )
+
+    assert code == 1
+    events = [parse_worker_event(line) for line in lines]
+    assert events[-1].event == "worker_failed"
+    assert "inside remote.workspace_root" in events[-1].fields["message"]
+
+
+async def test_real_worker_provider_failure_writes_failed_terminal(tmp_path: Path):
+    """Provider failure emits worker_failed, returns non-zero, and writes terminal."""
+    config = _real_worker_config(tmp_path)
+    dispatch = _dispatch(tmp_path)
+    provider = FakeProvider(
+        default_script=FakeTurnScript(
+            raise_after=0,
+            raise_message="provider boom",
+        )
+    )
+    lines: list[str] = []
+
+    code = await run_real_worker(
+        config,
+        dispatch,
+        provider_factory=lambda config: provider,
+        emit=lines.append,
+    )
+
+    assert code == 1
+    events = [parse_worker_event(line) for line in lines]
+    assert events[-1].event == "worker_failed"
+    assert events[-1].fields["message"] == "provider boom"
+    terminal = json.loads((Path(dispatch.artifact_path) / "terminal.json").read_text())
+    assert terminal["terminal_state"] == "failed"
+    assert terminal["error"] == "provider boom"
+
+
+async def test_real_worker_redacts_tracker_placeholder_from_errors_and_artifacts(
+    tmp_path: Path,
+):
+    """Worker errors redact tracker placeholder from streams and artifacts."""
+    config = _real_worker_config(tmp_path)
+    dispatch = _dispatch(tmp_path)
+    provider = FakeProvider(
+        default_script=FakeTurnScript(
+            raise_after=0,
+            raise_message=f"failed with {config.tracker.token}",
+        )
+    )
+    lines: list[str] = []
+
+    code = await run_real_worker(
+        config,
+        dispatch,
+        provider_factory=lambda config: provider,
+        emit=lines.append,
+    )
+
+    assert code == 1
+    stream = "\n".join(lines)
+    assert config.tracker.token not in stream
+    assert REDACTED in stream
+    artifact_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in Path(dispatch.artifact_path).glob("*")
+        if path.is_file()
+    )
+    assert config.tracker.token not in artifact_text
+    assert REDACTED in artifact_text
 
 
 def test_worker_dispatch_request_error_redaction(tmp_path: Path):
