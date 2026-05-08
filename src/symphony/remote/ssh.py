@@ -6,7 +6,6 @@ Uses subprocess for SSH command execution with fake runner support for testing.
 
 from __future__ import annotations
 
-import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,11 +14,15 @@ from typing import Protocol
 from symphony.artifacts import redact_text
 from symphony.config import WorkflowConfig
 from symphony.remote.protocol import ProtocolError, WorkerEvent, parse_worker_event
+from symphony.remote.snapshot import (
+    REMOTE_TRACKER_TOKEN_PLACEHOLDER,
+    serialize_config_snapshot,
+)
 from symphony.remote.transport import RemoteRunResult
 
 # Keys to redact from SSH stderr and errors
 SSH_REDACT_KEYS = ("token", "authorization", "api_key", "password", "secret")
-REMOTE_TRACKER_TOKEN_PLACEHOLDER = "remote-worker-no-tracker-token"
+__all__ = ("REMOTE_TRACKER_TOKEN_PLACEHOLDER", "SSHRemoteTransport")
 
 
 class SubprocessRunner(Protocol):
@@ -181,40 +184,7 @@ class SSHRemoteTransport:
         Returns:
             JSON string of config snapshot
         """
-        # Convert config to dict representation
-        # This is a simplified version - production would need full serialization
-        snapshot = {
-            "tracker": {
-                "kind": config.tracker.kind,
-                "owner": config.tracker.owner,
-                "repo": config.tracker.repo,
-                # Remote workers must not receive the coordinator's tracker API
-                # token. The placeholder preserves the current WorkflowConfig
-                # shape until a narrow git-only credential is modeled.
-                "token": REMOTE_TRACKER_TOKEN_PLACEHOLDER,
-            },
-            "agent": {"provider": config.agent.provider},
-            "workspace": {"root": str(config.workspace.root)},
-            "claude": {
-                "model": config.claude.model,
-                "permission_mode": config.claude.permission_mode,
-                "session_store": str(config.claude.session_store),
-                "transcript_store": str(config.claude.transcript_store),
-                "artifact_store": str(config.claude.artifact_store),
-            },
-            "github": {},
-            "remote": {
-                "enabled": config.remote.enabled,
-                "host": config.remote.host,
-                "workspace_root": config.remote.workspace_root,
-                "artifact_root": config.remote.artifact_root,
-                "session_store": config.remote.session_store,
-                "worker_timeout_ms": config.remote.worker_timeout_ms,
-                "heartbeat_interval_ms": config.remote.heartbeat_interval_ms,
-                "stall_timeout_ms": config.remote.stall_timeout_ms,
-            },
-        }
-        return json.dumps(snapshot, indent=2)
+        return serialize_config_snapshot(config)
 
     def _redact_error(self, error_msg: str, config: WorkflowConfig) -> str:
         """Redact secrets from error messages.
