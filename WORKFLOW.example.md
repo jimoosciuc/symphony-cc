@@ -46,6 +46,29 @@ claude:
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
   retry_resume_policy: resume_same_session
+
+# Workspace cleanup policy (#65 schema; #66 executor; #67 reporting).
+# Default-safe: disabled. Existing workflows that omit `cleanup` keep
+# preserving workspaces exactly as before. When `enabled: true`, at
+# least one of `on_terminal_issue`, `on_closed_pr`, or `max_age_days`
+# MUST be set or workflow loading fails. `dry_run: true` makes the
+# future executor list candidates without deleting them.
+cleanup:
+  enabled: false
+  on_terminal_issue: false
+  on_closed_pr: false
+  max_age_days: null
+  dry_run: false
+
+# Artifact retention policy. Configured separately from `cleanup`
+# because run artifacts under `claude.artifact_store` are audit
+# evidence. Default-safe: disabled. When `enabled: true`,
+# `artifact_max_age_days` MUST be set; refusing to delete artifacts
+# without an explicit bound is intentional.
+retention:
+  enabled: false
+  artifact_max_age_days: null
+  dry_run: false
 ---
 
 You are working unattended on {{ issue.identifier }}: {{ issue.title }}.

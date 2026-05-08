@@ -202,6 +202,51 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CleanupConfig:
+    """Workspace cleanup policy (#65, M5.6).
+
+    Schema-only. The executor that actually deletes workspaces lives in
+    #66 and the cleanup-evidence reporting in #67. Defaults are
+    intentionally inert: ``enabled=False`` means existing behavior
+    (workspaces preserved on success, per SPEC §8) is unchanged.
+
+    When ``enabled`` is true, at least one of ``on_terminal_issue``,
+    ``on_closed_pr``, or ``max_age_days`` MUST be set; ``build_config``
+    rejects an enabled-but-empty policy so an operator does not enable
+    cleanup and silently get no-ops. ``dry_run`` is a knob for the
+    future executor — the schema accepts it now so workflows committed
+    today don't need to change later.
+
+    Cleanup is deliberately scoped to workspaces; artifact retention has
+    its own :class:`RetentionConfig` because run artifacts are audit
+    evidence (issue #65 design constraint).
+    """
+
+    enabled: bool = False
+    on_terminal_issue: bool = False
+    on_closed_pr: bool = False
+    max_age_days: int | None = None
+    dry_run: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionConfig:
+    """Artifact retention policy (#65, M5.6).
+
+    Separate from :class:`CleanupConfig` because artifacts are audit
+    evidence and live under ``claude.artifact_store`` rather than the
+    workspace tree. Defaults: disabled, nothing deleted.
+
+    When ``enabled`` is true, ``artifact_max_age_days`` MUST be set —
+    artifact deletion without a bound is never the intent.
+    """
+
+    enabled: bool = False
+    artifact_max_age_days: int | None = None
+    dry_run: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowConfig:
     tracker: TrackerConfig
     agent: AgentConfig
@@ -211,6 +256,8 @@ class WorkflowConfig:
     polling: PollingConfig = field(default_factory=PollingConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    retention: RetentionConfig = field(default_factory=RetentionConfig)
     workflow_path: Path | None = None
     warnings: tuple[ConfigWarning, ...] = ()
 
@@ -383,9 +430,7 @@ def _build_agent_tools(raw: Any, *, location: str) -> AgentToolsConfig:
         )
     return AgentToolsConfig(
         github_graphql=GitHubGraphQLToolConfig(
-            enabled=_opt_bool(
-                gql_raw, "enabled", f"{location}.github_graphql", default=False
-            ),
+            enabled=_opt_bool(gql_raw, "enabled", f"{location}.github_graphql", default=False),
         ),
     )
 
@@ -559,6 +604,110 @@ def _build_logging(raw: dict[str, Any], base_dir: Path) -> LoggingConfig:
     )
 
 
+# -- Cleanup / retention (#65, M5.6) ------------------------------------------
+#
+# Schema-only. The executor (#66) will read these objects and decide what to
+# delete; the reporting/evidence (#67) will record what it decided. Validation
+# here exists so an operator who turns cleanup or retention on cannot get a
+# silent no-op from a typo or an empty policy.
+
+_CLEANUP_KEYS: frozenset[str] = frozenset(
+    {"enabled", "on_terminal_issue", "on_closed_pr", "max_age_days", "dry_run"}
+)
+_RETENTION_KEYS: frozenset[str] = frozenset({"enabled", "artifact_max_age_days", "dry_run"})
+
+
+def _reject_unknown_keys(
+    section: dict[str, Any], allowed: frozenset[str], *, location: str
+) -> None:
+    """Fail loudly on unknown keys.
+
+    Cleanup and retention are operator-facing; a typo like
+    ``on_terminal_issu`` would silently disable a policy the operator
+    thought they enabled. Strict key checking pays for itself the first
+    time it catches that.
+    """
+    unknown = sorted(k for k in section.keys() if k not in allowed)
+    if unknown:
+        raise ConfigError(
+            location,
+            f"unknown field(s): {', '.join(unknown)}; allowed: {sorted(allowed)}",
+        )
+
+
+def _opt_positive_int(
+    d: dict[str, Any], key: str, location: str, *, default: int | None = None
+) -> int | None:
+    """Optional positive int (>= 1). Returns ``default`` when absent.
+
+    Rejects bools (Python's ``isinstance(True, int)`` is ``True``) and
+    non-positive values so an enabled policy with ``max_age_days: 0``
+    cannot evaluate to "delete everything".
+    """
+    if key not in d or d[key] is None:
+        return default
+    value = d[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{location}.{key}", f"must be an int, got {type(value).__name__}")
+    if value < 1:
+        raise ConfigError(f"{location}.{key}", f"must be >= 1 (got {value})")
+    return value
+
+
+def _build_cleanup(raw: dict[str, Any]) -> CleanupConfig:
+    section = raw.get("cleanup")
+    if section is None:
+        return CleanupConfig()
+    if not isinstance(section, dict):
+        raise ConfigError("cleanup", f"must be a mapping, got {type(section).__name__}")
+    _reject_unknown_keys(section, _CLEANUP_KEYS, location="cleanup")
+    enabled = _opt_bool(section, "enabled", "cleanup", default=False)
+    on_terminal_issue = _opt_bool(section, "on_terminal_issue", "cleanup", default=False)
+    on_closed_pr = _opt_bool(section, "on_closed_pr", "cleanup", default=False)
+    max_age_days = _opt_positive_int(section, "max_age_days", "cleanup")
+    dry_run = _opt_bool(section, "dry_run", "cleanup", default=False)
+    if enabled and not (on_terminal_issue or on_closed_pr or max_age_days is not None):
+        raise ConfigError(
+            "cleanup",
+            (
+                "enabled=true requires at least one policy: set on_terminal_issue, "
+                "on_closed_pr, or max_age_days. Otherwise leave enabled=false."
+            ),
+        )
+    return CleanupConfig(
+        enabled=enabled,
+        on_terminal_issue=on_terminal_issue,
+        on_closed_pr=on_closed_pr,
+        max_age_days=max_age_days,
+        dry_run=dry_run,
+    )
+
+
+def _build_retention(raw: dict[str, Any]) -> RetentionConfig:
+    section = raw.get("retention")
+    if section is None:
+        return RetentionConfig()
+    if not isinstance(section, dict):
+        raise ConfigError("retention", f"must be a mapping, got {type(section).__name__}")
+    _reject_unknown_keys(section, _RETENTION_KEYS, location="retention")
+    enabled = _opt_bool(section, "enabled", "retention", default=False)
+    artifact_max_age_days = _opt_positive_int(section, "artifact_max_age_days", "retention")
+    dry_run = _opt_bool(section, "dry_run", "retention", default=False)
+    if enabled and artifact_max_age_days is None:
+        raise ConfigError(
+            "retention",
+            (
+                "enabled=true requires artifact_max_age_days to be set; refusing to "
+                "delete audit artifacts without an explicit retention bound."
+            ),
+        )
+    return RetentionConfig(
+        enabled=enabled,
+        artifact_max_age_days=artifact_max_age_days,
+        dry_run=dry_run,
+    )
+
+
 # -- Public entry point -------------------------------------------------------
 
 
@@ -601,6 +750,8 @@ def build_config(
         polling=_build_polling(raw),
         retry=_build_retry(raw),
         logging=_build_logging(raw, base_dir),
+        cleanup=_build_cleanup(raw),
+        retention=_build_retention(raw),
         workflow_path=workflow_path.resolve(),
         warnings=tuple(warnings),
     )

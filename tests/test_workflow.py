@@ -13,11 +13,13 @@ import pytest
 from symphony.config import (
     ALLOWED_PERMISSION_MODES,
     ALLOWED_RETRY_RESUME_POLICIES,
+    CleanupConfig,
     ConfigError,
     GitHubConfig,
     GitHubProjectConfig,
     LoggingConfig,
     PollingConfig,
+    RetentionConfig,
     RetryConfig,
     WorkflowConfig,
     build_config,
@@ -473,3 +475,241 @@ def test_workflow_config_is_immutable(env_with_token: dict[str, str]) -> None:
     with pytest.raises((AttributeError, TypeError)):
         # Frozen dataclass; mutation must not silently succeed.
         cfg.agent = None  # type: ignore[misc]
+
+
+# -- Cleanup and retention (#65, M5.6) ----------------------------------------
+#
+# Schema-only ticket: these sections describe future cleanup and artifact
+# retention policies. The executor lives in #66, the reporting/evidence in
+# #67. Defaults MUST preserve workspaces and artifacts so existing workflows
+# behave exactly as before unless cleanup is explicitly turned on.
+
+
+def test_cleanup_and_retention_default_to_disabled(env_with_token: dict[str, str]) -> None:
+    """Existing workflows that omit `cleanup`/`retention` must keep working
+    and must keep workspaces and artifacts (default-safe)."""
+    workflow = load_workflow(FIXTURES / "valid.md", env=env_with_token)
+    assert workflow.config.cleanup == CleanupConfig()
+    assert workflow.config.retention == RetentionConfig()
+    assert workflow.config.cleanup.enabled is False
+    assert workflow.config.cleanup.on_terminal_issue is False
+    assert workflow.config.cleanup.on_closed_pr is False
+    assert workflow.config.cleanup.max_age_days is None
+    assert workflow.config.cleanup.dry_run is False
+    assert workflow.config.retention.enabled is False
+    assert workflow.config.retention.artifact_max_age_days is None
+    assert workflow.config.retention.dry_run is False
+
+
+def test_cleanup_full_policy_roundtrips() -> None:
+    raw = _minimal_raw()
+    raw["cleanup"] = {
+        "enabled": True,
+        "on_terminal_issue": True,
+        "on_closed_pr": True,
+        "max_age_days": 14,
+        "dry_run": False,
+    }
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    c = cfg.cleanup
+    assert c.enabled is True
+    assert c.on_terminal_issue is True
+    assert c.on_closed_pr is True
+    assert c.max_age_days == 14
+    assert c.dry_run is False
+
+
+def test_retention_full_policy_roundtrips() -> None:
+    raw = _minimal_raw()
+    raw["retention"] = {
+        "enabled": True,
+        "artifact_max_age_days": 30,
+        "dry_run": True,
+    }
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    r = cfg.retention
+    assert r.enabled is True
+    assert r.artifact_max_age_days == 30
+    assert r.dry_run is True
+
+
+def test_cleanup_age_only_policy_is_valid() -> None:
+    """Only `max_age_days` is set — that alone is a complete cleanup policy
+    because it bounds workspace retention regardless of issue/PR state."""
+    raw = _minimal_raw()
+    raw["cleanup"] = {"enabled": True, "max_age_days": 7}
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.cleanup.enabled is True
+    assert cfg.cleanup.max_age_days == 7
+    assert cfg.cleanup.on_terminal_issue is False
+    assert cfg.cleanup.on_closed_pr is False
+
+
+def test_cleanup_terminal_only_policy_is_valid() -> None:
+    raw = _minimal_raw()
+    raw["cleanup"] = {"enabled": True, "on_terminal_issue": True}
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.cleanup.enabled is True
+    assert cfg.cleanup.on_terminal_issue is True
+
+
+def test_cleanup_dry_run_alone_is_valid_when_paired_with_a_policy() -> None:
+    raw = _minimal_raw()
+    raw["cleanup"] = {"enabled": True, "dry_run": True, "on_closed_pr": True}
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.cleanup.dry_run is True
+    assert cfg.cleanup.on_closed_pr is True
+
+
+def test_cleanup_enabled_with_no_policy_rejected() -> None:
+    """`enabled: true` with no trigger and no max_age_days is a no-op trap.
+    Reject it loudly so operators don't think cleanup is running."""
+    raw = _minimal_raw()
+    raw["cleanup"] = {"enabled": True}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "cleanup"
+    assert "policy" in str(excinfo.value).lower() or "must" in str(excinfo.value).lower()
+
+
+def test_retention_enabled_with_no_age_rejected() -> None:
+    """Artifacts are audit evidence; deleting them requires an explicit
+    `artifact_max_age_days`. `enabled: true` with no age is rejected."""
+    raw = _minimal_raw()
+    raw["retention"] = {"enabled": True}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "retention"
+    assert "artifact_max_age_days" in str(excinfo.value)
+
+
+def test_cleanup_disabled_ignores_policy_fields() -> None:
+    """If `enabled` is false the other fields are still parsed and exposed,
+    but no validation is enforced — the operator may have left a draft
+    policy in place. Default-safe: nothing happens because enabled is false."""
+    raw = _minimal_raw()
+    raw["cleanup"] = {
+        "enabled": False,
+        "on_terminal_issue": True,
+        "max_age_days": 30,
+    }
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.cleanup.enabled is False
+    assert cfg.cleanup.on_terminal_issue is True
+    assert cfg.cleanup.max_age_days == 30
+
+
+def test_cleanup_max_age_days_must_be_positive_int() -> None:
+    raw = _minimal_raw()
+    raw["cleanup"] = {"enabled": True, "max_age_days": 0}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "cleanup.max_age_days"
+
+
+def test_cleanup_max_age_days_negative_rejected() -> None:
+    raw = _minimal_raw()
+    raw["cleanup"] = {"enabled": True, "max_age_days": -1}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "cleanup.max_age_days"
+
+
+def test_cleanup_max_age_days_must_be_int_not_bool() -> None:
+    raw = _minimal_raw()
+    raw["cleanup"] = {"enabled": True, "max_age_days": True, "on_terminal_issue": True}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "cleanup.max_age_days"
+
+
+def test_cleanup_unknown_field_rejected() -> None:
+    """Typos in cleanup keys would silently disable a policy the operator
+    thought they enabled. Fail loudly at workflow load time."""
+    raw = _minimal_raw()
+    raw["cleanup"] = {"enabled": True, "on_terminal_issu": True}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location.startswith("cleanup")
+    assert "on_terminal_issu" in str(excinfo.value)
+
+
+def test_retention_unknown_field_rejected() -> None:
+    raw = _minimal_raw()
+    raw["retention"] = {"enabled": True, "artifact_max_age_dayz": 7}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location.startswith("retention")
+    assert "artifact_max_age_dayz" in str(excinfo.value)
+
+
+def test_retention_artifact_max_age_days_must_be_positive() -> None:
+    raw = _minimal_raw()
+    raw["retention"] = {"enabled": True, "artifact_max_age_days": 0}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "retention.artifact_max_age_days"
+
+
+def test_retention_artifact_max_age_days_negative_rejected() -> None:
+    raw = _minimal_raw()
+    raw["retention"] = {"enabled": True, "artifact_max_age_days": -7}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "retention.artifact_max_age_days"
+
+
+def test_cleanup_section_must_be_a_mapping() -> None:
+    raw = _minimal_raw()
+    raw["cleanup"] = ["enabled", True]
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "cleanup"
+
+
+def test_retention_section_must_be_a_mapping() -> None:
+    raw = _minimal_raw()
+    raw["retention"] = "yes please"
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "retention"
+
+
+def test_cleanup_and_retention_independent() -> None:
+    """Artifact retention and workspace cleanup are configured separately;
+    enabling one must NOT enable the other."""
+    raw = _minimal_raw()
+    raw["cleanup"] = {"enabled": True, "max_age_days": 5}
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.cleanup.enabled is True
+    assert cfg.retention.enabled is False
+    assert cfg.retention.artifact_max_age_days is None
+
+    raw2 = _minimal_raw()
+    raw2["retention"] = {"enabled": True, "artifact_max_age_days": 90}
+    cfg2 = build_config(raw2, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg2.retention.enabled is True
+    assert cfg2.cleanup.enabled is False
+    assert cfg2.cleanup.max_age_days is None
+
+
+def test_cleanup_bool_field_must_be_bool() -> None:
+    raw = _minimal_raw()
+    raw["cleanup"] = {"enabled": "yes"}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "cleanup.enabled"
+
+
+def test_example_workflow_documents_cleanup_and_retention(
+    env_with_token: dict[str, str],
+) -> None:
+    """The shipped example workflow MUST show the new config shape so
+    operators can copy/paste a known-good starting point."""
+    text = Path("WORKFLOW.example.md").read_text(encoding="utf-8")
+    assert "cleanup:" in text
+    assert "retention:" in text
+    # And it must still load with default-safe values.
+    workflow = load_workflow(Path("WORKFLOW.example.md"), env=env_with_token)
+    assert workflow.config.cleanup.enabled is False
+    assert workflow.config.retention.enabled is False
