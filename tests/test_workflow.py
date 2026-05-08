@@ -102,7 +102,7 @@ def test_dollar_prefixed_non_envvar_passes_through() -> None:
         "agent": {"provider": "claude_code"},
         "workspace": {"root": "ws"},
         "claude": {
-            "model": "claude-sonnet-4-5",
+            "model": "claude-opus-4-7",
             "permission_mode": "acceptEdits",
             "session_store": "s",
             "transcript_store": "t",
@@ -233,7 +233,7 @@ def _minimal_raw() -> dict[str, object]:
         "agent": {"provider": "claude_code"},
         "workspace": {"root": "ws"},
         "claude": {
-            "model": "claude-sonnet-4-5",
+            "model": "claude-opus-4-7",
             "permission_mode": "acceptEdits",
             "session_store": "s",
             "transcript_store": "t",
