@@ -105,6 +105,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from symphony.orchestrator import Orchestrator
     from symphony.provider import ClaudeCodeProvider
     from symphony.workflow import WorkflowError, load_workflow
+    from symphony.workflow_reload import WorkflowReloader
     from symphony.workspace import WorkspaceManager
 
     _setup_logging(args.log_level)
@@ -139,6 +140,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         tracker=tracker,
         provider=provider,
         workspace_manager=workspace_mgr,
+        workflow_reloader=WorkflowReloader.from_workflow(workflow),
     )
 
     try:

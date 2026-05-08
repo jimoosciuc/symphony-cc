@@ -63,6 +63,7 @@ from symphony.recovery import (
     issue_is_actionable,
 )
 from symphony.retry import RetryState, next_backoff_ms
+from symphony.workflow_reload import WorkflowReloader
 from symphony.workspace import WorkspaceManager
 
 _LOG = logging.getLogger("symphony.orchestrator")
@@ -93,6 +94,7 @@ class WorkerState:
     workspace: Workspace
     session: SessionRecord
     artifacts: ArtifactWriter
+    config: WorkflowConfig | None = None
     turn_count: int = 0
     terminal_state: Terminal | None = None
     last_event: AgentEvent | None = None
@@ -114,6 +116,9 @@ class TickResult:
     reconciled_cancelled: list[str] = field(default_factory=list)
     skipped_claim_conflict: list[str] = field(default_factory=list)
     retries_scheduled: list[str] = field(default_factory=list)
+    workflow_reloaded: bool = False
+    workflow_reload_error: str | None = None
+    dispatch_paused: bool = False
 
 
 class Orchestrator:
@@ -130,6 +135,7 @@ class Orchestrator:
         run_id: str | None = None,
         clock: Callable[[], datetime] | None = None,
         evidence_detector: EvidenceDetector | None = None,
+        workflow_reloader: WorkflowReloader | None = None,
     ) -> None:
         self.config = config
         self.tracker = tracker
@@ -138,6 +144,10 @@ class Orchestrator:
         self.continuation_policy = continuation_policy or _default_continuation_policy
         self.run_id = run_id or f"run-{uuid.uuid4().hex[:8]}"
         self._clock = clock or _now_utc
+        self._workflow_reloader = workflow_reloader or WorkflowReloader.from_config(
+            config,
+            clock=self._clock,
+        )
 
         # Mutable state.
         self.active: dict[str, WorkerState] = {}
@@ -184,6 +194,12 @@ class Orchestrator:
     async def run_once(self) -> TickResult:
         result = TickResult()
 
+        reload_result = self._maybe_reload_workflow()
+        if reload_result is not None:
+            result.workflow_reloaded = reload_result.reloaded
+            result.workflow_reload_error = reload_result.error
+            result.dispatch_paused = reload_result.dispatch_paused
+
         # 0. M5.7 #66: age-based workspace sweep BEFORE reconcile.
         # ``self.active`` here reflects the *previous* tick's workers
         # (reconcile hasn't run yet for this tick) — that's intentional:
@@ -208,6 +224,11 @@ class Orchestrator:
         await self._reconcile(result)
 
         # 2. Fetch candidate issues + dispatch up to the concurrency limit.
+        if result.dispatch_paused:
+            _LOG.warning(
+                "workflow reload invalid; pausing new dispatch until workflow is fixed"
+            )
+            return result
         candidates = self.tracker.fetch_candidate_issues()
         await self._dispatch(candidates, result)
 
@@ -215,10 +236,48 @@ class Orchestrator:
 
     async def run_forever(self) -> None:  # pragma: no cover - simple loop
         """Convenience scheduler. Tests use ``run_once`` directly."""
-        interval = max(0.001, self.config.polling.interval_ms / 1000)
         while True:
             await self.run_once()
+            interval = max(0.001, self.config.polling.interval_ms / 1000)
             await asyncio.sleep(interval)
+
+    def _maybe_reload_workflow(self):
+        if self._workflow_reloader is None:
+            return None
+        result = self._workflow_reloader.maybe_reload()
+        if result.reloaded:
+            self._apply_workflow_config(result.current_snapshot.config)
+        return result
+
+    def _apply_workflow_config(self, config: WorkflowConfig) -> None:
+        self.config = config
+        self._cleanup = WorkspaceCleanupExecutor(
+            self.workspaces,
+            self.config.workspace.cleanup,
+        )
+        self._artifact_retention = ArtifactRetentionExecutor(
+            self.config.claude.artifact_store,
+            self.config.claude.artifact_retention,
+            redact_keys=self.config.logging.redact_keys,
+            clock=self._clock,
+        )
+        self._evidence = EvidenceDetector(
+            self.config.github,
+            client=getattr(self.tracker, "client", None),
+        )
+        self.workspaces.config = self.config.workspace
+        if hasattr(self.tracker, "tracker"):
+            self.tracker.tracker = self.config.tracker
+        if hasattr(self.tracker, "github"):
+            self.tracker.github = self.config.github
+        if hasattr(self.tracker, "ready_label"):
+            self.tracker.ready_label = (
+                self.config.tracker.include_labels[0]
+                if self.config.tracker.include_labels
+                else ""
+            )
+        if hasattr(self.tracker, "claim_label"):
+            self.tracker.claim_label = self.config.github.claim_label
 
     # -- Restart recovery (#31) ---------------------------------------------
 
@@ -420,6 +479,7 @@ class Orchestrator:
             workspace=workspace,
             session=session,
             artifacts=artifacts,
+            config=self.config,
         )
         self.active[issue.identifier] = worker
         decision = self._record_recovery_decision(
@@ -625,10 +685,11 @@ class Orchestrator:
             if issue is None:
                 continue
             worker = self.active[identifier]
+            worker_config = _worker_config(worker, self.config)
             became_ineligible = (
                 issue.state != "open"
-                or self.config.tracker.exclude_labels
-                and any(lbl in issue.labels for lbl in self.config.tracker.exclude_labels)
+                or worker_config.tracker.exclude_labels
+                and any(lbl in issue.labels for lbl in worker_config.tracker.exclude_labels)
             )
             if became_ineligible:
                 _LOG.info("reconcile: cancelling worker for %s", identifier)
@@ -758,6 +819,7 @@ class Orchestrator:
                     attempt=attempt - 1,  # restore() bumps to `attempt`
                 ),
                 artifacts=artifacts,
+                config=self.config,
             )
             try:
                 session = await self.provider.restore(stale.session)
@@ -810,7 +872,13 @@ class Orchestrator:
         session.artifact_dir = artifacts.root
 
         artifacts.write_json("session.json", _session_snapshot(session))
-        return WorkerState(issue=issue, workspace=workspace, session=session, artifacts=artifacts)
+        return WorkerState(
+            issue=issue,
+            workspace=workspace,
+            session=session,
+            artifacts=artifacts,
+            config=self.config,
+        )
 
     async def _run_worker(
         self,
@@ -819,7 +887,8 @@ class Orchestrator:
         claim: ClaimResult,
     ) -> None:
         del claim  # claim is informational; release happens regardless of outcome
-        max_turns = self.config.agent.max_turns
+        worker_config = _worker_config(worker, self.config)
+        max_turns = worker_config.agent.max_turns
         try:
             # `turn_completed` ends ONE turn but not the whole session — the
             # orchestrator may keep sending continuation prompts up to
@@ -1034,8 +1103,9 @@ class Orchestrator:
 
         Both timeouts mark the worker retryable per SPEC §16.
         """
-        stall_ms = self.config.claude.stall_timeout_ms
-        turn_ms = self.config.claude.turn_timeout_ms
+        worker_config = _worker_config(worker, self.config)
+        stall_ms = worker_config.claude.stall_timeout_ms
+        turn_ms = worker_config.claude.turn_timeout_ms
         loop = asyncio.get_running_loop()
         turn_start = loop.time()
         last_event_time = turn_start
@@ -1350,6 +1420,10 @@ def _issue_from_session_record(record: SessionRecord) -> Issue | None:
         state="open",
         url=f"https://github.com/{owner}/{repo}/issues/{number}",
     )
+
+
+def _worker_config(worker: WorkerState, fallback: WorkflowConfig) -> WorkflowConfig:
+    return worker.config if worker.config is not None else fallback
 
 
 # -- turn_failed classification (#30) ---------------------------------------
