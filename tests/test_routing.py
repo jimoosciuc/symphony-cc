@@ -259,3 +259,62 @@ async def test_terminal_json_blocked_false_for_unknown_outcome(tmp_path: Path) -
     record = json.loads(terminal_files[0].read_text())
     assert record["blocked"] is False
     assert record["task_outcome"] == OUTCOME_UNKNOWN
+
+
+# -- PR-lookup-failure must not falsely block (#62 leader correction) -------
+
+
+async def test_pr_lookup_failure_does_not_block_issue(tmp_path: Path) -> None:
+    """End-to-end check for the #62 leader correction: a transient
+    GitHubError during PR detection MUST classify the run as `unknown`
+    and release the claim — NOT mark_issue_blocked.
+
+    Drives the real :class:`EvidenceDetector` (no stub) with a
+    GitHubClient that always raises 500. Verifies:
+
+    1. tracker is NOT marked blocked
+    2. claim is released
+    3. terminal.json carries `task_outcome=unknown` and `blocked=false`
+
+    Defends against a regression that conflates API failure with
+    verified-no-PR.
+    """
+    import json
+
+    import httpx
+
+    from symphony.evidence import EvidenceDetector
+    from symphony.github.client import GitHubClient
+
+    def _always_500(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"message": "boom"})
+
+    client = GitHubClient("ghp_test", transport=httpx.MockTransport(_always_500))
+    cfg = _config(tmp_path)
+    tracker = FakeGitHubTracker(issues=[_issue()])
+    mgr = WorkspaceManager(cfg.workspace)
+    # Wire the REAL detector (not a stub) so we exercise the
+    # GitHubError → None code path that this test was added to lock in.
+    detector = EvidenceDetector(cfg.github, client=client)
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=FakeProvider(),
+        workspace_manager=mgr,
+        evidence_detector=detector,
+    )
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    # Critical assertion: PR-lookup failure does NOT cause blocking.
+    assert state.blocked is False, (
+        "Transient GitHub failure must NOT mark the issue blocked. "
+        "If this fires, `_detect_pull_requests` likely returned [] on "
+        "GitHubError instead of None — see leader correction on PR #73."
+    )
+    assert state.claimed_by is None  # released
+
+    terminal_files = list((tmp_path / "artifacts").rglob("terminal.json"))
+    record = json.loads(terminal_files[0].read_text())
+    assert record["blocked"] is False
+    assert record["task_outcome"] == OUTCOME_UNKNOWN

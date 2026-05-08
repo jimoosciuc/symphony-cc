@@ -428,9 +428,18 @@ def test_branch_and_diff_probes_skip_when_no_dot_git(tmp_path: Path) -> None:
 # -- PR lookup failure tolerated --------------------------------------------
 
 
-def test_pr_lookup_failure_is_logged_not_raised(
+def test_pr_lookup_failure_returns_unknown_not_incomplete(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Transient GitHub failure during PR detection MUST NOT classify the
+    run as `incomplete_no_evidence` — that would falsely block the issue
+    on a 500/rate-limit/network blip.
+
+    Required by leader correction on #62 / PR #73 (the detector previously
+    returned `[]` on GitHubError, conflating API failure with verified
+    absence). Now returns `None` so the routing falls through to
+    `unknown` and the issue is NOT marked blocked.
+    """
     detector = EvidenceDetector(_github(), client=_client_pr_lookup_fails())
     import logging as _logging
 
@@ -445,12 +454,15 @@ def test_pr_lookup_failure_is_logged_not_raised(
             recent_assistant_text="",
             workspace_path=tmp_path,
         )
-    # Falls through to the no-evidence path; no PR entries.
-    assert result.task_outcome == OUTCOME_INCOMPLETE_NO_EVIDENCE
+    # CRITICAL: outcome MUST be `unknown`, not `incomplete_no_evidence`,
+    # so the orchestrator does NOT escalate to mark_issue_blocked.
+    assert result.task_outcome == OUTCOME_UNKNOWN
+    assert result.outcome_decided_by == DECIDED_BY_DERIVATION
     assert all(e["type"] != "pr_linked" for e in result.task_evidence)
-    # The lookup failure should produce a WARNING.
+    # WARNING log mentions the lookup failure + the routing implication.
     warnings = [r for r in caplog.records if r.levelno == _logging.WARNING]
     assert any("PR lookup failed" in r.getMessage() for r in warnings)
+    assert any("`unknown`" in r.getMessage() for r in warnings)
 
 
 # -- to_terminal_fields shape ------------------------------------------------
