@@ -475,6 +475,7 @@ class Orchestrator:
                 "attempt": session.attempt,
                 "model": self.config.claude.model,
                 "permission_mode": self.config.claude.permission_mode,
+                "security_profile": self.config.security.profile,
                 "run_id": self.run_id,
                 "recovered_from_session": record.session_id,
             },
@@ -804,6 +805,7 @@ class Orchestrator:
                 "attempt": attempt,
                 "model": self.config.claude.model,
                 "permission_mode": self.config.claude.permission_mode,
+                "security_profile": self.config.security.profile,
                 "run_id": self.run_id,
             },
         )
@@ -1039,6 +1041,10 @@ class Orchestrator:
             worker.artifacts.write_json(
                 "terminal.json",
                 {
+                    "security_profile": _worker_config(
+                        worker,
+                        self.config,
+                    ).security.profile,
                     "terminal_state": (
                         worker.terminal_state.value if worker.terminal_state else "ended"
                     ),
@@ -1257,6 +1263,7 @@ class Orchestrator:
                 "session_id": worker.session.session_id,
                 "provider_session_id": worker.session.provider_session_id,
                 "attempt": worker.session.attempt,
+                "security_profile": _worker_config(worker, self.config).security.profile,
                 "terminal_state": (
                     worker.terminal_state.value if worker.terminal_state else None
                 ),

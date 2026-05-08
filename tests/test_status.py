@@ -13,6 +13,7 @@ from symphony.config import (
     LoggingConfig,
     PollingConfig,
     RetryConfig,
+    SecurityConfig,
     TrackerConfig,
     WorkflowConfig,
     WorkspaceConfig,
@@ -61,6 +62,7 @@ def _config(tmp_path: Path) -> WorkflowConfig:
             artifact_store=tmp_path / "artifacts",
         ),
         github=GitHubConfig(),
+        security=SecurityConfig(profile="restricted"),
         polling=PollingConfig(),
         retry=RetryConfig(initial_backoff_ms=1000, max_backoff_ms=8000),
         logging=LoggingConfig(),
@@ -87,6 +89,10 @@ def test_status_snapshot_idle_state_is_redacted(tmp_path: Path) -> None:
 
     assert snapshot["state"] == "idle"
     assert snapshot["run_id"] == orch.run_id
+    assert snapshot["security"] == {
+        "profile": "restricted",
+        "permission_mode": "acceptEdits",
+    }
     assert snapshot["active_workers"] == []
     assert "ghp_secret_token_value_1234567890" not in str(snapshot)
 
@@ -146,6 +152,7 @@ def test_status_snapshot_includes_active_worker_and_redacted_event_payload(
     active = snapshot["active_workers"][0]
     assert active["issue_identifier"] == issue.identifier
     assert active["provider_session_id"] == "provider-1"
+    assert active["security_profile"] == "restricted"
     assert active["last_event"]["payload"]["token"] == "<redacted>"
     assert active["last_event"]["payload"]["text"] == "ok"
 
@@ -181,3 +188,4 @@ async def test_status_snapshot_includes_recent_finished_worker(tmp_path: Path) -
     assert result.finished == [issue.identifier]
     assert snapshot["recent_finished"][0]["issue_identifier"] == issue.identifier
     assert snapshot["recent_finished"][0]["terminal_state"] == "completed"
+    assert snapshot["recent_finished"][0]["security_profile"] == "restricted"

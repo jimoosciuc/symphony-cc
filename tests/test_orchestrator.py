@@ -23,6 +23,7 @@ from symphony.config import (
     LoggingConfig,
     PollingConfig,
     RetryConfig,
+    SecurityConfig,
     TrackerConfig,
     WorkflowConfig,
     WorkspaceConfig,
@@ -88,6 +89,7 @@ def _config(
             retry_resume_policy=retry_resume_policy,
         ),
         github=GitHubConfig(),
+        security=SecurityConfig(profile="trusted_unattended"),
         polling=PollingConfig(),
         retry=RetryConfig(initial_backoff_ms=1000, max_backoff_ms=8000, multiplier=2.0),
         logging=LoggingConfig(),
@@ -358,8 +360,13 @@ async def test_events_jsonl_has_one_line_per_event(tmp_path: Path) -> None:
 async def test_terminal_json_written_on_finish(tmp_path: Path) -> None:
     orch, _, _ = _make_orchestrator(tmp_path, issues=[_issue(number=1)])
     await orch.run_once()
+    request_file = next(Path(tmp_path / "artifacts").rglob("request.json"))
+    request = json.loads(request_file.read_text())
     terminal_file = next(Path(tmp_path / "artifacts").rglob("terminal.json"))
     rec = json.loads(terminal_file.read_text())
+    assert request["security_profile"] == "trusted_unattended"
+    assert request["permission_mode"] == "acceptEdits"
+    assert rec["security_profile"] == "trusted_unattended"
     assert rec["terminal_state"] in {"completed", "ended"}
     assert rec["turn_count"] >= 1
 

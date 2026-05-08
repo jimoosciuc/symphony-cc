@@ -23,6 +23,10 @@ def build_status_snapshot(orchestrator: Any) -> dict[str, Any]:
         "run_id": orchestrator.run_id,
         "state": _state(orchestrator),
         "workflow": _workflow_status(orchestrator),
+        "security": {
+            "profile": config.security.profile,
+            "permission_mode": config.claude.permission_mode,
+        },
         "capacity": {
             "active": len(orchestrator.active),
             "max_concurrency": config.agent.max_concurrency,
@@ -74,6 +78,7 @@ def _worker_status(worker: Any) -> dict[str, Any]:
         "session_id": session.session_id,
         "provider_session_id": session.provider_session_id,
         "attempt": session.attempt,
+        "security_profile": _security_profile(worker),
         "turn_count": worker.turn_count,
         "terminal_state": (
             worker.terminal_state.value if worker.terminal_state else None
@@ -95,6 +100,13 @@ def _retry_status(retry: Any) -> dict[str, Any]:
         "next_attempt_at": _iso(retry.next_attempt_at),
         "history": list(retry.history),
     }
+
+
+def _security_profile(worker: Any) -> str | None:
+    config = getattr(worker, "config", None)
+    security = getattr(config, "security", None)
+    profile = getattr(security, "profile", None)
+    return str(profile) if profile is not None else None
 
 
 def _event_summary(event: Any) -> dict[str, Any] | None:
