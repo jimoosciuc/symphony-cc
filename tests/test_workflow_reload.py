@@ -25,6 +25,7 @@ def _workflow_text(
     max_concurrency: int = 1,
     exclude_label: str = "symphony-blocked",
     token: str = "$GITHUB_TOKEN",
+    security_profile: str = "conservative",
 ) -> str:
     return f"""---
 tracker:
@@ -47,6 +48,8 @@ claude:
   transcript_store: {tmp_path / "transcripts"}
   artifact_store: {tmp_path / "artifacts"}
 github: {{}}
+security:
+  profile: {security_profile}
 retry:
   initial_backoff_ms: 1000
   max_backoff_ms: 8000
@@ -219,7 +222,11 @@ async def test_active_worker_keeps_snapshot_during_reload(tmp_path: Path) -> Non
     tracker.set_issue_labels(issue.identifier, ("symphony-ready", "new-blocked"))
     _write_workflow(
         workflow_path,
-        _workflow_text(tmp_path, exclude_label="new-blocked"),
+        _workflow_text(
+            tmp_path,
+            exclude_label="new-blocked",
+            security_profile="trusted_unattended",
+        ),
         mtime=2_000_000_000,
     )
 
@@ -228,3 +235,6 @@ async def test_active_worker_keeps_snapshot_during_reload(tmp_path: Path) -> Non
     assert result.workflow_reloaded is True
     assert result.reconciled_cancelled == []
     assert issue.identifier in orch.active
+    assert orch.config.security.profile == "trusted_unattended"
+    assert orch.active[issue.identifier].config is not None
+    assert orch.active[issue.identifier].config.security.profile == "conservative"

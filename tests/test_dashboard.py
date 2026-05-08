@@ -17,6 +17,7 @@ def _snapshot() -> dict:
             "path": "/tmp/WORKFLOW.md",
             "loaded_at": "2026-05-08T00:00:00+00:00",
         },
+        "security": {"profile": "trusted_unattended", "permission_mode": "acceptEdits"},
         "capacity": {"active": 1, "max_concurrency": 2},
         "active_workers": [
             {
@@ -25,6 +26,7 @@ def _snapshot() -> dict:
                 "artifact_dir": "/tmp/artifacts/acme_proj_1/1",
                 "provider_session_id": "provider-1",
                 "attempt": 1,
+                "security_profile": "trusted_unattended",
                 "last_event": {
                     "event": "message_delta",
                     "timestamp": "2026-05-08T00:00:01+00:00",
@@ -46,6 +48,7 @@ def _snapshot() -> dict:
                 "terminal_state": "completed",
                 "task_outcome": "completed_with_pr",
                 "provider_session_id": "provider-3",
+                "security_profile": "trusted_unattended",
                 "artifact_dir": "/tmp/artifacts/acme_proj_3/1",
                 "last_event_at": "2026-05-08T00:02:00+00:00",
             },
@@ -54,6 +57,7 @@ def _snapshot() -> dict:
                 "terminal_state": "failed",
                 "task_outcome": "blocked_operator_required",
                 "provider_session_id": "provider-4",
+                "security_profile": "restricted",
                 "artifact_dir": "/tmp/artifacts/acme_proj_4/1",
                 "last_event_at": "2026-05-08T00:03:00+00:00",
             },
@@ -73,6 +77,8 @@ def test_dashboard_renders_core_operator_states() -> None:
 
     assert "Symphony Runtime" in html
     assert "running" in html
+    assert "trusted_unattended" in html
+    assert "acceptEdits" in html
     assert "acme/proj#1" in html
     assert "provider-1" in html
     assert "permission denials: 1" in html

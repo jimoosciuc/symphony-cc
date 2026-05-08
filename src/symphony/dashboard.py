@@ -156,6 +156,7 @@ def write_dashboard_html(snapshot: dict[str, Any], path: Path | str) -> Path:
 def _summary(snapshot: dict[str, Any]) -> str:
     capacity = snapshot.get("capacity", {})
     workflow = snapshot.get("workflow", {})
+    security = snapshot.get("security", {})
     state = _text(snapshot.get("state", "unknown"))
     return f"""
 <section>
@@ -167,6 +168,8 @@ def _summary(snapshot: dict[str, Any]) -> str:
     {_metric("Max Concurrency", _text(capacity.get("max_concurrency", 0)))}
     {_metric("Workflow Revision", _text(workflow.get("revision")))}
     {_metric("Workflow Path", _code(workflow.get("path")))}
+    {_metric("Security Profile", _text(security.get("profile")))}
+    {_metric("Permission Mode", _text(security.get("permission_mode")))}
   </div>
 </section>
 """
@@ -186,6 +189,7 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
             f"<td>{_issue_link(worker)}</td>"
             f"<td>{_code(worker.get('provider_session_id'))}</td>"
             f"<td>{_text(worker.get('attempt'))}</td>"
+            f"<td>{_text(worker.get('security_profile'))}</td>"
             f"<td>{_code(worker.get('artifact_dir'))}</td>"
             f"<td>{_usage_cell(worker.get('usage'))}</td>"
             f"<td>{_event_cell(last)}{warning}</td>"
@@ -193,7 +197,15 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
         )
     return _table(
         "Active Workers",
-        ("Issue", "Provider Session", "Attempt", "Artifacts", "Usage", "Last Event"),
+        (
+            "Issue",
+            "Provider Session",
+            "Attempt",
+            "Security Profile",
+            "Artifacts",
+            "Usage",
+            "Last Event",
+        ),
         rows,
     )
 
@@ -225,6 +237,7 @@ def _recent_finished(items: list[dict[str, Any]]) -> str:
             f"<td class=\"{css}\">{_text(item.get('terminal_state'))}</td>"
             f"<td class=\"{css}\">{_text(item.get('task_outcome'))}</td>"
             f"<td>{_code(item.get('provider_session_id'))}</td>"
+            f"<td>{_text(item.get('security_profile'))}</td>"
             f"<td>{_code(item.get('artifact_dir'))}</td>"
             f"<td>{_usage_cell(item.get('usage'))}</td>"
             f"<td>{_text(item.get('last_event_at'))}</td>"
@@ -237,6 +250,7 @@ def _recent_finished(items: list[dict[str, Any]]) -> str:
             "Terminal",
             "Task Outcome",
             "Provider Session",
+            "Security Profile",
             "Artifacts",
             "Usage",
             "Last Event",

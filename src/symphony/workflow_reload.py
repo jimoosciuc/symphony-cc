@@ -242,6 +242,7 @@ def _changed_top_level_fields(old: WorkflowConfig, new: WorkflowConfig) -> list[
         "workspace",
         "claude",
         "github",
+        "security",
         "polling",
         "retry",
         "logging",
