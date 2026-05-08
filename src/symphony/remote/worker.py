@@ -11,9 +11,13 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
+from symphony.artifacts import redact_text
 from symphony.config import WorkflowConfig, build_config
 from symphony.remote.protocol import WorkerEvent, serialize_worker_event
+
+DEFAULT_REDACT_KEYS = ("token", "authorization", "api_key", "password", "secret")
 
 
 def main() -> int:
@@ -45,14 +49,13 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    raw_snapshot = _load_snapshot_for_redaction(args.snapshot_path)
+
     try:
         config = load_and_validate_snapshot(args.snapshot_path)
     except Exception as e:
-        # Redact token-looking values from error output
-        error_msg = str(e)
-        if "token" in error_msg.lower():
-            token = config.tracker.token if hasattr(config, "tracker") else ""
-            error_msg = error_msg.replace(token, "[REDACTED]")
+        # Redact error message using shared redaction
+        error_msg = _redact_error_message(str(e), raw_snapshot)
         print(f"Worker failed: {error_msg}", file=sys.stderr)
         return 1
 
@@ -104,6 +107,58 @@ def load_and_validate_snapshot(snapshot_path: Path) -> WorkflowConfig:
         raise ValueError(f"remote config missing required fields: {', '.join(missing)}")
 
     return config
+
+
+def _load_snapshot_for_redaction(snapshot_path: Path) -> dict[str, Any] | None:
+    """Best-effort snapshot load for failure-path redaction."""
+    try:
+        raw = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw
+
+
+def _redact_error_message(message: str, raw_snapshot: dict[str, Any] | None) -> str:
+    redact_keys = _snapshot_redact_keys(raw_snapshot)
+    return redact_text(
+        message,
+        redact_keys=redact_keys,
+        extra_secrets=tuple(_snapshot_secret_values(raw_snapshot, redact_keys=redact_keys)),
+    )
+
+
+def _snapshot_redact_keys(raw_snapshot: dict[str, Any] | None) -> tuple[str, ...]:
+    keys = list(DEFAULT_REDACT_KEYS)
+    logging_section = raw_snapshot.get("logging") if isinstance(raw_snapshot, dict) else None
+    configured = logging_section.get("redact_keys") if isinstance(logging_section, dict) else None
+    if isinstance(configured, list):
+        keys.extend(key for key in configured if isinstance(key, str))
+    return tuple(dict.fromkeys(keys))
+
+
+def _snapshot_secret_values(value: Any, *, redact_keys: tuple[str, ...]) -> list[str]:
+    deny = frozenset(key.lower() for key in redact_keys)
+    found: list[str] = []
+
+    def visit(node: Any, *, secret_context: bool = False) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                child_is_secret = (
+                    secret_context or isinstance(key, str) and key.lower() in deny
+                )
+                visit(child, secret_context=child_is_secret)
+            return
+        if isinstance(node, list):
+            for child in node:
+                visit(child, secret_context=secret_context)
+            return
+        if secret_context and isinstance(node, str) and node:
+            found.append(node)
+
+    visit(value)
+    return found
 
 
 def run_fake_worker(config: WorkflowConfig) -> int:
@@ -183,7 +238,6 @@ def run_fake_worker(config: WorkflowConfig) -> int:
     print(serialize_worker_event(event), flush=True)
 
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
