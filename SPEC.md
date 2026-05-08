@@ -391,6 +391,29 @@ logging:
   redact_keys: ["token", "authorization", "api_key", "password"]
 ```
 
+### 7.8 Security
+
+```yaml
+security:
+  profile: conservative
+```
+
+Security profiles define operator-facing trust boundaries and validate incompatible permission/profile combinations. Profiles are NOT host-level sandbox guarantees — they describe intended use and reject obviously unsafe configurations.
+
+Supported profiles:
+
+- `conservative` (default): Human-safer profile compatible with `acceptEdits`. Permission denials remain operator-visible through terminal outcome gates. Recommended for most workflows.
+- `trusted_unattended`: Intended for trusted repos/issues on trusted hosts. Allows unattended work and may use `bypassPermissions` when explicitly configured. Emits high-risk warning when combined with `bypassPermissions`.
+- `restricted`: Read-only / no privileged tool posture. Rejects `bypassPermissions`. Task completion may require handoff or blocked outcomes. Use when Claude should not execute privileged operations.
+
+Profile validation rules:
+
+- `restricted` + `claude.permission_mode: bypassPermissions` is a configuration error.
+- `trusted_unattended` + `bypassPermissions` is allowed but emits a high-risk warning.
+- `conservative` + `bypassPermissions` keeps the existing `bypassPermissions` warning.
+
+The `security` section is optional. When omitted, the profile defaults to `conservative`.
+
 ## 8. Workspace Contract
 
 Per-issue workspace path:

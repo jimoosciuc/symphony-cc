@@ -357,6 +357,16 @@ Symphony's stance:
 
 The provider MUST NOT auto-approve permission requests via any side channel.
 
+### 7.1 Security Profiles (M7.1)
+
+Security profiles (SPEC §7.8) validate `permission_mode` against operator intent:
+
+- `security.profile: restricted` rejects `bypassPermissions` at config load time.
+- `security.profile: trusted_unattended` with `bypassPermissions` emits a high-risk warning.
+- `security.profile: conservative` (default) keeps the existing `bypassPermissions` warning.
+
+Profiles are NOT host-level sandbox guarantees. They describe intended trust boundaries and reject obviously unsafe configurations. The provider does not enforce profiles at runtime — validation happens at config load.
+
 ## 8. Secret Redaction
 
 The provider never logs `claude.token`-style secrets (Claude Code authenticates

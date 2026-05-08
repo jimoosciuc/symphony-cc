@@ -80,6 +80,10 @@ ALLOWED_RETRY_RESUME_POLICIES: frozenset[str] = frozenset(
     {"resume_same_session", "new_session_with_summary", "fail_closed"}
 )
 
+ALLOWED_SECURITY_PROFILES: frozenset[str] = frozenset(
+    {"conservative", "trusted_unattended", "restricted"}
+)
+
 
 # -- Section dataclasses -------------------------------------------------------
 
@@ -256,12 +260,37 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SecurityConfig:
+    """Security profile configuration (M7.1 #100).
+
+    Defines operator-facing trust boundaries and validates incompatible
+    permission/profile combinations. Profiles are NOT host-level sandbox
+    guarantees — they describe intended use and reject obviously unsafe
+    configurations.
+
+    Profiles:
+    - ``conservative`` (default): human-safer profile compatible with
+      ``acceptEdits``; permission denials remain operator-visible through
+      terminal outcome gates.
+    - ``trusted_unattended``: intended for trusted repos/issues on trusted
+      hosts; allows unattended work and may use ``bypassPermissions`` when
+      explicitly configured (emits high-risk warning).
+    - ``restricted``: read-only / no privileged tool posture; rejects
+      ``bypassPermissions``; task completion may require handoff or blocked
+      outcomes.
+    """
+
+    profile: str = "conservative"
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowConfig:
     tracker: TrackerConfig
     agent: AgentConfig
     workspace: WorkspaceConfig
     claude: ClaudeConfig
     github: GitHubConfig
+    security: SecurityConfig = field(default_factory=SecurityConfig)
     polling: PollingConfig = field(default_factory=PollingConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
@@ -695,6 +724,24 @@ def _build_logging(raw: dict[str, Any], base_dir: Path) -> LoggingConfig:
     )
 
 
+def _build_security(raw: dict[str, Any]) -> SecurityConfig:
+    """Build SecurityConfig from optional 'security' section.
+
+    Defaults to 'conservative' profile if section is missing or profile
+    is unspecified.
+    """
+    section = raw.get("security") or {}
+    if not isinstance(section, dict):
+        raise ConfigError("security", f"must be a mapping, got {type(section).__name__}")
+    profile = _opt_str(section, "profile", "security", default="conservative") or "conservative"
+    if profile not in ALLOWED_SECURITY_PROFILES:
+        raise ConfigError(
+            "security.profile",
+            f"must be one of {sorted(ALLOWED_SECURITY_PROFILES)} (got {profile!r})",
+        )
+    return SecurityConfig(profile=profile)
+
+
 # -- Public entry point -------------------------------------------------------
 
 
@@ -734,13 +781,54 @@ def build_config(
         workspace=_build_workspace(raw, base_dir),
         claude=_build_claude(raw, base_dir, warnings=warnings),
         github=_build_github(raw),
+        security=_build_security(raw),
         polling=_build_polling(raw),
         retry=_build_retry(raw),
         logging=_build_logging(raw, base_dir),
         workflow_path=workflow_path.resolve(),
         warnings=tuple(warnings),
     )
+
+    # M7.1 #100: Cross-field validation for security profile + permission_mode.
+    _validate_security_profile(config, warnings)
+
+    # Re-freeze warnings after cross-field validation may have added more.
+    config = replace(config, warnings=tuple(warnings))
     return config
+
+
+def _validate_security_profile(config: WorkflowConfig, warnings: list[ConfigWarning]) -> None:
+    """Validate security profile against permission_mode (M7.1 #100).
+
+    - ``restricted`` + ``bypassPermissions`` is a config error.
+    - ``trusted_unattended`` + ``bypassPermissions`` is allowed but emits
+      a high-risk warning (in addition to the existing bypassPermissions warning).
+    - ``conservative`` + ``bypassPermissions`` keeps the existing warning.
+    """
+    profile = config.security.profile
+    permission_mode = config.claude.permission_mode
+
+    if profile == "restricted" and permission_mode == "bypassPermissions":
+        raise ConfigError(
+            "security.profile",
+            (
+                f"profile 'restricted' is incompatible with "
+                f"claude.permission_mode='bypassPermissions' — restricted profile "
+                f"requires permission prompts to remain active"
+            ),
+        )
+
+    if profile == "trusted_unattended" and permission_mode == "bypassPermissions":
+        warnings.append(
+            ConfigWarning(
+                location="security.profile",
+                message=(
+                    "profile 'trusted_unattended' with bypassPermissions disables all "
+                    "interactive permission checks; only use in fully trusted environments "
+                    "with trusted repos and issues"
+                ),
+            )
+        )
 
 
 def with_overrides(config: WorkflowConfig, **overrides: Any) -> WorkflowConfig:
