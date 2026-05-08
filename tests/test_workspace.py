@@ -181,7 +181,7 @@ def mgr_with_hooks(tmp_path: Path) -> WorkspaceManager:
             # assert timeout behavior.
             f"{sys.executable} -c 'import time; time.sleep(5)'"
         ),
-        hook_timeout_ms=200,
+        hook_timeout_ms=1000,
     )
     return WorkspaceManager(cfg)
 

@@ -17,8 +17,14 @@ repo).
 - `python >= 3.10`, `pip install -e ".[dev]"` from the repo root.
 - `claude` CLI on `PATH` and authenticated (`claude --version` should
   print).
-- A GitHub personal access token with at least `repo` scope, exported
-  as `GITHUB_TOKEN`.
+- A GitHub personal access token exported as `GITHUB_TOKEN`.
+  Recommended minimums:
+  - classic PAT against a private repo: `repo`;
+  - classic PAT against a public-only repo: `public_repo`;
+  - fine-grained PAT: repository metadata read, issues read/write,
+    contents read/write, and pull requests read/write for the target repo.
+  Add any extra scopes only for optional tools or custom workflows that
+  require them.
 - A target GitHub repository where you have permission to create
   branches and pull requests. The leader's `jimoosciuc/symphony-cc`
   works; a private throwaway repo also works.
@@ -59,6 +65,20 @@ repo).
    ```bash
    export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxx
    ```
+
+   Token/profile guidance:
+
+   - Local development: use `security.profile: conservative` with the
+     least-privilege token that can claim issues, push branches, and open
+     PRs in the target repo.
+   - Trusted unattended runs: use `security.profile: trusted_unattended`
+     only on trusted hosts, trusted repos, and trusted issues. Combining it
+     with `claude.permission_mode: bypassPermissions` is intentionally
+     high-trust.
+   - Restricted runs: use `security.profile: restricted` when Claude should
+     not use privileged operations. This rejects `bypassPermissions`; blocked
+     or handoff outcomes are expected when the task needs writes or shell
+     commands.
 
 4. **Sanity-check the workflow loads** without running anything:
 

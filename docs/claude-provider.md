@@ -377,7 +377,8 @@ shared redactor (SPEC §17) over `payload` with at minimum:
 `token`, `authorization`, `api_key`, `password`, plus any keys from
 `logging.redact_keys`. Redaction is recursive over dicts/lists; values matching
 common secret shapes (long base64-ish strings, `ghp_…`, `ghs_…`) are replaced
-with `<redacted>`.
+with `<redacted>`, including when token-shaped values are embedded inside a
+larger string such as a git remote URL or shell command.
 
 A unit test (see §11) MUST verify that a synthetic `GITHUB_TOKEN=ghp_xxxxxxxx`
 in a fake `tool_started` payload is replaced before write.
