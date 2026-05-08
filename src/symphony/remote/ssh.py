@@ -19,6 +19,7 @@ from symphony.remote.transport import RemoteRunResult
 
 # Keys to redact from SSH stderr and errors
 SSH_REDACT_KEYS = ("token", "authorization", "api_key", "password", "secret")
+REMOTE_TRACKER_TOKEN_PLACEHOLDER = "remote-worker-no-tracker-token"
 
 
 class SubprocessRunner(Protocol):
@@ -162,7 +163,6 @@ class SSHRemoteTransport:
             "symphony-worker",
             "--snapshot-path",
             remote_snapshot_path,
-            "--fake",  # For now, always use fake mode
         ]
 
         return ssh_args
@@ -183,7 +183,10 @@ class SSHRemoteTransport:
                 "kind": config.tracker.kind,
                 "owner": config.tracker.owner,
                 "repo": config.tracker.repo,
-                "token": config.tracker.token,
+                # Remote workers must not receive the coordinator's tracker API
+                # token. The placeholder preserves the current WorkflowConfig
+                # shape until a narrow git-only credential is modeled.
+                "token": REMOTE_TRACKER_TOKEN_PLACEHOLDER,
             },
             "agent": {"provider": config.agent.provider},
             "workspace": {"root": str(config.workspace.root)},
