@@ -152,6 +152,9 @@ class WorkspaceCleanupConfig:
     ``enabled`` first. When ``enabled=True``, at least one trigger MUST
     be set; the validator rejects an enabled-with-no-trigger combo
     because such a config would never delete anything (operator error).
+
+    ``max_age_days=0`` is normalized to ``None`` / unset so operators can
+    disable age-based cleanup without removing the key.
     """
 
     enabled: bool = False
@@ -505,11 +508,12 @@ def _build_workspace(raw: dict[str, Any], base_dir: Path) -> WorkspaceConfig:
 def _build_workspace_cleanup(raw: Any, *, location: str) -> WorkspaceCleanupConfig:
     """Build the optional ``workspace.cleanup`` subtree (M5.6 #65).
 
-    Permissive on absence (defaults `enabled=False`); strict on shape so
-    a typo like ``on_terminal_issuee`` fails at workflow load instead of
-    being silently ignored. Validates the enabled-with-no-trigger combo
-    that #66's executor would treat as a no-op — reject at load time so
-    operators don't ship a config that never deletes anything.
+    Permissive on absence (defaults ``enabled=False``). Known keys are
+    strict on type/shape, but unknown keys are ignored by the shared
+    ``_opt_*`` helper pattern used across config sections. Validates the
+    enabled-with-no-trigger combo that #66's executor would treat as a
+    no-op — reject at load time so operators don't ship a config that
+    never deletes anything.
     """
     if not isinstance(raw, dict):
         raise ConfigError(location, f"must be a mapping, got {type(raw).__name__}")
