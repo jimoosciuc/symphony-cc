@@ -261,3 +261,5 @@ Recommended triage in priority order:
 - #63 — M5.4 artifacts/logs/runbook updates (operator surface for
   the new fields).
 - #64 — M5.5 E2E re-run gating on the new outcome contract.
+  See `docs/m5-e2e-evidence.md` for the worked happy-path /
+  permission-denied evidence pair.
