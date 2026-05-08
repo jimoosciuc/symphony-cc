@@ -6,6 +6,7 @@ from pathlib import Path
 
 from symphony.config import build_config
 from symphony.models import Issue
+from symphony.remote.artifacts import ArtifactCollectionResult
 from symphony.remote.plan import RemoteDispatchPlan, build_remote_dispatch_plan
 from symphony.remote.runner import RemoteDispatchRunner, RemoteDispatchRunResult
 from symphony.remote.transport import RemoteRunResult
@@ -104,6 +105,40 @@ class FakeTransportFactory:
         return self.transport
 
 
+class FakeArtifactCollector:
+    def __init__(
+        self,
+        result: ArtifactCollectionResult | Exception,
+        order: list[str],
+    ) -> None:
+        self.result = result
+        self.order = order
+        self.calls: list[dict[str, object]] = []
+
+    def collect(
+        self,
+        remote_root: str,
+        *,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        attempt: int,
+    ) -> ArtifactCollectionResult:
+        self.order.append("artifacts")
+        self.calls.append(
+            {
+                "remote_root": remote_root,
+                "owner": owner,
+                "repo": repo,
+                "issue_number": issue_number,
+                "attempt": attempt,
+            }
+        )
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
 def test_remote_dispatch_runner_success_calls_steps_in_order(tmp_path: Path):
     """Test runner materializes, uploads, and runs transport in order."""
     config = _config(tmp_path)
@@ -118,7 +153,16 @@ def test_remote_dispatch_runner_success_calls_steps_in_order(tmp_path: Path):
     )
     transport = FakeTransport(RemoteRunResult(), order)
     transport_factory = FakeTransportFactory(transport, order)
-    runner = RemoteDispatchRunner(uploader=uploader, transport_factory=transport_factory)
+    artifact_result = ArtifactCollectionResult(
+        local_root=tmp_path / "artifacts" / "test-owner_test-repo_42" / "1",
+        copied=("events.jsonl",),
+    )
+    artifact_collector = FakeArtifactCollector(artifact_result, order)
+    runner = RemoteDispatchRunner(
+        uploader=uploader,
+        transport_factory=transport_factory,
+        artifact_collector=artifact_collector,
+    )
 
     result = runner.run(plan, config)
 
@@ -129,7 +173,40 @@ def test_remote_dispatch_runner_success_calls_steps_in_order(tmp_path: Path):
     assert result.materialized.dispatch_path.exists()
     assert result.upload is uploader.result
     assert result.transport is transport.result
-    assert order == ["upload", "transport_factory", "transport"]
+    assert result.artifacts is artifact_result
+    assert order == ["upload", "transport_factory", "transport", "artifacts"]
+
+
+def test_remote_dispatch_runner_passes_artifact_inputs_from_plan(tmp_path: Path):
+    """Test artifact collector receives remote artifact path and issue identity."""
+    config = _config(tmp_path)
+    plan = build_remote_dispatch_plan(_issue(), attempt=2, config=config)
+    order: list[str] = []
+    uploader = FakeUploader(
+        PayloadUploadResult(uploaded=(plan.remote_snapshot_path, plan.remote_dispatch_path)),
+        order,
+    )
+    transport = FakeTransport(RemoteRunResult(), order)
+    transport_factory = FakeTransportFactory(transport, order)
+    artifact_result = ArtifactCollectionResult(local_root=tmp_path / "artifacts")
+    artifact_collector = FakeArtifactCollector(artifact_result, order)
+    runner = RemoteDispatchRunner(
+        uploader=uploader,
+        transport_factory=transport_factory,
+        artifact_collector=artifact_collector,
+    )
+
+    runner.run(plan, config)
+
+    assert artifact_collector.calls == [
+        {
+            "remote_root": plan.remote_artifact_path,
+            "owner": "test-owner",
+            "repo": "test-repo",
+            "issue_number": 42,
+            "attempt": 2,
+        }
+    ]
 
 
 def test_remote_dispatch_runner_passes_staged_paths_to_transport(tmp_path: Path):
@@ -156,27 +233,37 @@ def test_remote_dispatch_runner_passes_staged_paths_to_transport(tmp_path: Path)
 
 
 def test_remote_dispatch_runner_upload_failure_prevents_transport(tmp_path: Path):
-    """Test upload failure stops before SSH transport execution."""
+    """Test upload failure stops before transport and artifact collection."""
     config = _config(tmp_path)
     plan = build_remote_dispatch_plan(_issue(), attempt=1, config=config)
     order: list[str] = []
     uploader = FakeUploader(PayloadUploadResult(errors=("network failed",)), order)
     transport = FakeTransport(RemoteRunResult(), order)
     transport_factory = FakeTransportFactory(transport, order)
-    runner = RemoteDispatchRunner(uploader=uploader, transport_factory=transport_factory)
+    artifact_collector = FakeArtifactCollector(
+        ArtifactCollectionResult(local_root=tmp_path / "artifacts"),
+        order,
+    )
+    runner = RemoteDispatchRunner(
+        uploader=uploader,
+        transport_factory=transport_factory,
+        artifact_collector=artifact_collector,
+    )
 
     result = runner.run(plan, config)
 
     assert result.failed
     assert result.transport is None
+    assert result.artifacts is None
     assert transport.run_count == 0
     assert transport_factory.calls == []
+    assert artifact_collector.calls == []
     assert result.errors == ("upload failed: network failed",)
     assert order == ["upload"]
 
 
 def test_remote_dispatch_runner_transport_failure_propagates(tmp_path: Path):
-    """Test transport failure propagates through the combined result."""
+    """Test transport failure propagates and still allows artifact collection."""
     config = _config(tmp_path)
     plan = build_remote_dispatch_plan(_issue(), attempt=1, config=config)
     order: list[str] = []
@@ -186,16 +273,87 @@ def test_remote_dispatch_runner_transport_failure_propagates(tmp_path: Path):
     )
     transport_result = RemoteRunResult(errors=("SSH stderr: permission denied",), failed=True)
     transport = FakeTransport(transport_result, order)
+    artifact_result = ArtifactCollectionResult(
+        local_root=tmp_path / "artifacts",
+        copied=("terminal.json",),
+    )
+    artifact_collector = FakeArtifactCollector(artifact_result, order)
     runner = RemoteDispatchRunner(
         uploader=uploader,
         transport_factory=FakeTransportFactory(transport, order),
+        artifact_collector=artifact_collector,
     )
 
     result = runner.run(plan, config)
 
     assert result.failed
     assert result.transport is transport_result
+    assert result.artifacts is artifact_result
     assert result.errors == transport_result.errors
+    assert order == ["upload", "transport_factory", "transport", "artifacts"]
+
+
+def test_remote_dispatch_runner_artifact_errors_are_reflected(tmp_path: Path):
+    """Test artifact collection errors become combined runner errors."""
+    config = _config(tmp_path)
+    plan = build_remote_dispatch_plan(_issue(), attempt=1, config=config)
+    order: list[str] = []
+    uploader = FakeUploader(
+        PayloadUploadResult(uploaded=(plan.remote_snapshot_path, plan.remote_dispatch_path)),
+        order,
+    )
+    transport = FakeTransport(RemoteRunResult(), order)
+    artifact_result = ArtifactCollectionResult(
+        local_root=tmp_path / "artifacts",
+        errors=("events.jsonl: permission denied",),
+    )
+    runner = RemoteDispatchRunner(
+        uploader=uploader,
+        transport_factory=FakeTransportFactory(transport, order),
+        artifact_collector=FakeArtifactCollector(artifact_result, order),
+    )
+
+    result = runner.run(plan, config)
+
+    assert result.failed
+    assert result.artifacts is artifact_result
+    assert result.errors == artifact_result.errors
+
+
+def test_remote_dispatch_runner_artifact_exception_is_reflected_and_redacted(
+    tmp_path: Path,
+):
+    """Test collector exceptions are converted to redacted artifact errors."""
+    config = _config(tmp_path)
+    plan = build_remote_dispatch_plan(_issue(), attempt=1, config=config)
+    order: list[str] = []
+    uploader = FakeUploader(
+        PayloadUploadResult(uploaded=(plan.remote_snapshot_path, plan.remote_dispatch_path)),
+        order,
+    )
+    transport = FakeTransport(RemoteRunResult(), order)
+    artifact_collector = FakeArtifactCollector(
+        RuntimeError(f"failed with token {config.tracker.token}"),
+        order,
+    )
+    runner = RemoteDispatchRunner(
+        uploader=uploader,
+        transport_factory=FakeTransportFactory(transport, order),
+        artifact_collector=artifact_collector,
+    )
+
+    result = runner.run(plan, config)
+
+    assert result.failed
+    assert result.artifacts is not None
+    assert result.artifacts.local_root == (
+        config.claude.artifact_store / "test-owner_test-repo_42" / "1"
+    )
+    assert result.errors == result.artifacts.errors
+    errors = " ".join(result.errors)
+    assert "artifact collection failed:" in errors
+    assert config.tracker.token not in errors
+    assert "ghp_" not in errors
 
 
 def test_remote_dispatch_runner_errors_do_not_include_tracker_token(tmp_path: Path):
@@ -215,3 +373,27 @@ def test_remote_dispatch_runner_errors_do_not_include_tracker_token(tmp_path: Pa
     errors = " ".join(result.errors)
     assert config.tracker.token not in errors
     assert "ghp_" not in errors
+
+
+def test_remote_dispatch_runner_without_collector_skips_artifacts(tmp_path: Path):
+    """Test runner works without artifact collector (optional)."""
+    config = _config(tmp_path)
+    plan = build_remote_dispatch_plan(_issue(), attempt=1, config=config)
+    order: list[str] = []
+    uploader = FakeUploader(
+        PayloadUploadResult(uploaded=(plan.remote_snapshot_path, plan.remote_dispatch_path)),
+        order,
+    )
+    transport = FakeTransport(RemoteRunResult(), order)
+    transport_factory = FakeTransportFactory(transport, order)
+    runner = RemoteDispatchRunner(
+        uploader=uploader,
+        transport_factory=transport_factory,
+        artifact_collector=None,  # No collector
+    )
+
+    result = runner.run(plan, config)
+
+    assert result.ok
+    assert result.artifacts is None
+    assert order == ["upload", "transport_factory", "transport"]
