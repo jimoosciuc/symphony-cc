@@ -122,6 +122,46 @@ create_or_update_pr_link_comment(issue, pr) -> Result
 PR behavior may live in `github/pr.py` or be agent-managed through prompt
 policy, but the selected strategy must be documented.
 
+## Workflow Reload Boundary
+
+Implement workflow reload as a small boundary around the existing workflow
+loader/config layer. The orchestrator should only know this behavior:
+
+```text
+load_initial(workflow_path) -> WorkflowSnapshot
+maybe_reload(previous_snapshot) -> ReloadResult
+```
+
+Recommended model:
+
+- `WorkflowSnapshot`
+  - parsed prompt template
+  - typed `WorkflowConfig`
+  - workflow path
+  - file identity metadata: mtime, size, optional inode when available
+  - `revision`
+  - `loaded_at`
+- `ReloadResult`
+  - `current_snapshot`
+  - `changed`
+  - `reloaded`
+  - `error`
+  - `dispatch_paused`
+
+Design rules for implementation issues:
+
+- The first implementation should poll workflow file metadata at the start of
+  each orchestrator poll cycle; do not add a required file watcher.
+- Active workers keep the `WorkflowSnapshot` captured at worker-attempt start.
+  Do not mutate an active Claude session's prompt/config after reload.
+- New dispatches use the latest last-known-good snapshot.
+- Retry attempts started after reload use the latest last-known-good snapshot
+  while preserving retry state and session metadata.
+- If a changed workflow file fails parse/validation, keep the old snapshot for
+  active-worker reconciliation but pause new dispatch by default.
+- Surface reload success/failure through structured logs and artifacts.
+- Keep the status API optional; reload must not depend on dashboard work.
+
 ## Event Contract
 
 Every provider event should include:
@@ -197,4 +237,3 @@ Skipped tests should report as skipped, not silently pass.
 - README or docs are updated for new CLI/config/runtime behavior.
 - Live tests are skipped unless credentials and opt-in env vars exist.
 - No Linear or Codex provider behavior is introduced.
-

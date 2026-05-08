@@ -656,6 +656,76 @@ Worker attempt:
 11. Run `after_run`.
 12. Release claim and update issue/PR comments.
 
+### 14.1 Workflow Reload Semantics
+
+Workflow reload is a control-plane feature for `WORKFLOW.md` and typed
+configuration. It is not a general workflow engine and MUST NOT require the
+optional status API.
+
+Reload trigger strategy for the first implementation:
+
+- The orchestrator SHOULD poll the workflow file metadata at the beginning of a
+  poll cycle, before fetching candidate issues.
+- A reload is attempted when the workflow file mtime or size changes from the
+  last successfully observed value.
+- An explicit reload command or status API endpoint MAY be added later, but the
+  first implementation MUST work without it.
+- File-watch libraries are not required for MVP because polling fits the
+  existing daemon cadence and is easier to test deterministically.
+
+Last-known-good behavior:
+
+- The orchestrator keeps a last-known-good workflow snapshot containing the
+  parsed prompt template, typed config, workflow path, file identity metadata,
+  loaded-at timestamp, and a monotonically increasing workflow revision.
+- A reload only becomes current after parse, environment resolution,
+  normalization, and validation all succeed.
+- If reload fails, the orchestrator MUST keep using the previous
+  last-known-good snapshot.
+- If startup has no valid workflow snapshot, the daemon MUST fail closed because
+  there is no safe policy to run.
+- Reload failures MUST be surfaced through structured logs and artifacts, and
+  SHOULD include a GitHub/operator-facing note when a failure prevents new
+  dispatch.
+
+Effect on active workers:
+
+- Each worker attempt receives an immutable workflow snapshot when it starts.
+- Active workers continue with that snapshot for all continuation turns,
+  terminal routing, PR handoff, retry classification, and cleanup decisions
+  inside the current attempt.
+- Reloaded policy applies only to future dispatches and future retry attempts.
+- The orchestrator MUST NOT mutate the prompt/config of an in-flight Claude
+  session because that would make session evidence hard to audit.
+- Reconciliation that cancels a worker because issue state changed still uses
+  the worker's snapshot for release/comment behavior.
+
+Effect on future work:
+
+- New issue dispatch uses the current last-known-good snapshot.
+- A retry attempt that starts after a successful reload uses the current
+  last-known-good snapshot, but retry state and previous session metadata are
+  preserved.
+- Retry backoff timers are not reset by reload alone.
+- Changes to `agent.max_concurrency`, tracker labels, excluded labels, retry
+  limits, cleanup policy, and Claude settings apply only when the orchestrator
+  starts a new dispatch, retry attempt, or cleanup sweep after the reload.
+- Removing a label from `tracker.include_labels` does not cancel already active
+  workers by itself; normal reconciliation only cancels if the issue no longer
+  matches the active worker's snapshot.
+
+Error surfaces:
+
+- A successful reload SHOULD log `workflow_reloaded` with revision, workflow
+  path, and file identity metadata.
+- A failed reload SHOULD log `workflow_reload_failed` with revision attempted,
+  error location, redacted message, and whether dispatch was paused.
+- While a changed workflow file is invalid, the orchestrator SHOULD continue
+  reconciling active workers but SHOULD NOT dispatch new issues from the stale
+  snapshot unless the operator explicitly enables stale-dispatch behavior.
+- The default is fail-closed for new dispatch on invalid pending reload and
+  continue-safe for active workers.
+
 ## 15. Reconciliation
 
 The orchestrator SHOULD periodically refresh active issue states.
@@ -1011,4 +1081,3 @@ Skipped tests MUST report as skipped.
 - Retry/resume fixtures.
 - Optional `github_graphql` tool.
 - Optional status API if needed.
-
