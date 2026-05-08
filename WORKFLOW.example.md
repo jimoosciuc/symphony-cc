@@ -31,6 +31,14 @@ github:
 
 claude:
   model: claude-opus-4-7
+  # `acceptEdits` lets Claude write files but blocks Bash, AskUserQuestion,
+  # and other interactive tools. Stock unattended PR work that needs `git`,
+  # `gh`, or shell commands therefore CANNOT complete under `acceptEdits` —
+  # the run will look successful in tracker output but no commits or PR
+  # will land. Inspect `terminal.json:permission_denials_count` after a
+  # run; non-zero means Claude was bounced. Use `bypassPermissions` for
+  # truly unattended runs (only on trusted hosts) or keep `acceptEdits`
+  # for human-in-the-loop sessions where you'll grant tool calls.
   permission_mode: acceptEdits
   session_store: .symphony/sessions
   transcript_store: .symphony/transcripts
