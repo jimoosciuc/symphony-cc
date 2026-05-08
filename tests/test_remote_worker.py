@@ -11,7 +11,11 @@ from symphony.config import build_config
 from symphony.provider.fake import FakeProvider, FakeTurnScript
 from symphony.remote.dispatch import DispatchRequest
 from symphony.remote.protocol import parse_worker_event
-from symphony.remote.worker import _redact_error_message, run_real_worker
+from symphony.remote.worker import (
+    _redact_error_message,
+    build_worker_workspace_populator,
+    run_real_worker,
+)
 
 
 def _minimal_snapshot() -> dict:
@@ -43,7 +47,7 @@ def _minimal_snapshot() -> dict:
     }
 
 
-def _real_worker_config(tmp_path: Path):
+def _real_worker_config(tmp_path: Path, *, git_token: str | None = None):
     snapshot = _minimal_snapshot()
     snapshot["tracker"]["token"] = "remote-worker-no-tracker-token"
     snapshot["workspace"]["root"] = str(tmp_path / "remote" / "workspaces")
@@ -53,6 +57,8 @@ def _real_worker_config(tmp_path: Path):
     snapshot["remote"]["workspace_root"] = str(tmp_path / "remote" / "workspaces")
     snapshot["remote"]["artifact_root"] = str(tmp_path / "remote" / "artifacts")
     snapshot["remote"]["session_store"] = str(tmp_path / "remote" / "sessions")
+    if git_token is not None:
+        snapshot["remote"]["git_token"] = git_token
     return build_config(snapshot, workflow_path=tmp_path / "WORKFLOW.md")
 
 
@@ -302,6 +308,7 @@ async def test_real_worker_prepares_dispatch_workspace_and_artifacts(tmp_path: P
         config,
         dispatch,
         provider_factory=lambda config: provider,
+        workspace_populator=FakePopulator(),
         emit=lines.append,
     )
 
@@ -348,6 +355,7 @@ async def test_real_worker_runs_workspace_hooks_with_workspace_cwd(tmp_path: Pat
         config,
         dispatch,
         provider_factory=lambda config: FakeProvider(),
+        workspace_populator=FakePopulator(),
         emit=lambda line: None,
     )
 
@@ -372,6 +380,7 @@ async def test_real_worker_after_create_only_runs_for_fresh_workspace(tmp_path: 
             config,
             dispatch,
             provider_factory=lambda config: FakeProvider(),
+            workspace_populator=FakePopulator(),
             emit=lambda line: None,
         )
         assert code == 0
@@ -400,12 +409,46 @@ async def test_real_worker_calls_fake_populator_for_git_population(tmp_path: Pat
     ]
 
 
-async def test_real_worker_populator_failure_is_failed_terminal(tmp_path: Path):
-    """Populator failure emits worker_failed and writes failed terminal."""
-    config = _real_worker_config(tmp_path)
+def test_worker_git_populator_uses_remote_git_token(tmp_path: Path):
+    """Worker-side git populator consumes the narrow remote git credential."""
+    config = _real_worker_config(tmp_path, git_token="git-only-token")
+    config = replace(config, workspace=replace(config.workspace, populate="git"))
+
+    populator = build_worker_workspace_populator(config)
+
+    assert populator is not None
+    assert populator._tracker.token == "git-only-token"
+    assert populator._tracker.token != config.tracker.token
+
+
+async def test_real_worker_missing_git_token_fails_before_provider(tmp_path: Path):
+    """workspace.populate=git without git token fails before provider execution."""
+    config = _real_worker_config(tmp_path, git_token=None)
     config = replace(config, workspace=replace(config.workspace, populate="git"))
     dispatch = _dispatch(tmp_path)
-    populator = FakePopulator(fail_with=f"clone failed {config.tracker.token}")
+    provider = FakeProvider()
+    lines: list[str] = []
+
+    code = await run_real_worker(
+        config,
+        dispatch,
+        provider_factory=lambda config: provider,
+        emit=lines.append,
+    )
+
+    assert code == 1
+    assert provider.calls == []
+    events = [parse_worker_event(line) for line in lines]
+    assert events[-1].event == "worker_failed"
+    assert "remote.git_token is required" in events[-1].fields["message"]
+
+
+async def test_real_worker_populator_failure_is_failed_terminal(tmp_path: Path):
+    """Populator failure emits worker_failed and writes failed terminal."""
+    config = _real_worker_config(tmp_path, git_token="plain-git-secret")
+    config = replace(config, workspace=replace(config.workspace, populate="git"))
+    dispatch = _dispatch(tmp_path)
+    populator = FakePopulator(fail_with=f"clone failed {config.remote.git_token}")
     lines: list[str] = []
 
     code = await run_real_worker(
@@ -419,10 +462,10 @@ async def test_real_worker_populator_failure_is_failed_terminal(tmp_path: Path):
     assert code == 1
     events = [parse_worker_event(line) for line in lines]
     assert events[-1].event == "worker_failed"
-    assert config.tracker.token not in events[-1].fields["message"]
+    assert config.remote.git_token not in events[-1].fields["message"]
     terminal = json.loads((Path(dispatch.artifact_path) / "terminal.json").read_text())
     assert terminal["terminal_state"] == "failed"
-    assert config.tracker.token not in terminal["error"]
+    assert config.remote.git_token not in terminal["error"]
 
 
 async def test_real_worker_hook_failure_is_failed_terminal(tmp_path: Path):
@@ -436,6 +479,7 @@ async def test_real_worker_hook_failure_is_failed_terminal(tmp_path: Path):
         config,
         dispatch,
         provider_factory=lambda config: FakeProvider(),
+        workspace_populator=FakePopulator(),
         emit=lines.append,
     )
 
@@ -457,6 +501,7 @@ async def test_real_worker_rejects_workspace_outside_remote_root(tmp_path: Path)
         config,
         dispatch,
         provider_factory=lambda config: FakeProvider(),
+        workspace_populator=FakePopulator(),
         emit=lines.append,
     )
 
@@ -482,6 +527,7 @@ async def test_real_worker_provider_failure_writes_failed_terminal(tmp_path: Pat
         config,
         dispatch,
         provider_factory=lambda config: provider,
+        workspace_populator=FakePopulator(),
         emit=lines.append,
     )
 
@@ -512,6 +558,7 @@ async def test_real_worker_redacts_tracker_placeholder_from_errors_and_artifacts
         config,
         dispatch,
         provider_factory=lambda config: provider,
+        workspace_populator=FakePopulator(),
         emit=lines.append,
     )
 

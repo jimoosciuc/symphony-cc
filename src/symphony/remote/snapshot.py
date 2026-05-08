@@ -25,6 +25,19 @@ def build_config_snapshot(
     snapshot_workspace_root = (
         str(workspace_root) if workspace_root is not None else str(config.workspace.root)
     )
+    remote_section = {
+        "enabled": config.remote.enabled,
+        "host": config.remote.host,
+        "workspace_root": config.remote.workspace_root,
+        "artifact_root": config.remote.artifact_root,
+        "session_store": config.remote.session_store,
+        "worker_timeout_ms": config.remote.worker_timeout_ms,
+        "heartbeat_interval_ms": config.remote.heartbeat_interval_ms,
+        "stall_timeout_ms": config.remote.stall_timeout_ms,
+    }
+    if config.remote.git_token and config.remote.git_token != config.tracker.token:
+        remote_section["git_token"] = config.remote.git_token
+
     return {
         "tracker": {
             "kind": config.tracker.kind,
@@ -45,16 +58,12 @@ def build_config_snapshot(
             "artifact_store": str(config.claude.artifact_store),
         },
         "github": {},
-        "remote": {
-            "enabled": config.remote.enabled,
-            "host": config.remote.host,
-            "workspace_root": config.remote.workspace_root,
-            "artifact_root": config.remote.artifact_root,
-            "session_store": config.remote.session_store,
-            "worker_timeout_ms": config.remote.worker_timeout_ms,
-            "heartbeat_interval_ms": config.remote.heartbeat_interval_ms,
-            "stall_timeout_ms": config.remote.stall_timeout_ms,
+        "logging": {
+            "redact_keys": tuple(
+                dict.fromkeys((*config.logging.redact_keys, "git_token"))
+            ),
         },
+        "remote": remote_section,
     }
 
 

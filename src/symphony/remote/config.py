@@ -22,6 +22,7 @@ class RemoteConfig:
         workspace_root: Remote workspace directory (required when enabled)
         artifact_root: Remote artifact directory (required when enabled)
         session_store: Remote session store directory (required when enabled)
+        git_token: Optional narrow credential for git workspace population
         worker_timeout_ms: Maximum worker execution time in milliseconds
         heartbeat_interval_ms: Expected heartbeat interval in milliseconds
         stall_timeout_ms: Maximum time without heartbeat before stall detection
@@ -32,6 +33,7 @@ class RemoteConfig:
     workspace_root: str | None = None
     artifact_root: str | None = None
     session_store: str | None = None
+    git_token: str | None = None
     worker_timeout_ms: int = 7_200_000
     heartbeat_interval_ms: int = 30_000
     stall_timeout_ms: int = 300_000
