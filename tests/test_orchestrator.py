@@ -388,6 +388,20 @@ def test_redact_masks_token_shape_in_unknown_key() -> None:
     assert out["some_field"] == "<redacted>"
 
 
+def test_redact_masks_token_shape_inside_strings() -> None:
+    secret = "ghp_aaaabbbbccccdddd0000"
+    out = redact(
+        {
+            "remote": f"https://oauth2:{secret}@github.com/acme/proj.git",
+            "tool_input": f"export GITHUB_TOKEN={secret}",
+        },
+        redact_keys=(),
+    )
+    assert secret not in str(out)
+    assert out["remote"] == "https://oauth2:<redacted>@github.com/acme/proj.git"
+    assert out["tool_input"] == "export GITHUB_TOKEN=<redacted>"
+
+
 def test_redact_recurses_into_nested_structures() -> None:
     payload = {
         "outer": {"authorization": "Bearer ghp_aaaabbbbccccdddd0000"},
@@ -397,6 +411,33 @@ def test_redact_recurses_into_nested_structures() -> None:
     assert out["outer"]["authorization"] == "<redacted>"
     assert out["list"][0]["api_key"] == "<redacted>"
     assert out["list"][1]["normal"] == "value"
+
+
+def test_artifact_writer_redacts_tool_payload_and_git_remote(tmp_path: Path) -> None:
+    secret = "ghp_aaaabbbbccccdddd0000"
+    writer = ArtifactWriter(tmp_path / "artifacts", redact_keys=("token",))
+    writer.append_event(
+        AgentEvent(
+            event="tool_started",
+            timestamp=datetime(2026, 5, 8, tzinfo=timezone.utc),
+            session_id="sym-1",
+            provider="fake",
+            provider_session_id="provider-1",
+            issue_identifier="acme/proj#1",
+            attempt=1,
+            payload={
+                "tool_name": "Bash",
+                "input": {
+                    "command": f"git push https://oauth2:{secret}@github.com/acme/proj.git",
+                    "authorization": f"Bearer {secret}",
+                },
+            },
+        )
+    )
+
+    blob = (tmp_path / "artifacts" / "events.jsonl").read_text(encoding="utf-8")
+    assert secret not in blob
+    assert "<redacted>" in blob
 
 
 # -- Retry math --------------------------------------------------------------

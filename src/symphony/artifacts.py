@@ -33,9 +33,9 @@ REDACTED = "<redacted>"
 # Token shapes Symphony has been bitten by. Keep narrow — false positives
 # in event payloads are noisy.
 _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^gh[psaur]_[A-Za-z0-9]{20,}$"),  # GitHub tokens
-    re.compile(r"^sk-[A-Za-z0-9-_]{20,}$"),  # OpenAI-style
-    re.compile(r"^xox[baprs]-[A-Za-z0-9-]{20,}$"),  # Slack-style
+    re.compile(r"gh[psaur]_[A-Za-z0-9]{20,}"),  # GitHub tokens
+    re.compile(r"sk-[A-Za-z0-9-_]{20,}"),  # OpenAI-style
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,}"),  # Slack-style
 )
 
 
@@ -62,13 +62,22 @@ def _redact_inner(value: Any, *, deny: frozenset[str]) -> Any:
         return [_redact_inner(v, deny=deny) for v in value]
     if isinstance(value, tuple):
         return tuple(_redact_inner(v, deny=deny) for v in value)
-    if isinstance(value, str) and _looks_like_token(value):
-        return REDACTED
+    if isinstance(value, str):
+        return _redact_string(value)
     return value
 
 
 def _looks_like_token(value: str) -> bool:
-    return any(p.match(value) for p in _TOKEN_PATTERNS)
+    return any(p.fullmatch(value) for p in _TOKEN_PATTERNS)
+
+
+def _redact_string(value: str) -> str:
+    if _looks_like_token(value):
+        return REDACTED
+    redacted = value
+    for pattern in _TOKEN_PATTERNS:
+        redacted = pattern.sub(REDACTED, redacted)
+    return redacted
 
 
 def _json_default(value: Any) -> Any:

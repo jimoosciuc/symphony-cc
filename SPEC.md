@@ -503,8 +503,12 @@ adapter boundary MUST expose normalized models and errors.
 
 Required auth:
 
-- `GITHUB_TOKEN` or configured token with access to issues, contents, pull
-  requests, and project metadata when project integration is enabled.
+- `GITHUB_TOKEN` or configured token with access to repository metadata,
+  issues, contents, and pull requests. Classic PATs can use `repo` for private
+  repositories or `public_repo` for public-only repositories; fine-grained PATs
+  should grant repository metadata read, issues read/write, contents read/write,
+  and pull requests read/write. Project metadata is needed only when optional
+  project integration is enabled.
 
 Errors MUST distinguish:
 

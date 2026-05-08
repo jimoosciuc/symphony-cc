@@ -22,6 +22,13 @@ Tools are off by default. Each tool is gated by its own
 Runs one GitHub GraphQL operation under the same token
 (`tracker.token`) Symphony already uses for issue management.
 
+Use the same least-privilege token guidance as the main runbook:
+classic `repo` for private repositories, classic `public_repo` for
+public-only repositories, or a fine-grained token with metadata read,
+issues read/write, contents read/write, and pull requests read/write on
+the target repository. Add broader permissions only when the GraphQL
+query explicitly needs them.
+
 ### Enabling
 
 ```yaml
@@ -71,7 +78,8 @@ array. The auxiliary fields surface why a call failed:
   Symphony's `GitHubClient`; it does not enter the prompt, event
   payloads, or artifacts. The `<redacted>` machinery in
   `symphony.artifacts.redact` covers the defensive case where a token
-  shape leaks via a tool input.
+  shape leaks via a tool input, tool output, git remote URL, or operator
+  artifact.
 - **Fail-soft.** Validation failures and transport failures both
   return a structured envelope rather than raising into the SDK loop
   — Claude can react without stalling the session.
