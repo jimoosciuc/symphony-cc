@@ -12,7 +12,7 @@ from symphony.remote.protocol import ProtocolError, WorkerEvent, parse_worker_ev
 class RemoteTransportProtocol(Protocol):
     """Transport boundary for remote worker event streaming."""
 
-    def run(self, config: WorkflowConfig) -> "RemoteRunResult":
+    def run(self, config: WorkflowConfig) -> RemoteRunResult:
         """Run a remote worker and return parsed protocol events."""
 
 
