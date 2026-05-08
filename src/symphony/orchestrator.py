@@ -61,7 +61,7 @@ from symphony.recovery import (
     issue_is_actionable,
 )
 from symphony.retry import RetryState, next_backoff_ms
-from symphony.workspace import WorkspaceManager
+from symphony.workspace import WorkspaceManager, workspace_key_from_identifier
 
 _LOG = logging.getLogger("symphony.orchestrator")
 
@@ -164,10 +164,8 @@ class Orchestrator:
         # (workspace.cleanup.enabled=False keeps existing SPEC §8 reuse
         # semantics). When enabled, the worker finally block triggers
         # ``cleanup_for_terminal_issue`` and ``run_once`` triggers
-        # ``sweep_for_age``. ``cleanup_for_closed_pr`` is exposed on the
-        # executor but not auto-invoked from the orchestrator yet —
-        # requires a per-tick sweep that fetches linked PR state, which
-        # is intentionally deferred to a follow-up so #66 stays narrow.
+        # ``sweep_for_age`` and ``_sweep_for_closed_prs`` (the latter
+        # wires ``cleanup_for_closed_pr`` per #82).
         self._cleanup = WorkspaceCleanupExecutor(
             workspace_manager,
             self.config.workspace.cleanup,
@@ -190,6 +188,12 @@ class Orchestrator:
         # surface them in TickResult yet (#67 owns operator-facing
         # reporting).
         self._cleanup.sweep_for_age(active_identifiers=set(self.active.keys()))
+
+        # 0.5. M5.7 #66 / #82: closed/merged-PR workspace sweep, also
+        # before reconcile and using the same ``self.active`` snapshot
+        # for the same reason. No-op when workspace.cleanup.enabled or
+        # workspace.cleanup.on_closed_pr is False.
+        self._sweep_for_closed_prs()
 
         # 1. Reconcile currently-active workers against fresh issue state.
         await self._reconcile(result)
@@ -529,6 +533,88 @@ class Orchestrator:
             )
 
     # -- Reconciliation -----------------------------------------------------
+
+    def _sweep_for_closed_prs(self) -> None:
+        """Per-tick sweep that wires :meth:`cleanup_for_closed_pr` (#82).
+
+        For each per-issue workspace dir under ``workspace.root`` whose
+        key is NOT held by an active worker:
+
+        - Reconstruct a synthetic :class:`Issue` from the dir name
+          (``{owner}_{repo}_{number}``) using the configured tracker
+          ``owner``/``repo`` as the prefix anchor.
+        - Look up linked PRs via :meth:`tracker.find_linked_pull_requests`.
+        - If ANY linked PR is still ``"open"``, preserve the workspace
+          (executor returns ``KEPT_PR_OPEN``).
+        - If linked PRs exist and are ALL ``"closed"``/``"merged"``,
+          delete the workspace via :meth:`cleanup_for_closed_pr`,
+          preferring the ``"merged"`` state when both occur.
+        - Empty PR list → preserve (no terminal evidence).
+
+        Tracker errors are caught per-workspace so one bad PR lookup
+        does not abort the sweep. The sweep is a no-op when
+        ``workspace.cleanup.enabled`` or ``on_closed_pr`` is False.
+        """
+        cleanup_cfg = self.config.workspace.cleanup
+        if not cleanup_cfg.enabled or not cleanup_cfg.on_closed_pr:
+            return
+        root = self.workspaces.root
+        if not root.is_dir():
+            return
+        active_keys = {workspace_key_from_identifier(i) for i in self.active.keys()}
+        owner = self.config.tracker.owner
+        repo = self.config.tracker.repo
+        prefix = f"{owner}_{repo}_"
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir():
+                continue
+            if entry.name in active_keys:
+                continue
+            if not entry.name.startswith(prefix):
+                continue
+            try:
+                number = int(entry.name[len(prefix):])
+            except ValueError:
+                continue
+            synthetic_issue = Issue(
+                id=f"workspace_dir_{number}",
+                number=number,
+                identifier=f"{owner}/{repo}#{number}",
+                owner=owner,
+                repo=repo,
+                title="(synthetic from workspace dir)",
+                body="",
+                state="unknown",
+                url=f"https://github.com/{owner}/{repo}/issues/{number}",
+            )
+            try:
+                prs = self.tracker.find_linked_pull_requests(synthetic_issue)
+            except TrackerError as exc:
+                _LOG.warning(
+                    "closed-pr sweep: tracker lookup failed for %s: %s — skipping",
+                    entry.name,
+                    exc,
+                )
+                continue
+            if not prs:
+                continue
+            workspace = Workspace(
+                issue_identifier=synthetic_issue.identifier,
+                workspace_key=entry.name,
+                path=entry,
+                repo_path=entry,
+                created_at=self._clock(),
+                reused=True,
+            )
+            if any(p.state == "open" for p in prs):
+                # Defer to the executor for the KEPT_PR_OPEN decision +
+                # log line so operators see one consistent surface.
+                self._cleanup.cleanup_for_closed_pr(workspace, pr_state="open")
+                continue
+            # All PRs terminal; prefer "merged" over "closed" for the
+            # decision reason.
+            pr_state = "merged" if any(p.state == "merged" for p in prs) else "closed"
+            self._cleanup.cleanup_for_closed_pr(workspace, pr_state=pr_state)
 
     async def _reconcile(self, result: TickResult) -> None:
         if not self.active:
