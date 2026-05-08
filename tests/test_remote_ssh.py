@@ -1,11 +1,12 @@
 """Tests for SSH remote transport."""
 
+import json
 import subprocess
 from pathlib import Path
 
 from symphony.config import build_config
 from symphony.remote.protocol import WorkerEvent, serialize_worker_event
-from symphony.remote.ssh import SSHRemoteTransport
+from symphony.remote.ssh import REMOTE_TRACKER_TOKEN_PLACEHOLDER, SSHRemoteTransport
 
 
 class FakeSubprocessRunner:
@@ -98,7 +99,24 @@ def test_ssh_transport_builds_correct_command(tmp_path: Path):
     assert runner.last_args[1] == "user@remote-host"
     assert "symphony-worker" in runner.last_args
     assert "--snapshot-path" in runner.last_args
-    assert "--fake" in runner.last_args
+    assert "--fake" not in runner.last_args
+
+
+def test_ssh_transport_snapshot_omits_coordinator_tracker_token(tmp_path: Path):
+    """Remote worker snapshot must not receive tracker API credentials."""
+    raw = _minimal_config(tmp_path)
+    config = build_config(raw, workflow_path=tmp_path / "WORKFLOW.md")
+
+    runner = FakeSubprocessRunner(stdout="", returncode=0)
+    snapshot_path = tmp_path / "snapshot.json"
+    transport = SSHRemoteTransport(runner=runner, snapshot_path=snapshot_path)
+
+    transport.run(config)
+
+    snapshot_text = snapshot_path.read_text(encoding="utf-8")
+    snapshot = json.loads(snapshot_text)
+    assert config.tracker.token not in snapshot_text
+    assert snapshot["tracker"]["token"] == REMOTE_TRACKER_TOKEN_PLACEHOLDER
 
 
 def test_ssh_transport_parses_stdout_jsonl_events(tmp_path: Path):
