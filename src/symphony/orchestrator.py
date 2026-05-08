@@ -58,6 +58,7 @@ from symphony.recovery import (
     ACTION_SKIPPED,
     RecoveryDecision,
     discover_persisted_records,
+    discover_workspace_records,
     issue_is_actionable,
 )
 from symphony.retry import RetryState, next_backoff_ms
@@ -163,11 +164,8 @@ class Orchestrator:
         # M5.7 #66 cleanup executor. Disabled by default
         # (workspace.cleanup.enabled=False keeps existing SPEC §8 reuse
         # semantics). When enabled, the worker finally block triggers
-        # ``cleanup_for_terminal_issue`` and ``run_once`` triggers
-        # ``sweep_for_age``. ``cleanup_for_closed_pr`` is exposed on the
-        # executor but not auto-invoked from the orchestrator yet —
-        # requires a per-tick sweep that fetches linked PR state, which
-        # is intentionally deferred to a follow-up so #66 stays narrow.
+        # ``cleanup_for_terminal_issue`` and ``run_once`` triggers both
+        # age-based cleanup and closed-PR cleanup.
         self._cleanup = WorkspaceCleanupExecutor(
             workspace_manager,
             self.config.workspace.cleanup,
@@ -190,6 +188,7 @@ class Orchestrator:
         # surface them in TickResult yet (#67 owns operator-facing
         # reporting).
         self._cleanup.sweep_for_age(active_identifiers=set(self.active.keys()))
+        self._sweep_closed_pr_workspaces()
 
         # 1. Reconcile currently-active workers against fresh issue state.
         await self._reconcile(result)
@@ -206,6 +205,47 @@ class Orchestrator:
         while True:
             await self.run_once()
             await asyncio.sleep(interval)
+
+    def _sweep_closed_pr_workspaces(self) -> None:
+        cleanup = self.config.workspace.cleanup
+        if not cleanup.enabled or not cleanup.on_closed_pr:
+            return
+        active_identifiers = set(self.active.keys())
+        records = discover_workspace_records(self.config.claude.session_store)
+        for _record_path, record in records:
+            if record.issue_identifier in active_identifiers:
+                continue
+            if not record.workspace_path.exists():
+                continue
+            issue = _issue_from_session_record(record)
+            if issue is None:
+                _LOG.warning(
+                    "workspace cleanup skipped closed-PR sweep for malformed issue identifier: %s",
+                    record.issue_identifier,
+                )
+                continue
+            try:
+                prs = self.tracker.find_linked_pull_requests(issue)
+            except TrackerError as exc:
+                _LOG.warning(
+                    "workspace cleanup skipped closed-PR sweep for %s: PR lookup failed: %s",
+                    record.issue_identifier,
+                    exc,
+                )
+                continue
+            if not prs:
+                continue
+            terminal_pr = next((pr for pr in prs if pr.state in {"closed", "merged"}), None)
+            pr_state = terminal_pr.state if terminal_pr is not None else prs[0].state
+            workspace = Workspace(
+                issue_identifier=record.issue_identifier,
+                workspace_key=record.workspace_path.name,
+                path=record.workspace_path,
+                repo_path=record.workspace_path,
+                created_at=record.started_at,
+                reused=True,
+            )
+            self._cleanup.cleanup_for_closed_pr(workspace, pr_state=pr_state)
 
     # -- Restart recovery (#31) ---------------------------------------------
 
@@ -1238,6 +1278,39 @@ def _stamp_record_terminal(path: Path, record: SessionRecord, terminal: Terminal
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(existing, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def _issue_from_session_record(record: SessionRecord) -> Issue | None:
+    """Build the minimal Issue shell needed for linked-PR lookup.
+
+    ``SessionRecord.issue_identifier`` is authoritative metadata written
+    at dispatch time. Do not derive this from the workspace directory
+    name: workspace keys are sanitized and intentionally one-way.
+    """
+    ident = record.issue_identifier
+    if "#" not in ident or "/" not in ident:
+        return None
+    owner_repo, number_text = ident.rsplit("#", 1)
+    owner, repo = owner_repo.split("/", 1)
+    if not owner or not repo:
+        return None
+    try:
+        number = int(number_text)
+    except ValueError:
+        return None
+    if number != record.issue_number:
+        number = record.issue_number
+    return Issue(
+        id=ident,
+        number=number,
+        identifier=ident,
+        owner=owner,
+        repo=repo,
+        title="",
+        body="",
+        state="open",
+        url=f"https://github.com/{owner}/{repo}/issues/{number}",
+    )
 
 
 # -- turn_failed classification (#30) ---------------------------------------

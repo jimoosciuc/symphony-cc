@@ -147,16 +147,13 @@ class WorkspaceCleanupConfig:
     be set; the validator rejects an enabled-with-no-trigger combo
     because such a config would never delete anything (operator error).
 
-    Wiring caveat (M5.7 #66 → follow-up #82):
+    Wiring:
         - ``on_terminal_issue`` is auto-invoked from the orchestrator's
           worker finally block.
+        - ``on_closed_pr`` is auto-invoked from the orchestrator's
+          per-tick PR-state sweep.
         - ``max_age_days`` is auto-invoked from the orchestrator's
           per-tick ``sweep_for_age``.
-        - ``on_closed_pr`` is implemented in the executor BUT not yet
-          auto-invoked from the orchestrator. Setting this to ``true``
-          today is a silent no-op until #82 wires the per-tick PR-state
-          sweep. Use ``on_terminal_issue`` or ``max_age_days`` for
-          stable cleanup until then.
     """
 
     enabled: bool = False

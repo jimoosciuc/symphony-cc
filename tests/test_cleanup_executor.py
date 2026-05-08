@@ -23,6 +23,7 @@ Surface tested (mapping to #66 acceptance criteria):
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,7 @@ from symphony.cleanup import (
     WorkspaceCleanupExecutor,
 )
 from symphony.config import WorkspaceCleanupConfig, WorkspaceConfig
-from symphony.models import Issue, Workspace
+from symphony.models import Issue, PullRequest, Workspace
 from symphony.workspace import WorkspaceManager, workspace_key_from_identifier
 
 # -- Fixtures ----------------------------------------------------------------
@@ -53,6 +54,50 @@ def _issue(*, owner: str = "acme", repo: str = "proj", number: int = 1) -> Issue
         state="open",
         url=f"https://github.com/{owner}/{repo}/issues/{number}",
     )
+
+
+def _pull_request(*, issue: Issue, state: str) -> PullRequest:
+    return PullRequest(
+        id=f"PR_{issue.number}",
+        number=issue.number + 100,
+        owner=issue.owner,
+        repo=issue.repo,
+        title="pr",
+        url=f"https://github.com/{issue.owner}/{issue.repo}/pull/{issue.number + 100}",
+        state=state,
+        head_ref=f"symphony/{issue.owner}-{issue.repo}-{issue.number}",
+        base_ref="main",
+        linked_issue_identifier=issue.identifier,
+    )
+
+
+def _seed_session_record(
+    session_store: Path,
+    *,
+    issue: Issue,
+    workspace_path: Path,
+    session_id: str = "sym-test",
+) -> Path:
+    session_store.mkdir(parents=True, exist_ok=True)
+    path = session_store / f"{session_id}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "provider": "fake",
+                "issue_identifier": issue.identifier,
+                "issue_number": issue.number,
+                "workspace_path": str(workspace_path),
+                "artifact_dir": str(session_store.parent / "artifacts" / session_id),
+                "attempt": 1,
+                "started_at": "2026-05-08T00:00:00+00:00",
+                "terminal_state": "completed",
+                "session_store": str(session_store),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 def _make(
@@ -619,3 +664,264 @@ async def test_orchestrator_terminal_cleanup_skipped_for_incomplete_outcome(
     # misleading-success run.
     expected_path = tmp_path / "ws" / "acme_proj_1"
     assert expected_path.exists()
+
+
+async def test_orchestrator_closed_pr_sweep_deletes_inactive_workspace(
+    tmp_path: Path,
+) -> None:
+    from symphony.config import (
+        AgentConfig,
+        ClaudeConfig,
+        GitHubConfig,
+        LoggingConfig,
+        PollingConfig,
+        RetryConfig,
+        TrackerConfig,
+        WorkflowConfig,
+        WorkspaceConfig,
+    )
+    from symphony.github.tracker import FakeGitHubTracker
+    from symphony.orchestrator import Orchestrator
+    from symphony.provider.fake import FakeProvider
+
+    issue = _issue(owner="ac_me", repo="pr_oj", number=7)
+    cfg = WorkflowConfig(
+        tracker=TrackerConfig(
+            kind="github",
+            owner=issue.owner,
+            repo=issue.repo,
+            token="literal-token",
+            include_labels=("symphony-ready",),
+        ),
+        agent=AgentConfig(max_concurrency=1, max_turns=1),
+        workspace=WorkspaceConfig(
+            root=tmp_path / "ws",
+            cleanup=WorkspaceCleanupConfig(enabled=True, on_closed_pr=True),
+        ),
+        claude=ClaudeConfig(
+            model="fake-model",
+            permission_mode="acceptEdits",
+            session_store=tmp_path / "sessions",
+            transcript_store=tmp_path / "transcripts",
+            artifact_store=tmp_path / "artifacts",
+        ),
+        github=GitHubConfig(),
+        polling=PollingConfig(),
+        retry=RetryConfig(),
+        logging=LoggingConfig(),
+        workflow_path=tmp_path / "WORKFLOW.md",
+    )
+    tracker = FakeGitHubTracker(issues=[issue])
+    tracker.set_issue_labels(issue.identifier, ())
+    tracker.add_linked_pr(issue.identifier, _pull_request(issue=issue, state="merged"))
+    mgr = WorkspaceManager(cfg.workspace)
+    workspace = mgr.prepare(issue)
+    _seed_session_record(cfg.claude.session_store, issue=issue, workspace_path=workspace.path)
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=FakeProvider(),
+        workspace_manager=mgr,
+    )
+
+    await orch.run_once()
+
+    assert not workspace.path.exists()
+
+
+async def test_orchestrator_closed_pr_sweep_keeps_active_workspace(
+    tmp_path: Path,
+) -> None:
+    from symphony.config import (
+        AgentConfig,
+        ClaudeConfig,
+        GitHubConfig,
+        LoggingConfig,
+        PollingConfig,
+        RetryConfig,
+        TrackerConfig,
+        WorkflowConfig,
+        WorkspaceConfig,
+    )
+    from symphony.github.tracker import FakeGitHubTracker
+    from symphony.orchestrator import Orchestrator
+    from symphony.provider.fake import FakeProvider
+
+    issue = _issue(number=8)
+    cfg = WorkflowConfig(
+        tracker=TrackerConfig(
+            kind="github",
+            owner=issue.owner,
+            repo=issue.repo,
+            token="literal-token",
+            include_labels=("symphony-ready",),
+        ),
+        agent=AgentConfig(max_concurrency=1, max_turns=1),
+        workspace=WorkspaceConfig(
+            root=tmp_path / "ws",
+            cleanup=WorkspaceCleanupConfig(enabled=True, on_closed_pr=True),
+        ),
+        claude=ClaudeConfig(
+            model="fake-model",
+            permission_mode="acceptEdits",
+            session_store=tmp_path / "sessions",
+            transcript_store=tmp_path / "transcripts",
+            artifact_store=tmp_path / "artifacts",
+        ),
+        github=GitHubConfig(),
+        polling=PollingConfig(),
+        retry=RetryConfig(),
+        logging=LoggingConfig(),
+        workflow_path=tmp_path / "WORKFLOW.md",
+    )
+    tracker = FakeGitHubTracker(issues=[issue])
+    tracker.set_issue_labels(issue.identifier, ())
+    tracker.add_linked_pr(issue.identifier, _pull_request(issue=issue, state="merged"))
+    mgr = WorkspaceManager(cfg.workspace)
+    workspace = mgr.prepare(issue)
+    _seed_session_record(cfg.claude.session_store, issue=issue, workspace_path=workspace.path)
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=FakeProvider(),
+        workspace_manager=mgr,
+    )
+    orch.active[issue.identifier] = object()  # type: ignore[assignment]
+
+    orch._sweep_closed_pr_workspaces()
+
+    assert workspace.path.exists()
+
+
+async def test_orchestrator_closed_pr_sweep_keeps_open_pr_workspace(
+    tmp_path: Path,
+) -> None:
+    from symphony.config import (
+        AgentConfig,
+        ClaudeConfig,
+        GitHubConfig,
+        LoggingConfig,
+        PollingConfig,
+        RetryConfig,
+        TrackerConfig,
+        WorkflowConfig,
+        WorkspaceConfig,
+    )
+    from symphony.github.tracker import FakeGitHubTracker
+    from symphony.orchestrator import Orchestrator
+    from symphony.provider.fake import FakeProvider
+
+    issue = _issue(number=9)
+    cfg = WorkflowConfig(
+        tracker=TrackerConfig(
+            kind="github",
+            owner=issue.owner,
+            repo=issue.repo,
+            token="literal-token",
+            include_labels=("symphony-ready",),
+        ),
+        agent=AgentConfig(max_concurrency=1, max_turns=1),
+        workspace=WorkspaceConfig(
+            root=tmp_path / "ws",
+            cleanup=WorkspaceCleanupConfig(enabled=True, on_closed_pr=True),
+        ),
+        claude=ClaudeConfig(
+            model="fake-model",
+            permission_mode="acceptEdits",
+            session_store=tmp_path / "sessions",
+            transcript_store=tmp_path / "transcripts",
+            artifact_store=tmp_path / "artifacts",
+        ),
+        github=GitHubConfig(),
+        polling=PollingConfig(),
+        retry=RetryConfig(),
+        logging=LoggingConfig(),
+        workflow_path=tmp_path / "WORKFLOW.md",
+    )
+    tracker = FakeGitHubTracker(issues=[issue])
+    tracker.set_issue_labels(issue.identifier, ())
+    tracker.add_linked_pr(issue.identifier, _pull_request(issue=issue, state="open"))
+    mgr = WorkspaceManager(cfg.workspace)
+    workspace = mgr.prepare(issue)
+    _seed_session_record(cfg.claude.session_store, issue=issue, workspace_path=workspace.path)
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=FakeProvider(),
+        workspace_manager=mgr,
+    )
+
+    await orch.run_once()
+
+    assert workspace.path.exists()
+
+
+async def test_orchestrator_closed_pr_sweep_tracker_error_does_not_crash(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging as _logging
+
+    from symphony.config import (
+        AgentConfig,
+        ClaudeConfig,
+        GitHubConfig,
+        LoggingConfig,
+        PollingConfig,
+        RetryConfig,
+        TrackerConfig,
+        WorkflowConfig,
+        WorkspaceConfig,
+    )
+    from symphony.github.tracker import FakeGitHubTracker, TrackerError
+    from symphony.orchestrator import Orchestrator
+    from symphony.provider.fake import FakeProvider
+
+    class _FailingTracker(FakeGitHubTracker):
+        def find_linked_pull_requests(self, issue: Issue):
+            raise TrackerError("boom")
+
+    issue = _issue(number=10)
+    cfg = WorkflowConfig(
+        tracker=TrackerConfig(
+            kind="github",
+            owner=issue.owner,
+            repo=issue.repo,
+            token="literal-token",
+            include_labels=("symphony-ready",),
+        ),
+        agent=AgentConfig(max_concurrency=1, max_turns=1),
+        workspace=WorkspaceConfig(
+            root=tmp_path / "ws",
+            cleanup=WorkspaceCleanupConfig(enabled=True, on_closed_pr=True),
+        ),
+        claude=ClaudeConfig(
+            model="fake-model",
+            permission_mode="acceptEdits",
+            session_store=tmp_path / "sessions",
+            transcript_store=tmp_path / "transcripts",
+            artifact_store=tmp_path / "artifacts",
+        ),
+        github=GitHubConfig(),
+        polling=PollingConfig(),
+        retry=RetryConfig(),
+        logging=LoggingConfig(),
+        workflow_path=tmp_path / "WORKFLOW.md",
+    )
+    tracker = _FailingTracker(issues=[issue])
+    tracker.set_issue_labels(issue.identifier, ())
+    mgr = WorkspaceManager(cfg.workspace)
+    workspace = mgr.prepare(issue)
+    _seed_session_record(cfg.claude.session_store, issue=issue, workspace_path=workspace.path)
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=FakeProvider(),
+        workspace_manager=mgr,
+    )
+
+    with caplog.at_level(_logging.WARNING, logger="symphony.orchestrator"):
+        await orch.run_once()
+
+    assert workspace.path.exists()
+    assert any("PR lookup failed" in r.getMessage() for r in caplog.records)
