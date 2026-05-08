@@ -54,12 +54,12 @@ The orchestrator decides per-issue which mode to use based on workflow config.
 **Provider (ClaudeCodeProvider)**:
 - Runs on remote worker for remote execution
 - Uses remote worker's Claude CLI auth
-- Writes events.jsonl, terminal.json, etc. to remote artifact directory
+- Writes redacted events.jsonl, terminal.json, etc. to remote artifact directory
 
 **Artifact Collector**:
 - New component on coordinator
 - Copies artifacts from remote worker to coordinator's `claude.artifact_store`
-- Applies redaction before writing locally
+- Applies redaction again before writing locally
 
 ### Transport Protocol
 
@@ -106,8 +106,20 @@ Coordinator reads stdout line-by-line and:
 
 **Tracker token**:
 - Coordinator holds `tracker.token`
-- Remote worker never sees tracker token
 - Coordinator makes all tracker API calls
+- Remote worker never calls tracker APIs
+
+**Git credentials for workspace populate**:
+- When `workspace.populate: git` requires private repository access, the remote
+  worker needs git clone/fetch auth
+- Coordinator sends a narrowly-scoped git credential via config snapshot
+- The credential must not grant tracker API access beyond what git transport
+  requires
+- This is a trusted-host secret exposure: the remote host must be trusted
+- Credential transmitted via SSH (encrypted in transit)
+- Config snapshot written to remote `/tmp/snapshot-<uuid>.json` with `0600` permissions
+- Config snapshot deleted after worker completes
+- Credential never persisted in remote workspace `.git/config`
 
 **Claude CLI auth**:
 - Remote worker uses its own Claude CLI login (`claude login` run on remote host)
@@ -119,11 +131,6 @@ Coordinator reads stdout line-by-line and:
 - SSH config managed outside Symphony (e.g., `~/.ssh/config`)
 - Workflow config specifies remote host via `remote.host` field (new)
 
-**Git credentials**:
-- Remote worker uses `tracker.token` for git clone/fetch auth
-- Coordinator sends token via config snapshot (encrypted or via secure channel)
-- Token never persisted in remote workspace `.git/config`
-
 ### Workspace Semantics
 
 **Remote `workspace.root`**:
@@ -133,7 +140,7 @@ Coordinator reads stdout line-by-line and:
 
 **Populate behavior**:
 - Remote worker runs `workspace.populate: git` using same logic as local execution
-- Git clone/fetch uses `tracker.token` for auth
+- Git clone/fetch may use the narrow git credential from the config snapshot
 - Hooks (`after_create`, `before_run`, etc.) run on remote worker
 
 **Cleanup interaction**:
@@ -163,7 +170,7 @@ Coordinator reads stdout line-by-line and:
 **Collection process**:
 1. Remote worker writes artifacts to `<remote.artifact_root>/<owner>_<repo>_<n>/<attempt>/`
 2. On worker completion, coordinator runs `scp` or `rsync` to copy artifacts
-3. Coordinator applies redaction before writing to local `claude.artifact_store`
+3. Coordinator applies redaction again before writing to local `claude.artifact_store`
 4. Remote artifacts remain on remote host (cleanup per remote retention policy)
 
 **Partial artifacts on failure**:
@@ -172,9 +179,12 @@ Coordinator reads stdout line-by-line and:
 - Terminal outcome detector works with available artifacts
 
 **Redaction**:
-- Coordinator redacts secrets from collected artifacts before local write
-- Redaction keys from `logging.redact_keys` plus tracker token, SSH keys
-- Remote worker does not redact (coordinator is single redaction point)
+- Remote worker redacts secrets from status and provider events before streaming
+  to stdout
+- Remote worker redacts secrets from artifacts before writing to remote disk
+- Redaction keys from config snapshot `logging.redact_keys` plus git credential, SSH keys
+- Coordinator redacts again when collecting artifacts before local write (defense in depth)
+- Both remote and coordinator redaction use the same redaction logic
 
 ### Failure Taxonomy
 
@@ -217,7 +227,6 @@ Coordinator reads stdout line-by-line and:
 
 **Workflow reload** (M5.10):
 - Coordinator reloads workflow on poll-cycle boundaries
-- Active remote workers keep captured config snapshot
 - New dispatches use latest snapshot
 
 **Status snapshot** (M5.11):
@@ -234,9 +243,10 @@ Coordinator reads stdout line-by-line and:
 - Coordinator aggregates usage across local and remote workers
 
 **Security profiles** (M7.1, M7.2, M7.3):
-- Config snapshot includes `security.profile`
-- Remote worker enforces profile per existing validation
-- `restricted` profile rejects `bypassPermissions` on remote worker
+- Coordinator validates source-of-truth workflow config including `security.profile` at config load time
+- Remote worker defensively validates received config snapshot before execution
+- Remote validation reuses existing config/profile rules and does not create a
+  separate remote policy layer
 
 ### Configuration Schema
 
@@ -303,7 +313,7 @@ remote:
 
 ## Implementation Phases
 
-**Phase 1: Protocol and fake tests** (#109, depends on #108):
+**Phase 1: Protocol and fake tests** (future child issue, depends on this design):
 - Add `RemoteConfig` dataclass
 - Add `symphony-worker` CLI stub
 - Add fake remote worker for tests
@@ -311,13 +321,13 @@ remote:
 - Add artifact collector
 - Add fake protocol tests
 
-**Phase 2: SSH transport and live tests** (#110, depends on #109):
+**Phase 2: SSH transport and live tests** (future child issue, depends on Phase 1):
 - Implement SSH command execution
 - Implement status event streaming
 - Implement artifact collection via scp
 - Add opt-in live remote tests
 
-**Phase 3: Integration with orchestrator** (#111, depends on #110):
+**Phase 3: Integration with orchestrator** (future child issue, depends on Phase 2):
 - Add remote execution decision logic to orchestrator
 - Wire remote worker into dispatch flow
 - Update status snapshot to include remote workers
@@ -326,7 +336,8 @@ remote:
 ## Security Considerations
 
 **Secrets in transit**:
-- Config snapshot may contain `tracker.token`
+- Config snapshot may contain a narrow git credential when `workspace.populate:
+  git` requires private repository access
 - Use SSH encryption for config transmission
 - Consider encrypting config snapshot payload
 
@@ -336,8 +347,9 @@ remote:
 - Ensure snapshot has restrictive permissions (0600)
 
 **Artifact redaction**:
-- Coordinator is single redaction point
-- Remote artifacts may contain secrets until collected
+- Remote worker redacts streamed events and remote disk artifacts before they
+  leave or land on the remote host
+- Coordinator redacts again when collecting artifacts into the local store
 - Remote host must be trusted (same trust level as local execution)
 
 **SSH key management**:

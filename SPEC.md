@@ -457,8 +457,10 @@ When remote execution is enabled:
 - The orchestrator (coordinator) runs on the local host and manages tracker interactions, issue claims, and artifact collection.
 - Remote workers run on SSH-accessible hosts and execute provider sessions in isolated workspaces.
 - Remote workers use their own `workspace.root`, `claude.session_store`, and artifact directories independent of the coordinator.
-- The coordinator collects artifacts from remote workers after completion and applies redaction before local storage.
 - Remote workers MUST NOT interact with the tracker directly; all tracker operations remain coordinator responsibility.
+- When private git checkout/fetch requires credentials, the coordinator MAY send a narrowly-scoped git credential to the remote worker for `workspace.populate: git` only. This is trusted-host secret exposure and MUST NOT grant tracker API access beyond git transport needs.
+- Remote workers MUST redact streamed status/provider events before sending them to the coordinator and MUST redact artifacts before writing them to remote disk.
+- The coordinator collects artifacts from remote workers after completion and applies redaction again before local storage.
 
 See `docs/remote-worker-design.md` for the complete remote execution protocol, auth boundaries, artifact collection, failure taxonomy, and testing strategy.
 

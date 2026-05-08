@@ -203,8 +203,8 @@ Remote execution allows the orchestrator to dispatch work to remote hosts via SS
 Module boundaries:
 
 - **Coordinator (Orchestrator)**: Owns tracker interactions, issue claims, remote dispatch, artifact collection, status snapshot. Runs on local host.
-- **Remote Worker**: New CLI (`symphony-worker`) that runs on remote hosts. Receives dispatch commands, creates workspaces, runs provider sessions, streams status events, writes artifacts locally.
-- **Artifact Collector**: New component on coordinator. Copies artifacts from remote worker via scp/rsync, applies redaction, writes to local artifact store.
+- **Remote Worker**: New CLI (`symphony-worker`) that runs on remote hosts. Receives dispatch commands, creates workspaces, runs provider sessions, streams redacted status events, writes redacted artifacts locally.
+- **Artifact Collector**: New component on coordinator. Copies artifacts from remote worker via scp/rsync, applies redaction again, writes to local artifact store.
 - **SSH Client**: Thin wrapper around SSH command execution. Handles connection, command dispatch, stdout streaming.
 
 Key contracts:
@@ -212,8 +212,11 @@ Key contracts:
 - Remote worker streams JSONL status events to stdout: `worker_started`, `workspace_ready`, `session_started`, `heartbeat`, `turn_completed`, `worker_completed`.
 - Coordinator reads events line-by-line and updates in-memory worker state.
 - Remote worker never calls tracker; coordinator owns all tracker operations.
-- Config snapshot transmitted to remote worker includes `tracker.token` (for git auth), `security.profile`, and all workflow config.
-- Artifacts collected after worker completion; coordinator applies redaction before local write.
+- Config snapshot transmitted to remote worker includes `security.profile` and the workflow config needed for execution.
+- If `workspace.populate: git` requires private repository access, the coordinator may include a narrowly-scoped git credential in the config snapshot for clone/fetch only. This credential must not be used for tracker API calls.
+- Credential-bearing snapshots are trusted-host secret exposure and must be written with restrictive permissions and deleted after use.
+- Remote worker redacts streamed events and remote disk artifacts before they leave or land on the remote host.
+- Artifacts collected after worker completion; coordinator applies redaction again before local write.
 
 Testing strategy:
 
@@ -222,9 +225,9 @@ Testing strategy:
 
 Implementation phases:
 
-1. Protocol and fake tests (#109): Add `RemoteConfig`, `symphony-worker` CLI stub, fake remote worker, SSH client wrapper, artifact collector, fake protocol tests.
-2. SSH transport and live tests (#110): Implement SSH execution, event streaming, artifact collection, opt-in live tests.
-3. Orchestrator integration (#111): Add remote execution decision logic, wire into dispatch flow, update status snapshot and dashboard.
+1. Protocol and fake tests: Add `RemoteConfig`, `symphony-worker` CLI stub, fake remote worker, SSH client wrapper, artifact collector, fake protocol tests.
+2. SSH transport and live tests: Implement SSH execution, event streaming, artifact collection, opt-in live tests.
+3. Orchestrator integration: Add remote execution decision logic, wire into dispatch flow, update status snapshot and dashboard.
 
 ## Event Contract
 
