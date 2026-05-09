@@ -240,6 +240,43 @@ def test_remote_disabled_allows_missing_remote_roots() -> None:
     assert cfg.remote.workspace_root is None
 
 
+def test_lanes_default_to_empty_for_backwards_compatibility() -> None:
+    raw = _minimal_raw()
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.lanes == ()
+
+
+def test_lane_config_parses_label_filters_and_prompt_text() -> None:
+    raw = _minimal_raw()
+    raw["lanes"] = [
+        {
+            "name": "implementer",
+            "include_labels": ["status:ready-for-implementation"],
+            "exclude_labels": ["do-not-claim"],
+            "max_concurrency": 2,
+            "prompt_prefix": "You are the implementer.",
+            "prompt_suffix": "Open a PR when complete.",
+        }
+    ]
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    lane = cfg.lanes[0]
+    assert lane.name == "implementer"
+    assert lane.include_labels == ("status:ready-for-implementation",)
+    assert lane.exclude_labels == ("do-not-claim",)
+    assert lane.max_concurrency == 2
+    assert lane.prompt_prefix == "You are the implementer."
+    assert lane.prompt_suffix == "Open a PR when complete."
+
+
+def test_duplicate_lane_names_fail() -> None:
+    raw = _minimal_raw()
+    raw["lanes"] = [{"name": "reviewer"}, {"name": "reviewer"}]
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "lanes[1].name"
+
+
 def test_remote_enabled_valid_config_preserves_remote_paths() -> None:
     raw = _minimal_raw()
     raw["remote"] = {

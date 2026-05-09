@@ -25,6 +25,7 @@ def _snapshot() -> dict:
                 "issue_url": "https://github.com/acme/proj/issues/1",
                 "artifact_dir": "/tmp/artifacts/acme_proj_1/1",
                 "provider_session_id": "provider-1",
+                "lane": "implementer",
                 "attempt": 1,
                 "security_profile": "trusted_unattended",
                 "last_event": {
@@ -48,6 +49,7 @@ def _snapshot() -> dict:
                 "terminal_state": "completed",
                 "task_outcome": "completed_with_pr",
                 "provider_session_id": "provider-3",
+                "lane": "reviewer",
                 "security_profile": "trusted_unattended",
                 "artifact_dir": "/tmp/artifacts/acme_proj_3/1",
                 "last_event_at": "2026-05-08T00:02:00+00:00",
@@ -81,6 +83,8 @@ def test_dashboard_renders_core_operator_states() -> None:
     assert "acceptEdits" in html
     assert "acme/proj#1" in html
     assert "provider-1" in html
+    assert "implementer" in html
+    assert "reviewer" in html
     assert "permission denials: 1" in html
     assert "temporary failure" in html
     assert "completed_with_pr" in html

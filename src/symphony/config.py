@@ -289,6 +289,16 @@ class SecurityConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LaneConfig:
+    name: str
+    include_labels: tuple[str, ...] = ()
+    exclude_labels: tuple[str, ...] = ()
+    max_concurrency: int | None = None
+    prompt_prefix: str | None = None
+    prompt_suffix: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowConfig:
     tracker: TrackerConfig
     agent: AgentConfig
@@ -300,6 +310,7 @@ class WorkflowConfig:
     retry: RetryConfig = field(default_factory=RetryConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
+    lanes: tuple[LaneConfig, ...] = ()
     workflow_path: Path | None = None
     warnings: tuple[ConfigWarning, ...] = ()
 
@@ -749,6 +760,40 @@ def _build_security(raw: dict[str, Any]) -> SecurityConfig:
     return SecurityConfig(profile=profile)
 
 
+def _build_lanes(raw: dict[str, Any]) -> tuple[LaneConfig, ...]:
+    section = raw.get("lanes") or []
+    location = "lanes"
+    if not isinstance(section, list):
+        raise ConfigError(location, f"must be a list, got {type(section).__name__}")
+    lanes: list[LaneConfig] = []
+    seen: set[str] = set()
+    for index, item in enumerate(section):
+        lane_location = f"{location}[{index}]"
+        if not isinstance(item, dict):
+            raise ConfigError(
+                lane_location,
+                f"must be a mapping, got {type(item).__name__}",
+            )
+        name = _require_str(item, "name", lane_location)
+        if name in seen:
+            raise ConfigError(f"{lane_location}.name", f"duplicate lane name {name!r}")
+        seen.add(name)
+        max_concurrency = _opt_int(item, "max_concurrency", lane_location, default=0) or None
+        if max_concurrency is not None and max_concurrency < 1:
+            raise ConfigError(f"{lane_location}.max_concurrency", "must be >= 1")
+        lanes.append(
+            LaneConfig(
+                name=name,
+                include_labels=_opt_str_list(item, "include_labels", lane_location),
+                exclude_labels=_opt_str_list(item, "exclude_labels", lane_location),
+                max_concurrency=max_concurrency,
+                prompt_prefix=_opt_str(item, "prompt_prefix", lane_location),
+                prompt_suffix=_opt_str(item, "prompt_suffix", lane_location),
+            )
+        )
+    return tuple(lanes)
+
+
 def _build_remote(raw: dict[str, Any]) -> RemoteConfig:
     """Build RemoteConfig from optional 'remote' section.
 
@@ -860,6 +905,7 @@ def build_config(
         retry=_build_retry(raw),
         logging=_build_logging(raw, base_dir),
         remote=_build_remote(raw),
+        lanes=_build_lanes(raw),
         workflow_path=workflow_path.resolve(),
         warnings=tuple(warnings),
     )

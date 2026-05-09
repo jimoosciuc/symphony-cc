@@ -187,6 +187,7 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
         rows.append(
             "<tr>"
             f"<td>{_issue_link(worker)}</td>"
+            f"<td>{_text(worker.get('lane'))}</td>"
             f"<td>{_code(worker.get('provider_session_id'))}</td>"
             f"<td>{_text(worker.get('attempt'))}</td>"
             f"<td>{_text(worker.get('security_profile'))}</td>"
@@ -199,6 +200,7 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
         "Active Workers",
         (
             "Issue",
+            "Lane",
             "Provider Session",
             "Attempt",
             "Security Profile",
@@ -234,6 +236,7 @@ def _recent_finished(items: list[dict[str, Any]]) -> str:
         rows.append(
             "<tr>"
             f"<td>{_text(item.get('issue_identifier'))}</td>"
+            f"<td>{_text(item.get('lane'))}</td>"
             f"<td class=\"{css}\">{_text(item.get('terminal_state'))}</td>"
             f"<td class=\"{css}\">{_text(item.get('task_outcome'))}</td>"
             f"<td>{_code(item.get('provider_session_id'))}</td>"
@@ -247,6 +250,7 @@ def _recent_finished(items: list[dict[str, Any]]) -> str:
         "Recent Finished",
         (
             "Issue",
+            "Lane",
             "Terminal",
             "Task Outcome",
             "Provider Session",

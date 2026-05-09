@@ -77,6 +77,7 @@ def _worker_status(worker: Any) -> dict[str, Any]:
         "artifact_dir": str(worker.artifacts.root),
         "session_id": session.session_id,
         "provider_session_id": session.provider_session_id,
+        "lane": worker.lane.name if getattr(worker, "lane", None) else None,
         "attempt": session.attempt,
         "security_profile": _security_profile(worker),
         "turn_count": worker.turn_count,
