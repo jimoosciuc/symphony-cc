@@ -125,6 +125,11 @@ Remote Claude E2E:
 - `SYMPHONY_REMOTE_GIT_TOKEN`
 - local `ssh` and `scp`
 - remote `symphony-worker`, `claude`, and authenticated Claude credentials
+- `SYMPHONY_REMOTE_CLAUDE_REQUIRE_PR=1`: fail the run unless read-side GitHub
+  evidence finds a linked PR for the remote Claude issue.
+- `SYMPHONY_REMOTE_CLAUDE_PR_DETECT_ATTEMPTS` and
+  `SYMPHONY_REMOTE_CLAUDE_PR_DETECT_INTERVAL_SECONDS`: optional PR evidence
+  retry tuning for GitHub indexing delay.
 
 ## Evidence To Collect
 

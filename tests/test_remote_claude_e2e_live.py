@@ -23,6 +23,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,9 @@ from symphony.remote.snapshot import REMOTE_TRACKER_TOKEN_PLACEHOLDER
 
 _GATE_ENV = "SYMPHONY_RUN_REMOTE_CLAUDE_E2E"
 _DEFAULT_MODEL = "claude-opus-4-7"
+_REQUIRE_PR_ENV = "SYMPHONY_REMOTE_CLAUDE_REQUIRE_PR"
+_PR_DETECT_ATTEMPTS_ENV = "SYMPHONY_REMOTE_CLAUDE_PR_DETECT_ATTEMPTS"
+_PR_DETECT_INTERVAL_ENV = "SYMPHONY_REMOTE_CLAUDE_PR_DETECT_INTERVAL_SECONDS"
 
 
 def _gate() -> dict[str, str]:
@@ -143,6 +147,37 @@ def _config(tmp_path: Path, remote_env: dict[str, str]):
     )
 
 
+def _require_completed_with_pr() -> bool:
+    """Return whether remote Claude E2E must prove linked PR evidence."""
+    return os.environ.get(_REQUIRE_PR_ENV) == "1"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        pytest.fail(f"{name}={raw!r} is not a valid integer")
+    if value < 1:
+        pytest.fail(f"{name} must be >= 1")
+    return value
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        pytest.fail(f"{name}={raw!r} is not a valid number")
+    if value < 0:
+        pytest.fail(f"{name} must be >= 0")
+    return value
+
+
 def test_remote_claude_e2e_payload_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -155,6 +190,7 @@ def test_remote_claude_e2e_payload_contract(
         "git_token": "remote-git-secret",
     }
     monkeypatch.delenv("SYMPHONY_CLAUDE_TEST_MODEL", raising=False)
+    monkeypatch.delenv(_REQUIRE_PR_ENV, raising=False)
     config = _config(tmp_path, remote_env)
     issue = _issue()
     plan = build_remote_dispatch_plan(issue, attempt=1, config=config)
@@ -175,6 +211,36 @@ def test_remote_claude_e2e_payload_contract(
     assert dispatch["branch"]
     assert plan.remote_snapshot_path.endswith("/snapshot.json")
     assert plan.remote_dispatch_path.endswith("/dispatch.json")
+    assert _require_completed_with_pr() is False
+
+
+def test_remote_claude_e2e_can_require_completed_with_pr(monkeypatch) -> None:
+    monkeypatch.setenv(_REQUIRE_PR_ENV, "1")
+
+    assert _require_completed_with_pr() is True
+
+
+def test_remote_pr_required_assertion_accepts_linked_pr() -> None:
+    _assert_required_pr(
+        {
+            "pr_created": True,
+            "pr_number": 216,
+            "pr_url": "https://github.com/jimoosciuc/symphony-cc/pull/216",
+            "task_outcome": "completed_with_pr",
+        }
+    )
+
+
+def test_remote_pr_required_assertion_fails_without_linked_pr() -> None:
+    with pytest.raises(AssertionError, match="completed_with_pr"):
+        _assert_required_pr(
+            {
+                "pr_created": False,
+                "pr_number": None,
+                "pr_url": None,
+                "task_outcome": "incomplete_no_evidence",
+            }
+        )
 
 
 def test_live_remote_claude_worker_over_ssh(tmp_path: Path) -> None:
@@ -263,7 +329,11 @@ def test_live_remote_claude_worker_over_ssh(tmp_path: Path) -> None:
         assert terminal["execution"] == "remote"
         assert terminal["terminal_state"] in {"completed", "failed", "cancelled", "crashed"}
 
-        pr_summary = _lookup_pr_summary(issue, config=config)
+        pr_summary = _lookup_pr_summary_with_optional_retry(
+            issue,
+            config=config,
+            require_completed_with_pr=_require_completed_with_pr(),
+        )
         evidence = {
             "issue_identifier": issue.identifier,
             "remote_host": host,
@@ -272,7 +342,11 @@ def test_live_remote_claude_worker_over_ssh(tmp_path: Path) -> None:
             "events": event_names,
             "terminal": terminal,
             "provider_session_id": _provider_session_id(events),
+            "require_completed_with_pr": _require_completed_with_pr(),
+            "pr_detect_attempts": pr_summary["attempts"],
+            "pr_detect_wait_seconds": pr_summary["wait_seconds"],
             "pr_created": pr_summary["pr_created"],
+            "pr_number": pr_summary["pr_number"],
             "pr_url": pr_summary["pr_url"],
         }
         evidence_file = evidence_dir / f"remote_claude_e2e_issue_{issue.number}.json"
@@ -283,6 +357,8 @@ def test_live_remote_claude_worker_over_ssh(tmp_path: Path) -> None:
             worker,
             config=config,
         )
+        if _require_completed_with_pr():
+            _assert_required_pr(pr_summary)
     finally:
         _run(
             [
@@ -295,6 +371,28 @@ def test_live_remote_claude_worker_over_ssh(tmp_path: Path) -> None:
             ],
             timeout=30.0,
         )
+
+
+def _lookup_pr_summary_with_optional_retry(
+    issue: Issue,
+    *,
+    config,
+    require_completed_with_pr: bool,
+    sleep=time.sleep,
+) -> dict[str, Any]:
+    attempts = _env_int(_PR_DETECT_ATTEMPTS_ENV, 12) if require_completed_with_pr else 1
+    interval_seconds = (
+        _env_float(_PR_DETECT_INTERVAL_ENV, 5.0) if require_completed_with_pr else 0.0
+    )
+    summary: dict[str, Any] | None = None
+    for attempt in range(1, attempts + 1):
+        summary = _lookup_pr_summary(issue, config=config)
+        summary["attempts"] = attempt
+        summary["wait_seconds"] = interval_seconds * (attempt - 1)
+        if summary["task_outcome"] == "completed_with_pr" or attempt == attempts:
+            return summary
+        sleep(interval_seconds)
+    raise AssertionError("unreachable remote PR retry loop")
 
 
 def _lookup_pr_summary(issue: Issue, *, config) -> dict[str, Any]:
@@ -315,8 +413,27 @@ def _lookup_pr_summary(issue: Issue, *, config) -> dict[str, Any]:
         client.close()
     for entry in result.task_evidence:
         if entry.get("type") == "pr_linked":
-            return {"pr_created": True, "pr_url": entry.get("url")}
-    return {"pr_created": False, "pr_url": None}
+            return {
+                "task_outcome": result.task_outcome,
+                "pr_created": True,
+                "pr_number": entry.get("number"),
+                "pr_url": entry.get("url"),
+            }
+    return {
+        "task_outcome": result.task_outcome,
+        "pr_created": False,
+        "pr_number": None,
+        "pr_url": None,
+    }
+
+
+def _assert_required_pr(summary: dict[str, Any]) -> None:
+    assert (
+        summary.get("task_outcome") == "completed_with_pr"
+        and summary.get("pr_created") is True
+        and summary.get("pr_number")
+        and summary.get("pr_url")
+    ), f"remote Claude E2E required completed_with_pr; pr_summary={summary}"
 
 
 def _provider_session_id(events) -> str | None:
