@@ -25,6 +25,10 @@ from symphony.config import (
     LoggingConfig,
     PollingConfig,
     RetryConfig,
+    RoleConfig,
+    RoleGraphConfig,
+    RoleStateConfig,
+    RoleTransitionConfig,
     SecurityConfig,
     TrackerConfig,
     WorkflowConfig,
@@ -37,7 +41,7 @@ from symphony.orchestrator import Orchestrator, WorkerState
 from symphony.provider.base import ProviderRetryableError
 from symphony.provider.fake import FakeProvider, FakeTurnScript
 from symphony.retry import RetryState, next_backoff_ms
-from symphony.workflow import load_workflow
+from symphony.workflow import WorkflowFile, load_workflow
 from symphony.workflow_reload import WorkflowReloader
 from symphony.workspace import WorkspaceManager
 
@@ -132,6 +136,91 @@ def _make_orchestrator(
     return orch, tracker, prov
 
 
+def _role_graph() -> RoleGraphConfig:
+    return RoleGraphConfig(
+        roles={
+            "implementer": RoleConfig(
+                name="implementer",
+                actor="agent",
+                provider="claude_code",
+                can_claim=("ready_impl",),
+                claim_state="implementing",
+            ),
+            "reviewer": RoleConfig(
+                name="reviewer",
+                actor="human",
+                can_claim=("ready_review",),
+                claim_state="reviewing",
+            ),
+            "leader": RoleConfig(
+                name="leader",
+                actor="hybrid",
+                can_claim=("needs_design",),
+                claim_state="leader_reviewing",
+            ),
+        },
+        states={
+            "ready_impl": RoleStateConfig(
+                name="ready_impl",
+                labels=("symphony-ready-impl",),
+            ),
+            "implementing": RoleStateConfig(
+                name="implementing",
+                labels=("symphony-implementing",),
+            ),
+            "ready_review": RoleStateConfig(
+                name="ready_review",
+                labels=("symphony-ready-review",),
+            ),
+            "reviewing": RoleStateConfig(
+                name="reviewing",
+                labels=("symphony-reviewing",),
+            ),
+            "needs_design": RoleStateConfig(
+                name="needs_design",
+                labels=("symphony-needs-design",),
+                gate_owner="leader",
+            ),
+            "leader_reviewing": RoleStateConfig(
+                name="leader_reviewing",
+                labels=("symphony-leader-reviewing",),
+            ),
+            "done": RoleStateConfig(
+                name="done",
+                labels=("symphony-done",),
+                terminal=True,
+            ),
+        },
+        transitions={
+            "pr_delivered": RoleTransitionConfig(
+                name="pr_delivered",
+                role="implementer",
+                from_states=("implementing",),
+                to_state="ready_review",
+                requires=("pr_link",),
+            ),
+        },
+    )
+
+
+def _make_role_orchestrator(
+    tmp_path: Path,
+    *,
+    issues: list[Issue],
+    provider: FakeProvider | None = None,
+) -> tuple[Orchestrator, FakeGitHubTracker, FakeProvider]:
+    cfg = replace(_config(tmp_path), role_graph=_role_graph())
+    tracker = FakeGitHubTracker(issues=issues, ready_label="")
+    prov = provider or FakeProvider()
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=prov,
+        workspace_manager=WorkspaceManager(cfg.workspace),
+    )
+    return orch, tracker, prov
+
+
 class OverlapTrackingProvider(FakeProvider):
     """Fake provider that records concurrent send_input overlap."""
 
@@ -181,6 +270,119 @@ class RecordingProvider(FakeProvider):
         self.messages[session.issue_identifier] = message
         async for event in super().send_input(session, message):
             yield event
+
+
+async def test_role_graph_dispatch_claims_agent_state(tmp_path: Path) -> None:
+    issue = _issue(labels=("symphony-ready-impl",))
+    orch, tracker, _provider = _make_role_orchestrator(tmp_path, issues=[issue])
+
+    result = await orch.run_once()
+
+    state = tracker.states[issue.identifier]
+    assert result.dispatched == [issue.identifier]
+    assert any(entry[1] == "transition:claim:implementer" for entry in state.claim_history)
+    assert "transition: `claim:implementer`" in state.progress_comments[0]
+    assert orch.recent_finished[0]["role"] == "implementer"
+    assert orch.recent_finished[0]["role_state"] == "implementing"
+    request = json.loads(
+        Path(orch.recent_finished[0]["artifact_dir"], "request.json").read_text()
+    )
+    assert request["role"] == {
+        "role": "implementer",
+        "state": "implementing",
+        "actor": "agent",
+        "gate_owner": None,
+    }
+
+
+async def test_role_graph_exposes_role_context_to_prompt(tmp_path: Path) -> None:
+    issue = _issue(labels=("symphony-ready-impl",))
+    cfg = replace(_config(tmp_path), role_graph=_role_graph())
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("placeholder", encoding="utf-8")
+    workflow = WorkflowFile(
+        path=workflow_path,
+        config=cfg,
+        prompt_template=(
+            "role={{ role.role }} state={{ role.state }} actor={{ role.actor }} "
+            "issue={{ issue.identifier }}"
+        ),
+    )
+    tracker = FakeGitHubTracker(issues=[issue], ready_label="")
+    provider = RecordingProvider()
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=provider,
+        workspace_manager=WorkspaceManager(cfg.workspace),
+        workflow_reloader=WorkflowReloader.from_workflow(workflow),
+    )
+
+    await orch.run_once()
+
+    assert provider.messages[issue.identifier] == (
+        "role=implementer state=implementing actor=agent issue=acme/proj#1"
+    )
+
+
+async def test_role_graph_skips_human_state_and_exposes_waiting_status(
+    tmp_path: Path,
+) -> None:
+    issue = _issue(labels=("symphony-ready-review",))
+    orch, _tracker, provider = _make_role_orchestrator(tmp_path, issues=[issue])
+
+    result = await orch.run_once()
+
+    assert result.dispatched == []
+    assert provider.calls == []
+    waiting = orch.status_snapshot()["waiting_items"][0]
+    assert waiting["issue_identifier"] == issue.identifier
+    assert waiting["role"] == "reviewer"
+    assert waiting["state"] == "ready_review"
+    assert waiting["actor"] == "human"
+    assert waiting["reason"] == "waiting_for_human"
+
+
+async def test_role_graph_dispatches_hybrid_role_when_schema_marks_claimable(
+    tmp_path: Path,
+) -> None:
+    issue = _issue(labels=("symphony-needs-design",))
+    orch, tracker, _provider = _make_role_orchestrator(tmp_path, issues=[issue])
+
+    result = await orch.run_once()
+
+    state = tracker.states[issue.identifier]
+    assert result.dispatched == [issue.identifier]
+    assert any(entry[1] == "transition:claim:leader" for entry in state.claim_history)
+    assert orch.recent_finished[0]["role"] == "leader"
+    assert orch.recent_finished[0]["role_state"] == "leader_reviewing"
+    assert orch.recent_finished[0]["role_actor"] == "hybrid"
+    assert orch.recent_finished[0]["gate_owner"] == "leader"
+
+
+async def test_role_graph_skips_ambiguous_state(tmp_path: Path) -> None:
+    issue = _issue(labels=("symphony-ready-impl", "symphony-ready-review"))
+    orch, _tracker, provider = _make_role_orchestrator(tmp_path, issues=[issue])
+
+    result = await orch.run_once()
+
+    assert result.dispatched == []
+    assert provider.calls == []
+    waiting = orch.status_snapshot()["waiting_items"][0]
+    assert waiting["reason"] == "ambiguous_state"
+    assert waiting["ambiguous_states"] == ["ready_impl", "ready_review"]
+
+
+async def test_no_role_graph_dispatch_uses_legacy_claim_path(tmp_path: Path) -> None:
+    issue = _issue(labels=("symphony-ready",))
+    orch, tracker, _provider = _make_orchestrator(tmp_path, issues=[issue])
+
+    result = await orch.run_once()
+
+    history = [entry[1] for entry in tracker.states[issue.identifier].claim_history]
+    assert result.dispatched == [issue.identifier]
+    assert any(entry.startswith("claim:") for entry in history)
+    assert not any(entry.startswith("transition:claim:") for entry in history)
 
 
 async def test_default_continuation_renders_workflow_prompt(tmp_path: Path) -> None:

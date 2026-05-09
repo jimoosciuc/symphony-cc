@@ -34,6 +34,7 @@ def build_status_snapshot(orchestrator: Any) -> dict[str, Any]:
         "active_workers": [
             _worker_status(worker) for worker in orchestrator.active.values()
         ],
+        "waiting_items": list(getattr(orchestrator, "role_waiting", {}).values()),
         "retry_queue": [
             _retry_status(retry) for retry in orchestrator.retry_states.values()
         ],
@@ -78,6 +79,10 @@ def _worker_status(worker: Any) -> dict[str, Any]:
         "session_id": session.session_id,
         "provider_session_id": session.provider_session_id,
         "lane": worker.lane.name if getattr(worker, "lane", None) else None,
+        "role": getattr(worker, "role_name", None),
+        "role_state": getattr(worker, "role_state", None),
+        "role_actor": getattr(worker, "role_actor", None),
+        "gate_owner": getattr(worker, "gate_owner", None),
         "attempt": session.attempt,
         "security_profile": _security_profile(worker),
         "turn_count": worker.turn_count,

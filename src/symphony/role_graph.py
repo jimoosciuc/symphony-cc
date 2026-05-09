@@ -287,6 +287,85 @@ def plan_transition(
     )
 
 
+def plan_claim(
+    graph: RoleGraphConfig,
+    resolution: StateResolution,
+    *,
+    evidence: Iterable[str] = ("claim_comment",),
+) -> TransitionPlan | TransitionError:
+    """Plan the scheduler-owned claim transition for a resolved issue state."""
+
+    if resolution.state is None:
+        return TransitionError(
+            code=resolution.reason or "unresolved_state",
+            message="cannot claim an issue without a resolved role state",
+            state=None,
+        )
+    role = resolution.dispatch_role
+    if role is None:
+        return TransitionError(
+            code="no_dispatch_role",
+            message=f"state {resolution.state.name!r} has no dispatch role",
+            state=resolution.state.name,
+        )
+    if not role.claim_state:
+        return TransitionError(
+            code="missing_claim_state",
+            message=f"role {role.name!r} has no claim_state",
+            role=role.name,
+            state=resolution.state.name,
+        )
+    if role.claim_state not in graph.states:
+        return TransitionError(
+            code="unknown_claim_state",
+            message=f"role {role.name!r} claim_state {role.claim_state!r} is unknown",
+            role=role.name,
+            state=resolution.state.name,
+        )
+
+    transition = RoleTransitionConfig(
+        name=f"claim:{role.name}",
+        role=role.name,
+        from_states=(resolution.state.name,),
+        to_state=role.claim_state,
+        requires=("claim_comment",),
+    )
+    return _build_transition_plan(
+        graph,
+        role=role,
+        transition=transition,
+        from_state=resolution.state,
+        evidence=evidence,
+    )
+
+
+def plan_reverse_claim(
+    graph: RoleGraphConfig,
+    plan: TransitionPlan,
+    *,
+    reason: str,
+) -> TransitionPlan:
+    """Build a scheduler-owned rollback for a failed claim handoff."""
+
+    transition = RoleTransitionConfig(
+        name=f"release:{plan.role.name}:{reason}",
+        role=plan.role.name,
+        from_states=(plan.to_state.name,),
+        to_state=plan.from_state.name,
+        requires=("none",),
+    )
+    reverse = _build_transition_plan(
+        graph,
+        role=plan.role,
+        transition=transition,
+        from_state=plan.to_state,
+        evidence=(),
+    )
+    if isinstance(reverse, TransitionError):  # pragma: no cover - constructed from valid plan
+        raise ValueError(reverse.message)
+    return reverse
+
+
 def _next_role_for_state(graph: RoleGraphConfig, state: RoleStateConfig) -> str | None:
     if state.gate_owner:
         return state.gate_owner
@@ -294,6 +373,53 @@ def _next_role_for_state(graph: RoleGraphConfig, state: RoleStateConfig) -> str 
         if state.name in role.can_claim:
             return role.name
     return None
+
+
+def _build_transition_plan(
+    graph: RoleGraphConfig,
+    *,
+    role: RoleConfig,
+    transition: RoleTransitionConfig,
+    from_state: RoleStateConfig,
+    evidence: Iterable[str],
+) -> TransitionPlan | TransitionError:
+    to_state = graph.states.get(transition.to_state)
+    if to_state is None:
+        return TransitionError(
+            code="unknown_destination_state",
+            message=f"unknown destination state {transition.to_state!r}",
+            role=role.name,
+            transition=transition.name,
+            state=from_state.name,
+        )
+
+    provided = tuple(dict.fromkeys(evidence))
+    required = tuple(req for req in transition.requires if req != "none")
+    missing = tuple(req for req in required if req not in provided)
+    if missing:
+        return TransitionError(
+            code="missing_evidence",
+            message=f"missing required evidence: {', '.join(missing)}",
+            role=role.name,
+            transition=transition.name,
+            state=from_state.name,
+        )
+
+    next_role = _next_role_for_state(graph, to_state)
+    next_actor = graph.roles[next_role].actor if next_role else None
+    return TransitionPlan(
+        transition=transition,
+        role=role,
+        from_state=from_state,
+        to_state=to_state,
+        labels_to_remove=from_state.labels,
+        labels_to_add=to_state.labels,
+        required_evidence=required,
+        provided_evidence=provided,
+        next_actor=next_actor,
+        next_role=next_role,
+        gate_owner=to_state.gate_owner,
+    )
 
 
 def _resolution_reason(
