@@ -83,6 +83,8 @@ Full E2E:
 - authenticated `claude` CLI on `PATH`
 - installed `claude-agent-sdk`
 - `SYMPHONY_E2E_TEST_ISSUE`: optional issue number; otherwise the harness discovers a `symphony-ready` issue.
+- `SYMPHONY_E2E_PERMISSION_MODE=bypassPermissions`: recommended for production-readiness proof on trusted test issues.
+- `SYMPHONY_E2E_REQUIRE_PR=1`: fail the run unless GitHub-visible PR evidence is detected.
 
 Concurrency E2E:
 

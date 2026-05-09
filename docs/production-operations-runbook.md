@@ -178,6 +178,12 @@ make live-claude
 make live-e2e
 ```
 
+For the full PR-producing E2E proof on a trusted disposable issue, run:
+
+```bash
+SYMPHONY_E2E_PERMISSION_MODE=bypassPermissions SYMPHONY_E2E_REQUIRE_PR=1 make live-e2e
+```
+
 Add these before enabling the matching features:
 
 ```bash
