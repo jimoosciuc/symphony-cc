@@ -85,6 +85,7 @@ Full E2E:
 - `SYMPHONY_E2E_TEST_ISSUE`: optional issue number; otherwise the harness discovers a `symphony-ready` issue.
 - `SYMPHONY_E2E_PERMISSION_MODE=bypassPermissions`: recommended for production-readiness proof on trusted test issues.
 - `SYMPHONY_E2E_REQUIRE_PR=1`: fail the run unless GitHub-visible PR evidence is detected.
+- `SYMPHONY_E2E_PR_DETECT_ATTEMPTS` and `SYMPHONY_E2E_PR_DETECT_INTERVAL_SECONDS`: optional PR evidence retry tuning for GitHub indexing delay.
 
 Concurrency E2E:
 
