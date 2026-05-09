@@ -15,6 +15,8 @@ import pytest
 
 from symphony import __version__
 from symphony.cli import NotYetImplementedError, build_parser, main
+from symphony.models import Issue
+from symphony.workflow import load_workflow, render_prompt
 
 
 def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -31,6 +33,7 @@ def test_help_lists_run_command(capsys: pytest.CaptureFixture[str]) -> None:
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
     assert "run" in out
+    assert "init" in out
     assert "symphony" in out
 
 
@@ -58,6 +61,75 @@ def test_run_help_includes_once_and_log_level_flags(capsys: pytest.CaptureFixtur
     out = capsys.readouterr().out
     assert "--once" in out
     assert "--log-level" in out
+
+
+def test_init_github_implementer_writes_loadable_workflow(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token_value_1234567890")
+    target = tmp_path / "WORKFLOW.md"
+
+    rc = main(["init", "github-implementer", "--repo", "acme/proj", "--output", str(target)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "wrote" in out
+    text = target.read_text(encoding="utf-8")
+    assert "symphony-ready" in text
+    assert "workspace:\n  root: .symphony/workspaces\n  populate: git" in text
+    assert "model: claude-opus-4-7" in text
+    workflow = load_workflow(target)
+    assert workflow.config.tracker.owner == "acme"
+    assert workflow.config.tracker.repo == "proj"
+    assert workflow.config.workspace.populate == "git"
+    prompt = render_prompt(
+        workflow,
+        issue=Issue(
+            id="I_42",
+            number=42,
+            identifier="acme/proj#42",
+            owner="acme",
+            repo="proj",
+            title="Fix bug",
+            body="body",
+            state="open",
+            url="https://github.com/acme/proj/issues/42",
+        ),
+    )
+    assert "symphony/acme-proj-42" in prompt
+    assert "Closes acme/proj#42" in prompt
+
+
+def test_init_refuses_to_overwrite_without_force(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "WORKFLOW.md"
+    target.write_text("existing", encoding="utf-8")
+
+    rc = main(["init", "github-implementer", "--repo", "acme/proj", "--output", str(target)])
+
+    assert rc == 1
+    assert target.read_text(encoding="utf-8") == "existing"
+    assert "already exists" in capsys.readouterr().err
+
+
+def test_init_rejects_invalid_repo(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    rc = main(
+        [
+            "init",
+            "github-implementer",
+            "--repo",
+            "not-a-repo",
+            "--output",
+            str(tmp_path / "WORKFLOW.md"),
+        ]
+    )
+
+    assert rc == 1
+    assert "OWNER/REPO" in capsys.readouterr().err
 
 
 def test_run_missing_workflow_file_exits_1(
