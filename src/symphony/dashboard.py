@@ -94,6 +94,29 @@ def render_dashboard_html(snapshot: dict[str, Any]) -> str:
       font-weight: 600;
       white-space: nowrap;
     }}
+    .session-row td {{
+      padding-top: 0;
+      background: #fbfcfd;
+    }}
+    .session-timeline {{
+      display: grid;
+      gap: 6px;
+      padding: 8px 0 4px;
+    }}
+    .session-event {{
+      display: grid;
+      grid-template-columns: 165px 132px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+    }}
+    .session-event span {{
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }}
+    .session-event-name {{
+      color: var(--info);
+      font-weight: 600;
+    }}
     code {{
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
@@ -308,7 +331,11 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
             f"<td>{_code(worker.get('artifact_dir'))}</td>"
             f"<td>{_usage_cell(worker.get('usage'))}</td>"
             f"<td>{_event_cell(last)}{warning}</td>"
-            f"<td>{_session_signal_cell(worker)}</td>"
+            "</tr>"
+        )
+        rows.append(
+            "<tr class=\"session-row\">"
+            f"<td colspan=\"8\">{_session_timeline(worker)}</td>"
             "</tr>"
         )
     return _table(
@@ -322,7 +349,6 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
             "Artifacts",
             "Usage",
             "Last Event",
-            "Session Signal",
         ),
         rows,
     )
@@ -444,18 +470,26 @@ def _event_cell(event: dict[str, Any]) -> str:
     )
 
 
-def _session_signal_cell(worker: dict[str, Any]) -> str:
+def _session_timeline(worker: dict[str, Any]) -> str:
     events = worker.get("recent_events")
     if not isinstance(events, list) or not events:
         return '<span class="muted">None</span>'
     snippets: list[str] = []
-    for event in events[-4:]:
+    for event in events[-6:]:
         if not isinstance(event, dict):
             continue
         rendered = _session_event_summary(event)
         if rendered:
-            snippets.append(f"<div>{escape(rendered)}</div>")
-    return "".join(snippets) if snippets else '<span class="muted">None</span>'
+            snippets.append(
+                '<div class="session-event">'
+                f'<span class="muted">{escape(_short_time(event.get("timestamp")))}</span>'
+                f'<span class="session-event-name">{escape(_text(event.get("event")))}</span>'
+                f"<span>{escape(rendered)}</span>"
+                "</div>"
+            )
+    if not snippets:
+        return '<span class="muted">None</span>'
+    return '<div class="session-timeline">' + "".join(snippets) + "</div>"
 
 
 def _session_event_summary(event: dict[str, Any]) -> str:
@@ -485,6 +519,13 @@ def _truncate(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 1] + "…"
+
+
+def _short_time(value: Any) -> str:
+    text = _text(value)
+    if "T" in text:
+        return text.split("T", 1)[1].replace("+00:00", "Z")
+    return text
 
 
 def _usage_cell(usage: Any) -> str:

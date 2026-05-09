@@ -113,6 +113,9 @@ def test_dashboard_renders_core_operator_states() -> None:
     assert "implementer" in html
     assert "Working on PR checks" in html
     assert "tool_started: Bash" in html
+    assert "session-row" in html
+    assert "Session Signal" not in html
+    assert 'colspan="8"' in html
     assert "reviewer" in html
     assert "permission denials: 1" in html
     assert "temporary failure" in html
