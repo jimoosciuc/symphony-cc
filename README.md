@@ -100,11 +100,13 @@ their opt-in environment variables are set:
 - `SYMPHONY_RUN_GRAPHQL_TOOL_INTEGRATION=1`
 - `SYMPHONY_RUN_CLAUDE_INTEGRATION=1`
 - `SYMPHONY_RUN_FULL_E2E=1`
+- `SYMPHONY_RUN_REMOTE_CLAUDE_E2E=1`
 
 Live tests can be run locally through `make live-integration` or individually
-with `make live-github`, `make live-graphql`, and `make live-claude`. They are
-also available in GitHub Actions through the manual `live-integration` workflow;
-they are not required for default PR CI because they need credentials and real
+with `make live-github`, `make live-graphql`, `make live-claude`,
+`make live-remote`, `make live-remote-claude`, and `make live-e2e`. They are also
+available in GitHub Actions through the manual `live-integration` workflow; they
+are not required for default PR CI because they need credentials and real
 external services.
 
 #### Full E2E Harness
@@ -127,6 +129,26 @@ session → branch/commit/PR → evidence detector → terminal artifacts. This 
 Run with: `make live-e2e`
 
 This harness is opt-in and skipped by default to keep `make ci` fast and offline.
+
+#### Remote Claude E2E Harness
+
+The remote Claude harness (`make live-remote-claude`) stages a remote dispatch
+snapshot, uploads it over SSH, runs `symphony-worker` without `--fake`, and
+records remote worker events plus `terminal.json` evidence.
+
+Required environment:
+
+- `SYMPHONY_RUN_REMOTE_CLAUDE_E2E=1`
+- `GITHUB_TOKEN` for read-side PR evidence lookup
+- `SYMPHONY_REMOTE_TEST_HOST`
+- `SYMPHONY_REMOTE_WORKSPACE_ROOT`
+- `SYMPHONY_REMOTE_ARTIFACT_ROOT`
+- `SYMPHONY_REMOTE_SESSION_STORE`
+- `SYMPHONY_REMOTE_GIT_TOKEN`
+
+The remote host must have `symphony-worker`, `claude`, authenticated Claude
+credentials, and writable workspace/artifact/session roots. The harness remains
+opt-in; default CI only verifies payload assembly and redaction boundaries.
 
 ### Lint and format
 
