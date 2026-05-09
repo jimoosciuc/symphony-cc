@@ -93,6 +93,11 @@ Concurrency E2E:
 - `SYMPHONY_CONCURRENCY_E2E_ISSUES=<issue1>,<issue2>`
 - authenticated `claude` CLI on `PATH`
 - installed `claude-agent-sdk`
+- `SYMPHONY_CONCURRENCY_E2E_PERMISSION_MODE=bypassPermissions`: recommended
+  for trusted production-readiness smoke issues that must push branches and
+  open PRs.
+- `SYMPHONY_CONCURRENCY_E2E_REQUIRE_PR=1`: fail the run unless every finished
+  issue records `completed_with_pr` and linked PR evidence.
 
 Remote Claude E2E:
 

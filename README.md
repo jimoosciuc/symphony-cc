@@ -200,10 +200,15 @@ Optional environment:
 - `SYMPHONY_GITHUB_TEST_REPO`
 - `SYMPHONY_CLAUDE_TEST_MODEL`
 - `SYMPHONY_CONCURRENCY_E2E_PERMISSION_MODE`
+- `SYMPHONY_CONCURRENCY_E2E_REQUIRE_PR=1`
 
 The test issues should be isolated, disposable tasks that can safely run in
-parallel. Default CI only verifies the harness configuration contract and skip
-gate.
+parallel. For production-readiness proof, run trusted disposable issues with
+`SYMPHONY_CONCURRENCY_E2E_PERMISSION_MODE=bypassPermissions` and
+`SYMPHONY_CONCURRENCY_E2E_REQUIRE_PR=1`; the harness then fails unless every
+finished issue records `completed_with_pr` plus GitHub PR evidence in
+`terminal.json` and `concurrency_e2e_evidence.json`. Default CI only verifies
+the harness configuration contract and skip gate.
 
 #### Remote Claude E2E Harness
 
