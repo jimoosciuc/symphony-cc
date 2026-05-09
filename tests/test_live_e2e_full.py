@@ -52,6 +52,8 @@ from symphony.workspace import GitWorkspacePopulator, WorkspaceManager
 
 _GATE_ENV = "SYMPHONY_RUN_FULL_E2E"
 _DEFAULT_MODEL = "claude-opus-4-7"
+_PERMISSION_MODE_ENV = "SYMPHONY_E2E_PERMISSION_MODE"
+_REQUIRE_PR_ENV = "SYMPHONY_E2E_REQUIRE_PR"
 _REDACT_KEYS = ("token", "api_key", "secret", "password", "authorization")
 
 
@@ -99,13 +101,18 @@ def _build_claude_config(tmp_path: Path) -> ClaudeConfig:
     """Build Claude config with test-friendly timeouts."""
     return ClaudeConfig(
         model=os.environ.get("SYMPHONY_CLAUDE_TEST_MODEL", _DEFAULT_MODEL),
-        permission_mode="acceptEdits",
+        permission_mode=os.environ.get(_PERMISSION_MODE_ENV, "acceptEdits"),
         session_store=tmp_path / "sessions",
         transcript_store=tmp_path / "transcripts",
         artifact_store=tmp_path / "artifacts",
         turn_timeout_ms=300_000,  # 5 minutes for real work
         stall_timeout_ms=120_000,  # 2 minutes stall
     )
+
+
+def _require_completed_with_pr() -> bool:
+    """Return whether production-readiness mode requires GitHub PR evidence."""
+    return os.environ.get(_REQUIRE_PR_ENV) == "1"
 
 
 def _build_workspace_config(tmp_path: Path) -> WorkspaceConfig:
@@ -213,6 +220,7 @@ def test_harness_helpers_match_runtime_contracts(
 
     assert tracker_cfg.include_labels == ("symphony-ready",)
     assert claude_cfg.model == _DEFAULT_MODEL
+    assert claude_cfg.permission_mode == "acceptEdits"
     assert workspace_cfg.root == tmp_path / "workspaces"
 
     issue = Issue(
@@ -285,6 +293,19 @@ def test_harness_helpers_match_runtime_contracts(
     terminal_data = json.loads(terminal_path.read_text())
     assert terminal_data["provider_session_id"] == "provider-test"
     assert terminal_data["task_outcome"] == "completed_with_pr"
+
+
+def test_harness_allows_pr_capable_permission_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_redacted")
+    monkeypatch.setenv(_PERMISSION_MODE_ENV, "bypassPermissions")
+    monkeypatch.setenv(_REQUIRE_PR_ENV, "1")
+
+    claude_cfg = _build_claude_config(tmp_path)
+
+    assert claude_cfg.permission_mode == "bypassPermissions"
+    assert _require_completed_with_pr() is True
 
 
 @pytest.fixture
@@ -368,6 +389,8 @@ async def test_live_e2e_full_github_to_pr(
         session = await provider.start_session(issue, workspace.path, claude_cfg)
 
         evidence["provider_session_id"] = session.provider_session_id
+        evidence["permission_mode"] = claude_cfg.permission_mode
+        evidence["require_completed_with_pr"] = _require_completed_with_pr()
 
         # Send initial prompt
         prompt = f"Work on issue #{issue.number}: {issue.title}\n\n{issue.body}"
@@ -450,6 +473,12 @@ async def test_live_e2e_full_github_to_pr(
             assert summary["pr_url"] is not None
             assert summary["branch_name"] is not None
             assert summary["permission_denials_count"] == 0
+        elif _require_completed_with_pr():
+            pytest.fail(
+                "Full live E2E was run with "
+                f"{_REQUIRE_PR_ENV}=1 but task_outcome="
+                f"{detector_result.task_outcome!r}; evidence={evidence_file}"
+            )
 
         # Print evidence location (not credentials)
         print(f"\nE2E Evidence recorded: {evidence_file}")

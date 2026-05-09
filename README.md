@@ -162,6 +162,11 @@ session → branch/commit/PR → evidence detector → terminal artifacts. This 
   and `claude-agent-sdk`
 - Uses `claude-opus-4-7` by default (override with `SYMPHONY_CLAUDE_TEST_MODEL`)
 - Discovers a `symphony-ready` issue or uses `SYMPHONY_E2E_TEST_ISSUE=<number>`
+- Uses `SYMPHONY_E2E_PERMISSION_MODE=acceptEdits` by default. For production
+  readiness, run with `SYMPHONY_E2E_PERMISSION_MODE=bypassPermissions` on a
+  trusted test issue so Claude can push a branch and open a PR.
+- Set `SYMPHONY_E2E_REQUIRE_PR=1` when the run must fail unless the detector
+  observes `completed_with_pr`.
 - Records evidence to `evidence/e2e_evidence_issue_<N>.json` including:
   - `task_outcome` (completed_with_pr, completed_no_pr_declared, etc.)
   - `outcome_decided_by` (detector, timeout, error)
