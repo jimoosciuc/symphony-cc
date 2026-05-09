@@ -1,8 +1,10 @@
 """Tests for dashboard server (#168)."""
 
+from __future__ import annotations
+
 import json
-import time
 from http.client import HTTPConnection
+from typing import Any
 
 import pytest
 
@@ -10,8 +12,7 @@ from symphony.dashboard_server import DashboardServer
 
 
 @pytest.fixture
-def mock_status():
-    """Mock status snapshot."""
+def mock_status() -> dict[str, Any]:
     return {
         "state": "running",
         "active_workers": [],
@@ -22,163 +23,165 @@ def mock_status():
 
 
 @pytest.fixture
-def dashboard_server(mock_status):
-    """Dashboard server fixture."""
+def dashboard_server(mock_status: dict[str, Any]):
     server = DashboardServer(
         status_provider=lambda: mock_status,
-        port=18080,  # Use non-standard port for tests
+        port=0,
     )
     server.start()
-    time.sleep(0.1)  # Give server time to start
     yield server
     server.stop()
 
 
-def test_dashboard_server_starts_and_stops():
-    """Test dashboard server lifecycle."""
+def _get(server: DashboardServer, path: str) -> tuple[int, dict[str, str], bytes]:
+    conn = HTTPConnection(server.host, server.port)
+    try:
+        conn.request("GET", path)
+        response = conn.getresponse()
+        headers = {key: value for key, value in response.getheaders()}
+        body = response.read()
+        return response.status, headers, body
+    finally:
+        conn.close()
+
+
+def test_dashboard_server_starts_and_stops() -> None:
     server = DashboardServer(
         status_provider=lambda: {"state": "idle"},
-        port=18081,
+        port=0,
     )
     assert not server._running
 
-    server.start()
-    assert server._running
-
-    server.stop()
+    try:
+        server.start()
+        assert server._running
+        assert server.host == "127.0.0.1"
+        assert server.port > 0
+    finally:
+        server.stop()
     assert not server._running
 
 
-def test_health_endpoint(dashboard_server):
-    """Test /health endpoint returns 200 OK."""
-    conn = HTTPConnection("127.0.0.1", 18080)
-    conn.request("GET", "/health")
-    response = conn.getresponse()
+def test_health_endpoint(dashboard_server: DashboardServer) -> None:
+    status, _, body = _get(dashboard_server, "/health")
 
-    assert response.status == 200
-    assert response.read() == b"OK"
-    conn.close()
+    assert status == 200
+    assert body == b"OK"
 
 
-def test_json_status_endpoint(dashboard_server, mock_status):
-    """Test /status.json endpoint returns JSON snapshot."""
-    conn = HTTPConnection("127.0.0.1", 18080)
-    conn.request("GET", "/status.json")
-    response = conn.getresponse()
+def test_json_status_endpoint(
+    dashboard_server: DashboardServer,
+    mock_status: dict[str, Any],
+) -> None:
+    status, headers, body = _get(dashboard_server, "/status.json")
 
-    assert response.status == 200
-    assert response.getheader("Content-Type") == "application/json; charset=utf-8"
-    assert response.getheader("Cache-Control") == "no-cache, no-store, must-revalidate"
-
-    data = json.loads(response.read())
-    assert data == mock_status
-    conn.close()
+    assert status == 200
+    assert headers["Content-Type"] == "application/json; charset=utf-8"
+    assert headers["Cache-Control"] == "no-cache, no-store, must-revalidate"
+    assert json.loads(body) == mock_status
 
 
-def test_html_dashboard_endpoint(dashboard_server):
-    """Test / endpoint returns HTML with auto-refresh."""
-    conn = HTTPConnection("127.0.0.1", 18080)
-    conn.request("GET", "/")
-    response = conn.getresponse()
+def test_html_dashboard_endpoint(dashboard_server: DashboardServer) -> None:
+    status, headers, body = _get(dashboard_server, "/")
 
-    assert response.status == 200
-    assert response.getheader("Content-Type") == "text/html; charset=utf-8"
-    assert response.getheader("Cache-Control") == "no-cache, no-store, must-revalidate"
+    assert status == 200
+    assert headers["Content-Type"] == "text/html; charset=utf-8"
+    assert headers["Cache-Control"] == "no-cache, no-store, must-revalidate"
 
-    html = response.read().decode("utf-8")
+    html = body.decode("utf-8")
     assert "<!doctype html>" in html.lower()
     assert "Symphony Dashboard" in html
     assert 'http-equiv="refresh"' in html
-    conn.close()
 
 
-def test_not_found_endpoint(dashboard_server):
-    """Test 404 for unknown endpoints."""
-    conn = HTTPConnection("127.0.0.1", 18080)
-    conn.request("GET", "/unknown")
-    response = conn.getresponse()
+def test_not_found_endpoint(dashboard_server: DashboardServer) -> None:
+    status, _, _ = _get(dashboard_server, "/unknown")
 
-    assert response.status == 404
-    conn.close()
+    assert status == 404
 
 
-def test_localhost_binding():
-    """Test server binds to localhost by default."""
+def test_localhost_binding() -> None:
     server = DashboardServer(
         status_provider=lambda: {"state": "idle"},
-        port=18082,
+        port=0,
     )
-    server.start()
-    time.sleep(0.1)
-
-    # Should be accessible on localhost
-    conn = HTTPConnection("127.0.0.1", 18082)
-    conn.request("GET", "/health")
-    response = conn.getresponse()
-    assert response.status == 200
-    conn.close()
-
-    server.stop()
+    try:
+        server.start()
+        assert server.host == "127.0.0.1"
+        status, _, _ = _get(server, "/health")
+        assert status == 200
+    finally:
+        server.stop()
 
 
-def test_no_secret_leakage():
-    """Test that secrets are not exposed in JSON endpoint."""
+def test_no_secret_leakage() -> None:
+    raw_token = "ghp_abcdefghijklmnopqrstuvwxyz123456"
     status_with_secrets = {
         "state": "running",
         "config": {
             "tracker": {
-                "token": "[REDACTED]",
-                "api_key": "[REDACTED]",
+                "token": raw_token,
+                "api_key": "plain-api-key",
             }
         },
     }
 
     server = DashboardServer(
         status_provider=lambda: status_with_secrets,
-        port=18083,
+        port=0,
     )
-    server.start()
-    time.sleep(0.1)
+    try:
+        server.start()
+        _, _, body = _get(server, "/status.json")
+        text = body.decode("utf-8")
+        data = json.loads(body)
 
-    conn = HTTPConnection("127.0.0.1", 18083)
-    conn.request("GET", "/status.json")
-    response = conn.getresponse()
-    data = json.loads(response.read())
-
-    # Secrets should be redacted
-    assert data["config"]["tracker"]["token"] == "[REDACTED]"
-    assert data["config"]["tracker"]["api_key"] == "[REDACTED]"
-
-    conn.close()
-    server.stop()
+        assert raw_token not in text
+        assert "plain-api-key" not in text
+        assert data["config"]["tracker"]["token"] == "<redacted>"
+        assert data["config"]["tracker"]["api_key"] == "<redacted>"
+    finally:
+        server.stop()
 
 
-def test_html_escaping():
-    """Test that HTML special characters are escaped."""
+def test_html_escaping() -> None:
     status_with_html = {
         "state": "running",
         "active_workers": [
             {
-                "issue_title": "<script>alert('xss')</script>",
+                "issue_identifier": "<script>alert('xss')</script>",
+                "issue_url": 'https://example.com/"bad"',
             }
         ],
     }
 
     server = DashboardServer(
         status_provider=lambda: status_with_html,
-        port=18084,
+        port=0,
     )
-    server.start()
-    time.sleep(0.1)
+    try:
+        server.start()
+        _, _, body = _get(server, "/")
+        html = body.decode("utf-8")
 
-    conn = HTTPConnection("127.0.0.1", 18084)
-    conn.request("GET", "/")
-    response = conn.getresponse()
-    html = response.read().decode("utf-8")
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
+        assert 'href="https://example.com/&quot;bad&quot;"' in html
+    finally:
+        server.stop()
 
-    # HTML should be escaped
-    assert "<script>" not in html
-    assert "&lt;script&gt;" in html or "alert" not in html
 
-    conn.close()
-    server.stop()
+def test_provider_exception_does_not_leak_secret() -> None:
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+
+    def broken_status() -> dict[str, Any]:
+        raise RuntimeError(f"failed with {secret}")
+
+    server = DashboardServer(status_provider=broken_status, port=0)
+    try:
+        server.start()
+        status, _, body = _get(server, "/status.json")
+        assert status == 500
+        assert secret not in body.decode("utf-8")
+    finally:
+        server.stop()
