@@ -41,13 +41,17 @@ def find_linked_pull_requests(
     issue: Issue,
     config: GitHubConfig,
 ) -> list[PullRequest]:
-    """Return open PRs whose head branch matches Symphony's naming convention.
+    """Return open PRs linked to ``issue``.
 
     GitHub's REST list-pulls endpoint accepts a ``head`` filter of the form
     ``owner:branch``. This is sufficient for agent-managed PRs because
-    Symphony controls the branch name via the rendered prompt. Closed PRs
-    are excluded — the orchestrator only cares about a *currently open*
-    linked PR for reconciliation.
+    Symphony asks the agent to use a predictable branch name.
+
+    Some agents still choose their own branch names. When the deterministic
+    head-ref lookup finds nothing, fall back to scanning open PR bodies for a
+    GitHub closing reference to the issue (``Closes #N`` or
+    ``Closes owner/repo#N``). Closed PRs are excluded — the orchestrator only
+    cares about a *currently open* linked PR for reconciliation.
 
     Returns an empty list (not 404) when the agent hasn't pushed a branch
     yet. Other GitHub errors propagate; the caller catches at the tracker
@@ -61,7 +65,19 @@ def find_linked_pull_requests(
         )
     except GitHubNotFound:
         return []
-    return [_normalize_pull_request(pr, issue.identifier) for pr in raw or []]
+    head_matches = [_normalize_pull_request(pr, issue.identifier) for pr in raw or []]
+    if head_matches:
+        return head_matches
+
+    raw = client.get(
+        f"/repos/{issue.owner}/{issue.repo}/pulls",
+        params={"state": "open"},
+    )
+    return [
+        pr
+        for pr in (_normalize_pull_request(item, issue.identifier) for item in raw or [])
+        if _matches_issue_reference(pr.linked_issue_identifier, issue)
+    ]
 
 
 # -- Internals ----------------------------------------------------------------
@@ -101,3 +117,14 @@ def _normalize_pull_request(raw: dict, fallback_identifier: str) -> PullRequest:
         linked_issue_identifier=linked,
         raw=raw,
     )
+
+
+def _matches_issue_reference(reference: str | None, issue: Issue) -> bool:
+    if not reference:
+        return False
+    normalized = reference.strip()
+    return normalized in {
+        f"#{issue.number}",
+        f"{issue.owner}/{issue.repo}#{issue.number}",
+        issue.identifier,
+    }
