@@ -126,6 +126,15 @@ make ci
 provider/tracker integration tests. Live integration tests are skipped unless
 their opt-in environment variables are set:
 
+For focused reliability drills before an operated pilot, run:
+
+```bash
+make failure-drills
+```
+
+See `docs/failure-injection-drills.md` for the scenario matrix and manual live
+drills.
+
 - `SYMPHONY_RUN_GITHUB_INTEGRATION=1`
 - `SYMPHONY_RUN_GRAPHQL_TOOL_INTEGRATION=1`
 - `SYMPHONY_RUN_CLAUDE_INTEGRATION=1`

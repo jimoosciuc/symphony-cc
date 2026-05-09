@@ -27,6 +27,7 @@ Default required validation:
 
 ```bash
 make ci
+make failure-drills
 ```
 
 Individual live targets:
