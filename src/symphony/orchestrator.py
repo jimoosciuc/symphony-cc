@@ -1253,7 +1253,11 @@ class Orchestrator:
             )
             self.active.pop(worker.issue.identifier, None)
             result.finished.append(worker.issue.identifier)
-            self._remember_finished(worker, detector_result)
+            self._remember_finished(
+                worker,
+                detector_result,
+                permission_denials_count=permission_denials_count,
+            )
             if worker.terminal_state == Terminal.COMPLETED:
                 rs = self.retry_states.pop(worker.issue.identifier, None)
                 if rs is not None:
@@ -1428,6 +1432,8 @@ class Orchestrator:
         self,
         worker: WorkerState,
         detector_result: DetectorResult,
+        *,
+        permission_denials_count: int,
     ) -> None:
         self.recent_finished.append(
             {
@@ -1443,6 +1449,10 @@ class Orchestrator:
                     worker.terminal_state.value if worker.terminal_state else None
                 ),
                 "task_outcome": detector_result.task_outcome,
+                "outcome_decided_by": detector_result.outcome_decided_by,
+                "task_evidence": detector_result.task_evidence,
+                "no_pr_reason": detector_result.no_pr_reason,
+                "permission_denials_count": permission_denials_count,
                 "last_event_at": (
                     worker.last_event.timestamp.isoformat()
                     if worker.last_event is not None

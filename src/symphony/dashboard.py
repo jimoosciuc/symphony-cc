@@ -357,6 +357,7 @@ def _recent_finished(items: list[dict[str, Any]]) -> str:
             f"<td>{_text(item.get('security_profile'))}</td>"
             f"<td>{_code(item.get('artifact_dir'))}</td>"
             f"<td>{_usage_cell(item.get('usage'))}</td>"
+            f"<td>{_finished_signals_cell(item)}</td>"
             f"<td>{_text(item.get('last_event_at'))}</td>"
             "</tr>"
         )
@@ -371,6 +372,7 @@ def _recent_finished(items: list[dict[str, Any]]) -> str:
             "Security Profile",
             "Artifacts",
             "Usage",
+            "Signals",
             "Last Event",
         ),
         rows,
@@ -448,6 +450,56 @@ def _usage_cell(usage: Any) -> str:
     if cost:
         return f"<div>{escape(total)} tokens</div><div class=\"muted\">${escape(cost)}</div>"
     return f"<div>{escape(total)} tokens</div>"
+
+
+def _finished_signals_cell(item: dict[str, Any]) -> str:
+    parts: list[str] = []
+    denials = item.get("permission_denials_count")
+    if denials:
+        parts.append(f'<div class="bad">permission denials: {escape(_text(denials))}</div>')
+    no_pr_reason = item.get("no_pr_reason")
+    if no_pr_reason:
+        parts.append(f'<div>no PR: {escape(_text(no_pr_reason))}</div>')
+    evidence = item.get("task_evidence")
+    if isinstance(evidence, list):
+        for entry in evidence[:4]:
+            if isinstance(entry, dict):
+                rendered = _task_evidence_text(entry)
+                if rendered:
+                    parts.append(f"<div>{escape(rendered)}</div>")
+    decided_by = item.get("outcome_decided_by")
+    if decided_by:
+        parts.append(f'<div class="muted">decided by: {escape(_text(decided_by))}</div>')
+    if not parts:
+        return '<span class="muted">None</span>'
+    return "".join(parts)
+
+
+def _task_evidence_text(entry: dict[str, Any]) -> str:
+    kind = entry.get("type")
+    if kind == "permission_denied":
+        tool_names = entry.get("tool_names") or []
+        tools = ", ".join(str(name) for name in tool_names) if tool_names else "unknown"
+        return (
+            "permission_denied: "
+            f"denials_count={entry.get('denials_count', 0)}, tool_names={tools}"
+        )
+    if kind == "no_pr_declared":
+        return f"no_pr_declared: {entry.get('reason', '')}"
+    if kind == "pr_linked":
+        return f"pr_linked: #{entry.get('number', '')} {entry.get('url', '')}"
+    if kind == "branch_pushed":
+        return f"branch_pushed: {entry.get('name', '')}"
+    if kind == "diff_in_workspace":
+        return (
+            "diff_in_workspace: "
+            f"files_changed={entry.get('files_changed', 0)}, "
+            f"lines_added={entry.get('lines_added', 0)}, "
+            f"lines_removed={entry.get('lines_removed', 0)}"
+        )
+    if kind:
+        return _text(entry)
+    return ""
 
 
 def _outcome_class(item: dict[str, Any]) -> str:
