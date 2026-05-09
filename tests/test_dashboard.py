@@ -31,6 +31,10 @@ def _snapshot() -> dict:
                 "artifact_dir": "/tmp/artifacts/acme_proj_1/1",
                 "provider_session_id": "provider-1",
                 "lane": "implementer",
+                "role": "implementer",
+                "role_state": "implementing",
+                "role_actor": "agent",
+                "gate_owner": None,
                 "attempt": 1,
                 "security_profile": "trusted_unattended",
                 "last_event": {
@@ -52,6 +56,20 @@ def _snapshot() -> dict:
                 ],
             }
         ],
+        "waiting_items": [
+            {
+                "issue_identifier": "acme/proj#6",
+                "issue_url": "https://github.com/acme/proj/issues/6",
+                "issue_title": "Needs review",
+                "role": "reviewer",
+                "state": "ready_review",
+                "actor": "human",
+                "gate_owner": None,
+                "reason": "waiting_for_human",
+                "matched_labels": ["symphony-ready-review"],
+                "error": None,
+            }
+        ],
         "retry_queue": [
             {
                 "issue_identifier": "acme/proj#2",
@@ -67,6 +85,15 @@ def _snapshot() -> dict:
                 "task_outcome": "completed_with_pr",
                 "provider_session_id": "provider-3",
                 "lane": "reviewer",
+                "role": "implementer",
+                "role_state": "ready_review",
+                "role_actor": "human",
+                "gate_owner": None,
+                "role_transition": {
+                    "requested": "pr_delivered",
+                    "applied": "pr_delivered",
+                    "to_state": "ready_review",
+                },
                 "security_profile": "trusted_unattended",
                 "artifact_dir": "/tmp/artifacts/acme_proj_3/1",
                 "last_event_at": "2026-05-08T00:02:00+00:00",
@@ -115,7 +142,14 @@ def test_dashboard_renders_core_operator_states() -> None:
     assert "tool_started: Bash" in html
     assert "session-row" in html
     assert "Session Signal" not in html
-    assert 'colspan="8"' in html
+    assert 'colspan="9"' in html
+    assert "Waiting Role Gates" in html
+    assert "waiting_for_human" in html
+    assert "symphony-ready-review" in html
+    assert "state: implementing" in html
+    assert "state: ready_review" in html
+    assert "requested: pr_delivered" in html
+    assert "applied: pr_delivered" in html
     assert "reviewer" in html
     assert "permission denials: 1" in html
     assert "temporary failure" in html
@@ -158,6 +192,7 @@ def test_run_detail_collects_active_retry_finished_and_recovery_state() -> None:
     retry = run_detail(snapshot, "acme/proj#2")
     finished = run_detail(snapshot, "acme/proj#3")
     recovered = run_detail(snapshot, "acme/proj#5")
+    waiting = run_detail(snapshot, "acme/proj#6")
 
     assert active is not None
     assert active["active_worker"]["provider_session_id"] == "provider-1"
@@ -170,6 +205,8 @@ def test_run_detail_collects_active_retry_finished_and_recovery_state() -> None:
     assert blocked["finished_run"]["permission_denials_count"] == 1
     assert recovered is not None
     assert recovered["recovery_decisions"][0]["action"] == "released"
+    assert waiting is not None
+    assert waiting["waiting_item"]["role"] == "reviewer"
     assert run_detail(snapshot, "acme/proj#999") is None
 
 
@@ -194,6 +231,15 @@ def test_render_run_detail_html_shows_finished_evidence() -> None:
     assert "incomplete_permission_denied" in html
     assert "AskUserQuestion" in html
     assert "permission_denials_count" in html
+
+
+def test_render_run_detail_html_shows_waiting_role_gate() -> None:
+    html = render_run_detail_html(_snapshot(), "acme/proj#6")
+
+    assert html is not None
+    assert "Waiting Item" in html
+    assert "ready_review" in html
+    assert "waiting_for_human" in html
 
 
 def test_render_run_detail_html_escapes_payload_values() -> None:

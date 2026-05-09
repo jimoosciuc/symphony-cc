@@ -22,6 +22,7 @@ def render_dashboard_html(snapshot: dict[str, Any]) -> str:
         [
             _summary(snapshot),
             _active_workers(snapshot.get("active_workers", [])),
+            _waiting_items(snapshot.get("waiting_items", [])),
             _retry_queue(snapshot.get("retry_queue", [])),
             _recent_finished(snapshot.get("recent_finished", [])),
             _recovery_decisions(snapshot.get("recovery_decisions", [])),
@@ -181,6 +182,7 @@ def render_run_detail_html(snapshot: dict[str, Any], issue_identifier: str) -> s
             _detail_summary(detail),
             _detail_events(detail),
             _detail_json("Active Worker", detail.get("active_worker")),
+            _detail_json("Waiting Item", detail.get("waiting_item")),
             _detail_json("Retry State", detail.get("retry_state")),
             _detail_json("Finished Run", detail.get("finished_run")),
             _detail_json("Recovery Decisions", detail.get("recovery_decisions")),
@@ -261,6 +263,7 @@ def run_detail(snapshot: dict[str, Any], issue_identifier: str) -> dict[str, Any
     """Return read-only detail data for one issue across status surfaces."""
 
     active = _find_by_issue(snapshot.get("active_workers", []), issue_identifier)
+    waiting = _find_by_issue(snapshot.get("waiting_items", []), issue_identifier)
     retry = _find_by_issue(snapshot.get("retry_queue", []), issue_identifier)
     finished = _find_by_issue(snapshot.get("recent_finished", []), issue_identifier)
     recovery = [
@@ -269,12 +272,13 @@ def run_detail(snapshot: dict[str, Any], issue_identifier: str) -> dict[str, Any
         if item.get("issue_identifier") == issue_identifier
     ]
 
-    if active is None and retry is None and finished is None and not recovery:
+    if active is None and waiting is None and retry is None and finished is None and not recovery:
         return None
 
     return {
         "issue_identifier": issue_identifier,
         "active_worker": active,
+        "waiting_item": waiting,
         "retry_state": retry,
         "finished_run": finished,
         "recovery_decisions": recovery,
@@ -325,6 +329,7 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
             "<tr>"
             f"<td>{_issue_link(worker)}{_detail_link(worker.get('issue_identifier'))}</td>"
             f"<td>{_text(worker.get('lane'))}</td>"
+            f"<td>{_role_cell(worker)}</td>"
             f"<td>{_code(worker.get('provider_session_id'))}</td>"
             f"<td>{_text(worker.get('attempt'))}</td>"
             f"<td>{_text(worker.get('security_profile'))}</td>"
@@ -335,7 +340,7 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
         )
         rows.append(
             "<tr class=\"session-row\">"
-            f"<td colspan=\"8\">{_session_timeline(worker)}</td>"
+            f"<td colspan=\"9\">{_session_timeline(worker)}</td>"
             "</tr>"
         )
     return _table(
@@ -343,6 +348,7 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
         (
             "Issue",
             "Lane",
+            "Role",
             "Provider Session",
             "Attempt",
             "Security Profile",
@@ -350,6 +356,27 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
             "Usage",
             "Last Event",
         ),
+        rows,
+    )
+
+
+def _waiting_items(items: list[dict[str, Any]]) -> str:
+    rows = []
+    for item in items:
+        rows.append(
+            "<tr>"
+            f"<td>{_issue_link(item)}{_detail_link(item.get('issue_identifier'))}</td>"
+            f"<td>{_role_cell(item)}</td>"
+            f"<td>{_text(item.get('actor'))}</td>"
+            f"<td>{_text(item.get('gate_owner'))}</td>"
+            f"<td>{_text(item.get('reason'))}</td>"
+            f"<td>{_text(item.get('matched_labels'))}</td>"
+            f"<td>{_text(item.get('error'))}</td>"
+            "</tr>"
+        )
+    return _table(
+        "Waiting Role Gates",
+        ("Issue", "Role", "Actor", "Gate Owner", "Reason", "Labels", "Error"),
         rows,
     )
 
@@ -379,8 +406,10 @@ def _recent_finished(items: list[dict[str, Any]]) -> str:
             "<tr>"
             f"<td>{_text(item.get('issue_identifier'))}{_detail_link(item.get('issue_identifier'))}</td>"
             f"<td>{_text(item.get('lane'))}</td>"
+            f"<td>{_role_cell(item)}</td>"
             f"<td class=\"{css}\">{_text(item.get('terminal_state'))}</td>"
             f"<td class=\"{css}\">{_text(item.get('task_outcome'))}</td>"
+            f"<td>{_transition_cell(item.get('role_transition'))}</td>"
             f"<td>{_code(item.get('provider_session_id'))}</td>"
             f"<td>{_text(item.get('security_profile'))}</td>"
             f"<td>{_code(item.get('artifact_dir'))}</td>"
@@ -394,8 +423,10 @@ def _recent_finished(items: list[dict[str, Any]]) -> str:
         (
             "Issue",
             "Lane",
+            "Role",
             "Terminal",
             "Task Outcome",
+            "Transition",
             "Provider Session",
             "Security Profile",
             "Artifacts",
@@ -459,6 +490,49 @@ def _detail_link(issue_identifier: Any) -> str:
         return ""
     href = f"/runs/{quote(ident, safe='')}"
     return f'<div><a class="muted" href="{escape(href, quote=True)}">details</a></div>'
+
+
+def _role_cell(item: dict[str, Any]) -> str:
+    role = item.get("role")
+    state = item.get("role_state") or item.get("state")
+    actor = item.get("role_actor") or item.get("actor")
+    gate_owner = item.get("gate_owner")
+    parts = []
+    if role:
+        parts.append(f"<div>{escape(_text(role))}</div>")
+    if state:
+        parts.append(f'<div class="muted">state: {escape(_text(state))}</div>')
+    if actor:
+        parts.append(f'<div class="muted">actor: {escape(_text(actor))}</div>')
+    if gate_owner:
+        parts.append(f'<div class="warn">gate: {escape(_text(gate_owner))}</div>')
+    if not parts:
+        return '<span class="muted">None</span>'
+    return "".join(parts)
+
+
+def _transition_cell(value: Any) -> str:
+    if not isinstance(value, dict):
+        return '<span class="muted">None</span>'
+    parts = []
+    requested = value.get("requested")
+    applied = value.get("applied")
+    to_state = value.get("to_state")
+    fallback = value.get("fallback")
+    error = value.get("error")
+    if requested:
+        parts.append(f"<div>requested: {escape(_text(requested))}</div>")
+    if applied:
+        parts.append(f'<div class="ok">applied: {escape(_text(applied))}</div>')
+    if to_state:
+        parts.append(f'<div class="muted">to: {escape(_text(to_state))}</div>')
+    if fallback:
+        parts.append(f'<div class="warn">fallback: {escape(_text(fallback))}</div>')
+    if error:
+        parts.append(f'<div class="bad">error: {escape(_text(error))}</div>')
+    if not parts:
+        return '<span class="muted">None</span>'
+    return "".join(parts)
 
 
 def _event_cell(event: dict[str, Any]) -> str:
@@ -624,13 +698,31 @@ def _find_by_issue(items: Any, issue_identifier: str) -> dict[str, Any] | None:
 def _detail_summary(detail: dict[str, Any]) -> str:
     issue = _text(detail.get("issue_identifier"))
     active = detail.get("active_worker") or {}
+    waiting = detail.get("waiting_item") or {}
     finished = detail.get("finished_run") or {}
     retry = detail.get("retry_state") or {}
     row = {
         "state": _detail_state(detail),
         "lane": active.get("lane") or finished.get("lane"),
+        "role": active.get("role") or waiting.get("role") or finished.get("role"),
+        "role_state": (
+            active.get("role_state")
+            or waiting.get("state")
+            or finished.get("role_state")
+        ),
+        "role_actor": (
+            active.get("role_actor")
+            or waiting.get("actor")
+            or finished.get("role_actor")
+        ),
+        "gate_owner": (
+            active.get("gate_owner")
+            or waiting.get("gate_owner")
+            or finished.get("gate_owner")
+        ),
         "terminal_state": finished.get("terminal_state") or active.get("terminal_state"),
         "task_outcome": finished.get("task_outcome"),
+        "role_transition": finished.get("role_transition"),
         "provider_session_id": active.get("provider_session_id")
         or finished.get("provider_session_id"),
         "artifact_dir": active.get("artifact_dir") or finished.get("artifact_dir"),
@@ -660,6 +752,8 @@ def _detail_summary(detail: dict[str, Any]) -> str:
 def _detail_state(detail: dict[str, Any]) -> str:
     if detail.get("active_worker"):
         return "active"
+    if detail.get("waiting_item"):
+        return "waiting"
     if detail.get("retry_state"):
         return "retry_waiting"
     if detail.get("finished_run"):

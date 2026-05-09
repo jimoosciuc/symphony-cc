@@ -136,6 +136,36 @@ pilot, use `security.profile: conservative` and `permission_mode: acceptEdits`,
 but expect tasks that need shell or `gh` to stop with permission evidence rather
 than completing a PR.
 
+## Role Workflow Presets
+
+For repositories that need explicit review or release handoffs, generate the
+workflow instead of hand-authoring labels and role states:
+
+```bash
+symphony init github-human-review --repo <owner>/<repo> --output WORKFLOW.md --create-labels
+```
+
+Use `github-human-review` when Symphony should implement and then wait for a
+human reviewer. The generated role graph routes:
+
+- `symphony-ready-impl` -> implementer agent;
+- PR delivery -> `symphony-ready-review` instead of `symphony-done`;
+- human review changes -> `symphony-changes-requested`;
+- design or operator gates -> `symphony-needs-design`,
+  `symphony-needs-leader`, or `symphony-blocked-operator`.
+
+Use `github-production-line` when review, verification, and release are
+separate handoffs. It adds human `verifier` and `release` placeholders with
+`symphony-ready-verify` and `symphony-ready-release` states.
+
+Role workflow presets intentionally set `tracker.include_labels: []` because
+GitHub's issue `labels` filter is AND-based. Symphony fetches open issues and
+uses the role graph to dispatch only issues with known role-state labels.
+
+Human-owned states are not dispatched to Claude. They appear in dashboard
+`Waiting Role Gates`; the human reviewer or leader should make a GitHub-visible
+review/comment decision and move the issue to the next role-state label.
+
 ## Environment File
 
 Example `/etc/symphony/symphony.env`:
