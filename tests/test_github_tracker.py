@@ -14,9 +14,17 @@ from typing import Any
 import httpx
 import pytest
 
-from symphony.config import GitHubConfig, GitHubProjectConfig, TrackerConfig
+from symphony.config import (
+    GitHubConfig,
+    GitHubProjectConfig,
+    RoleConfig,
+    RoleStateConfig,
+    RoleTransitionConfig,
+    TrackerConfig,
+)
 from symphony.github import (
     ClaimResult,
+    FakeGitHubTracker,
     GitHubClient,
     GitHubMissingToken,
     GitHubNotFound,
@@ -35,6 +43,7 @@ from symphony.github import (
     find_linked_pull_requests,
 )
 from symphony.models import Issue
+from symphony.role_graph import TransitionPlan
 
 # -- Fixtures ----------------------------------------------------------------
 
@@ -100,6 +109,37 @@ def _make_tracker(handler: Callable[[httpx.Request], httpx.Response]) -> GitHubT
         _tracker_config(),
         _github_config(),
         client=_make_client(handler),
+    )
+
+
+def _transition_plan() -> TransitionPlan:
+    role = RoleConfig(name="implementer", actor="agent")
+    from_state = RoleStateConfig(
+        name="implementing",
+        labels=("symphony-implementing",),
+    )
+    to_state = RoleStateConfig(
+        name="ready_review",
+        labels=("symphony-ready-review",),
+    )
+    transition = RoleTransitionConfig(
+        name="pr_delivered",
+        role="implementer",
+        from_states=("implementing",),
+        to_state="ready_review",
+        requires=("pr_link",),
+    )
+    return TransitionPlan(
+        transition=transition,
+        role=role,
+        from_state=from_state,
+        to_state=to_state,
+        labels_to_remove=from_state.labels,
+        labels_to_add=to_state.labels,
+        required_evidence=("pr_link",),
+        provided_evidence=("pr_link",),
+        next_actor="human",
+        next_role="reviewer",
     )
 
 
@@ -455,6 +495,94 @@ def test_dequeue_issue_drops_claim_and_ready_without_done() -> None:
         "/repos/acme/proj/issues/42/labels/symphony-running",
         "/repos/acme/proj/issues/42/labels/symphony-ready",
     ]
+
+
+def test_apply_transition_plan_comments_adds_destination_and_removes_source() -> None:
+    posts: list[tuple[str, dict]] = []
+    deletes: list[str] = []
+
+    def h(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST":
+            posts.append((req.url.path, json.loads(req.content)))
+            return httpx.Response(201, json={})
+        if req.method == "DELETE":
+            deletes.append(req.url.path)
+            return httpx.Response(200, json=[])
+        return httpx.Response(500)
+
+    tracker = _make_tracker(h)
+    result = tracker.apply_transition_plan(
+        _issue(labels=("symphony-implementing",)),
+        _transition_plan(),
+        evidence_summary="PR: https://github.com/acme/proj/pull/10",
+    )
+
+    assert result.ok is True
+    assert result.reason == "pr_delivered"
+    assert posts[0][0] == "/repos/acme/proj/issues/42/comments"
+    assert posts[0][1]["body"].startswith("<!-- symphony:role-transition -->")
+    assert "transition: `pr_delivered`" in posts[0][1]["body"]
+    assert "PR: https://github.com/acme/proj/pull/10" in posts[0][1]["body"]
+    assert posts[1] == (
+        "/repos/acme/proj/issues/42/labels",
+        {"labels": ["symphony-ready-review"]},
+    )
+    assert deletes == ["/repos/acme/proj/issues/42/labels/symphony-implementing"]
+
+
+def test_apply_transition_plan_wraps_comment_failure_without_label_changes() -> None:
+    calls: list[str] = []
+
+    def h(req: httpx.Request) -> httpx.Response:
+        calls.append(f"{req.method} {req.url.path}")
+        if req.method == "POST" and req.url.path.endswith("/comments"):
+            return httpx.Response(403, json={"message": "Forbidden"})
+        return httpx.Response(500)
+
+    tracker = _make_tracker(h)
+    with pytest.raises(TrackerPermissionDenied):
+        tracker.apply_transition_plan(_issue(), _transition_plan())
+
+    assert calls == ["POST /repos/acme/proj/issues/42/comments"]
+
+
+def test_apply_transition_plan_retries_idempotently_when_source_label_missing() -> None:
+    posts: list[tuple[str, dict]] = []
+    deletes: list[str] = []
+
+    def h(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST":
+            posts.append((req.url.path, json.loads(req.content)))
+            return httpx.Response(200, json={})
+        if req.method == "DELETE":
+            deletes.append(req.url.path)
+            return httpx.Response(404, json={"message": "Label does not exist"})
+        return httpx.Response(500)
+
+    tracker = _make_tracker(h)
+    result = tracker.apply_transition_plan(_issue(), _transition_plan())
+
+    assert result.ok is True
+    assert posts[-1] == (
+        "/repos/acme/proj/issues/42/labels",
+        {"labels": ["symphony-ready-review"]},
+    )
+    assert deletes == ["/repos/acme/proj/issues/42/labels/symphony-implementing"]
+
+
+def test_fake_tracker_apply_transition_plan_updates_labels_and_records_audit() -> None:
+    issue = _issue(labels=("symphony-implementing",))
+    tracker = FakeGitHubTracker(issues=[issue])
+
+    result = tracker.apply_transition_plan(issue, _transition_plan())
+
+    state = tracker.states[issue.identifier]
+    assert result.ok is True
+    assert state.claimed_by is None
+    assert state.issue.labels == ("symphony-ready-review",)
+    assert any(entry[1] == "transition:pr_delivered" for entry in state.claim_history)
+    assert len(state.progress_comments) == 1
+    assert "next_actor: `human`" in state.progress_comments[0]
 
 
 def test_release_issue_swallows_404_on_missing_label() -> None:
@@ -905,6 +1033,7 @@ def test_github_tracker_is_a_tracker_protocol() -> None:
         "claim_issue",
         "release_issue",
         "dequeue_issue",
+        "apply_transition_plan",
         "mark_issue_done",
         "mark_issue_blocked",
         "find_linked_pull_requests",

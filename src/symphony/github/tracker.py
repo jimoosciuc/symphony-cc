@@ -42,6 +42,7 @@ from symphony.github.client import (
 )
 from symphony.github.pr import find_linked_pull_requests as _find_linked_prs
 from symphony.models import Issue, PullRequest
+from symphony.role_graph import TransitionPlan
 
 _LOG = logging.getLogger("symphony.github.tracker")
 
@@ -155,6 +156,14 @@ class TrackerProtocol(Protocol):
     def release_issue(self, issue: Issue, reason: str) -> ReleaseResult: ...
 
     def dequeue_issue(self, issue: Issue, reason: str) -> ReleaseResult: ...
+
+    def apply_transition_plan(
+        self,
+        issue: Issue,
+        plan: TransitionPlan,
+        *,
+        evidence_summary: str | None = None,
+    ) -> ReleaseResult: ...
 
     def mark_issue_done(self, issue: Issue, reason: str) -> ReleaseResult: ...
 
@@ -314,6 +323,31 @@ class GitHubTracker:
         self._delete_label_best_effort(issue, self.github.ready_label, "dequeue_issue")
         return ReleaseResult(ok=True, reason=reason)
 
+    def apply_transition_plan(
+        self,
+        issue: Issue,
+        plan: TransitionPlan,
+        *,
+        evidence_summary: str | None = None,
+    ) -> ReleaseResult:
+        body = _transition_comment_body(plan, evidence_summary=evidence_summary)
+        try:
+            self._client.post(
+                f"/repos/{self._owner}/{self._repo}/issues/{issue.number}/comments",
+                json_body={"body": body},
+            )
+            labels_to_add = _dedupe_labels(plan.labels_to_add)
+            if labels_to_add:
+                self._client.post(
+                    f"/repos/{self._owner}/{self._repo}/issues/{issue.number}/labels",
+                    json_body={"labels": list(labels_to_add)},
+                )
+            for label in _dedupe_labels(plan.labels_to_remove):
+                self._delete_label_required(issue, label)
+        except GitHubError as exc:
+            raise self._wrap(exc) from exc
+        return ReleaseResult(ok=True, reason=plan.transition.name)
+
     def mark_issue_done(self, issue: Issue, reason: str) -> ReleaseResult:
         try:
             self._client.post(
@@ -359,6 +393,17 @@ class GitHubTracker:
                 label,
                 exc,
             )
+
+    def _delete_label_required(self, issue: Issue, label: str) -> None:
+        if not label:
+            return
+        try:
+            self._client.delete(
+                f"/repos/{self._owner}/{self._repo}/issues/{issue.number}"
+                f"/labels/{label}"
+            )
+        except GitHubNotFound:
+            pass
 
     # -- Linked PRs / comments -------------------------------------------
 
@@ -613,6 +658,33 @@ class FakeGitHubTracker:
             st.issue = replace(st.issue, labels=tuple(existing))
             return ReleaseResult(ok=True)
 
+    def apply_transition_plan(
+        self,
+        issue: Issue,
+        plan: TransitionPlan,
+        *,
+        evidence_summary: str | None = None,
+    ) -> ReleaseResult:
+        with self._lock:
+            st = self.states.get(issue.identifier)
+            if st is None:
+                return ReleaseResult(ok=False, reason="unknown issue")
+            existing = [
+                label
+                for label in st.issue.labels
+                if label not in set(plan.labels_to_remove)
+            ]
+            for label in plan.labels_to_add:
+                if label not in existing:
+                    existing.append(label)
+            st.issue = replace(st.issue, labels=tuple(existing))
+            st.claimed_by = None
+            st.claim_history.append((_now_iso(), f"transition:{plan.transition.name}"))
+            st.progress_comments.append(
+                _transition_comment_body(plan, evidence_summary=evidence_summary)
+            )
+            return ReleaseResult(ok=True, reason=plan.transition.name)
+
     def mark_issue_done(self, issue: Issue, reason: str) -> ReleaseResult:
         with self._lock:
             st = self.states.get(issue.identifier)
@@ -663,6 +735,39 @@ class FakeGitHubTracker:
     def create_or_update_pr_link_comment(self, issue: Issue, pr: PullRequest) -> None:
         with self._lock:
             self.states[issue.identifier].pr_link_comments.append(pr.url)
+
+
+def _transition_comment_body(
+    plan: TransitionPlan,
+    *,
+    evidence_summary: str | None = None,
+) -> str:
+    lines = [
+        "<!-- symphony:role-transition -->",
+        "Symphony applied a role workflow transition.",
+        "",
+        f"- transition: `{plan.transition.name}`",
+        f"- role: `{plan.role.name}`",
+        f"- from: `{plan.from_state.name}`",
+        f"- to: `{plan.to_state.name}`",
+    ]
+    if plan.required_evidence:
+        lines.append(f"- required_evidence: `{', '.join(plan.required_evidence)}`")
+    if plan.provided_evidence:
+        lines.append(f"- provided_evidence: `{', '.join(plan.provided_evidence)}`")
+    if plan.next_role:
+        lines.append(f"- next_role: `{plan.next_role}`")
+    if plan.next_actor:
+        lines.append(f"- next_actor: `{plan.next_actor}`")
+    if plan.gate_owner:
+        lines.append(f"- gate_owner: `{plan.gate_owner}`")
+    if evidence_summary:
+        lines.extend(["", evidence_summary])
+    return "\n".join(lines)
+
+
+def _dedupe_labels(labels: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(label for label in labels if label))
 
 
 def _now_iso() -> str:
