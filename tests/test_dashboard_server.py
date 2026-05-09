@@ -15,10 +15,36 @@ from symphony.dashboard_server import DashboardServer
 def mock_status() -> dict[str, Any]:
     return {
         "state": "running",
-        "active_workers": [],
-        "retry_queue": [],
-        "recent_finished": [],
-        "recovery_decisions": [],
+        "active_workers": [
+            {
+                "issue_identifier": "acme/proj#1",
+                "issue_url": "https://github.com/acme/proj/issues/1",
+                "provider_session_id": "provider-1",
+                "artifact_dir": "/tmp/artifacts/acme_proj_1/1",
+                "last_event": {"event": "message_delta", "payload": {"token": "secret"}},
+            }
+        ],
+        "retry_queue": [
+            {
+                "issue_identifier": "acme/proj#2",
+                "attempts": 2,
+                "last_error": "temporary failure",
+            }
+        ],
+        "recent_finished": [
+            {
+                "issue_identifier": "acme/proj#3",
+                "terminal_state": "completed",
+                "task_outcome": "completed_with_pr",
+            }
+        ],
+        "recovery_decisions": [
+            {
+                "issue_identifier": "acme/proj#4",
+                "action": "released",
+                "reason": "issue closed",
+            }
+        ],
     }
 
 
@@ -78,7 +104,9 @@ def test_json_status_endpoint(
     assert status == 200
     assert headers["Content-Type"] == "application/json; charset=utf-8"
     assert headers["Cache-Control"] == "no-cache, no-store, must-revalidate"
-    assert json.loads(body) == mock_status
+    data = json.loads(body)
+    assert data["state"] == mock_status["state"]
+    assert data["active_workers"][0]["last_event"]["payload"]["token"] == "<redacted>"
 
 
 def test_html_dashboard_endpoint(dashboard_server: DashboardServer) -> None:
@@ -92,6 +120,36 @@ def test_html_dashboard_endpoint(dashboard_server: DashboardServer) -> None:
     assert "<!doctype html>" in html.lower()
     assert "Symphony Dashboard" in html
     assert 'http-equiv="refresh"' in html
+    assert "/runs/acme%2Fproj%231" in html
+
+
+def test_run_detail_html_endpoint(dashboard_server: DashboardServer) -> None:
+    status, headers, body = _get(dashboard_server, "/runs/acme%2Fproj%231")
+
+    assert status == 200
+    assert headers["Content-Type"] == "text/html; charset=utf-8"
+    html = body.decode("utf-8")
+    assert "Run Summary" in html
+    assert "provider-1" in html
+    assert "&lt;redacted&gt;" in html
+    assert "secret" not in html
+    assert 'http-equiv="refresh"' in html
+
+
+def test_run_detail_json_endpoint(dashboard_server: DashboardServer) -> None:
+    status, headers, body = _get(dashboard_server, "/runs/acme%2Fproj%232.json")
+
+    assert status == 200
+    assert headers["Content-Type"] == "application/json; charset=utf-8"
+    data = json.loads(body)
+    assert data["issue_identifier"] == "acme/proj#2"
+    assert data["retry_state"]["last_error"] == "temporary failure"
+
+
+def test_run_detail_not_found(dashboard_server: DashboardServer) -> None:
+    status, _, _ = _get(dashboard_server, "/runs/acme%2Fproj%23999")
+
+    assert status == 404
 
 
 def test_not_found_endpoint(dashboard_server: DashboardServer) -> None:
