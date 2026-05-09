@@ -101,13 +101,14 @@ their opt-in environment variables are set:
 - `SYMPHONY_RUN_CLAUDE_INTEGRATION=1`
 - `SYMPHONY_RUN_FULL_E2E=1`
 - `SYMPHONY_RUN_REMOTE_CLAUDE_E2E=1`
+- `SYMPHONY_RUN_CONCURRENCY_E2E=1`
 
 Live tests can be run locally through `make live-integration` or individually
 with `make live-github`, `make live-graphql`, `make live-claude`,
-`make live-remote`, `make live-remote-claude`, and `make live-e2e`. They are also
-available in GitHub Actions through the manual `live-integration` workflow; they
-are not required for default PR CI because they need credentials and real
-external services.
+`make live-remote`, `make live-remote-claude`, `make live-e2e`, and
+`make live-concurrency-e2e`. They are also available in GitHub Actions through
+the manual `live-integration` workflow; they are not required for default PR CI
+because they need credentials and real external services.
 
 #### Full E2E Harness
 
@@ -129,6 +130,30 @@ session → branch/commit/PR → evidence detector → terminal artifacts. This 
 Run with: `make live-e2e`
 
 This harness is opt-in and skipped by default to keep `make ci` fast and offline.
+
+#### Multi-Issue Concurrency E2E Harness
+
+The concurrency harness (`make live-concurrency-e2e`) runs a real orchestrator
+tick with `agent.max_concurrency: 2` against two configured GitHub issues and
+Claude Code sessions. It records dispatched/finished issues, status snapshots,
+artifact directories, session ids, and task outcomes to local evidence.
+
+Required environment:
+
+- `SYMPHONY_RUN_CONCURRENCY_E2E=1`
+- `GITHUB_TOKEN`
+- `SYMPHONY_CONCURRENCY_E2E_ISSUES=<issue1>,<issue2>`
+
+Optional environment:
+
+- `SYMPHONY_GITHUB_TEST_OWNER`
+- `SYMPHONY_GITHUB_TEST_REPO`
+- `SYMPHONY_CLAUDE_TEST_MODEL`
+- `SYMPHONY_CONCURRENCY_E2E_PERMISSION_MODE`
+
+The test issues should be isolated, disposable tasks that can safely run in
+parallel. Default CI only verifies the harness configuration contract and skip
+gate.
 
 #### Remote Claude E2E Harness
 

@@ -729,6 +729,7 @@ class Orchestrator:
         if slots_open <= 0:
             return
         now = self._clock()
+        local_runs = []
         for issue in candidates:
             if slots_open == 0:
                 break
@@ -777,12 +778,10 @@ class Orchestrator:
             self.active[issue.identifier] = worker
             result.dispatched.append(issue.identifier)
             slots_open -= 1
+            local_runs.append(self._run_worker(worker, result, claim))
 
-            # Inline run-the-worker. The orchestrator could run workers
-            # concurrently as asyncio tasks; for the M1 milestone keeping
-            # them serialized inside one tick keeps tests deterministic
-            # without losing the concurrency-cap semantic.
-            await self._run_worker(worker, result, claim)
+        if local_runs:
+            await asyncio.gather(*local_runs)
 
     async def _run_remote_dispatch(
         self,

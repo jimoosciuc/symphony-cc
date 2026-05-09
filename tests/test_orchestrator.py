@@ -8,6 +8,7 @@ criteria on issue #7.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -128,6 +129,46 @@ def _make_orchestrator(
     return orch, tracker, prov
 
 
+class OverlapTrackingProvider(FakeProvider):
+    """Fake provider that records concurrent send_input overlap."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_turns = 0
+        self.max_active_turns = 0
+
+    async def send_input(self, session, message):  # noqa: ANN001
+        del message
+        self.calls.append(("send_input", session.session_id))
+        session.provider_session_id = f"pid-{session.issue_number}"
+        self.active_turns += 1
+        self.max_active_turns = max(self.max_active_turns, self.active_turns)
+        try:
+            yield AgentEvent(
+                event="session_started",
+                timestamp=datetime.now(timezone.utc),
+                session_id=session.session_id,
+                provider=self.name,
+                issue_identifier=session.issue_identifier,
+                attempt=session.attempt,
+                payload={"model": "fake-model", "session_id": session.provider_session_id},
+                provider_session_id=session.provider_session_id,
+            )
+            await asyncio.sleep(0.01)
+            yield AgentEvent(
+                event="turn_completed",
+                timestamp=datetime.now(timezone.utc),
+                session_id=session.session_id,
+                provider=self.name,
+                issue_identifier=session.issue_identifier,
+                attempt=session.attempt,
+                payload={"duration_ms": 1, "result": "ok"},
+                provider_session_id=session.provider_session_id,
+            )
+        finally:
+            self.active_turns -= 1
+
+
 # -- Acceptance: dispatch one eligible issue --------------------------------
 
 
@@ -186,6 +227,22 @@ async def test_respects_max_concurrency(tmp_path: Path) -> None:
     orch, _, _ = _make_orchestrator(tmp_path, issues=issues, max_concurrency=2)
     result = await orch.run_once()
     assert len(result.dispatched) == 2
+
+
+async def test_workers_overlap_when_max_concurrency_gt_one(tmp_path: Path) -> None:
+    issues = [_issue(number=n) for n in (1, 2, 3)]
+    provider = OverlapTrackingProvider()
+    orch, _, _ = _make_orchestrator(
+        tmp_path,
+        issues=issues,
+        max_concurrency=2,
+        provider=provider,
+    )
+
+    result = await orch.run_once()
+    assert result.dispatched == ["acme/proj#1", "acme/proj#2"]
+    assert set(result.finished) == {"acme/proj#1", "acme/proj#2"}
+    assert provider.max_active_turns == 2
 
 
 # -- Acceptance: multi-turn continuation on the same fake session -----------
