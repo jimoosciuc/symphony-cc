@@ -130,10 +130,12 @@ For focused reliability drills before an operated pilot, run:
 
 ```bash
 make failure-drills
+make security-audit
 ```
 
 See `docs/failure-injection-drills.md` for the scenario matrix and manual live
-drills.
+drills. See `docs/security-hardening.md` for token scopes, secret redaction,
+remote credential boundaries, and security profile guidance.
 
 - `SYMPHONY_RUN_GITHUB_INTEGRATION=1`
 - `SYMPHONY_RUN_GRAPHQL_TOOL_INTEGRATION=1`

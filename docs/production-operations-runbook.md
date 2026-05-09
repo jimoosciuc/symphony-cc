@@ -172,6 +172,7 @@ Then run the live targets required by the deployment topology:
 
 ```bash
 make failure-drills
+make security-audit
 make live-github
 make live-claude
 make live-e2e
