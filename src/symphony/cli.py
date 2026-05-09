@@ -391,19 +391,33 @@ Repository: {owner}/{repo}
 Issue title: {{{{ issue.title }}}}
 Issue URL: {{{{ issue.url }}}}
 
+Issue body:
+{{{{ issue.body }}}}
+
 Rules:
-- Work on exactly this issue. If another contributor has claimed it or an
-  open PR already resolves it, do not duplicate the work; reply with
+- Work on exactly this issue, one issue at a time.
+- First inspect the issue, current labels, existing comments, and open PRs.
+- If another contributor has claimed it, or an open PR already resolves it,
+  do not duplicate the work; reply with
   `Symphony-No-PR: <reason>`.
 - If the issue needs design approval before implementation, comment a concrete
-  design proposal on the issue and reply with `Symphony-No-PR: design proposed`.
+  design proposal on the GitHub issue and reply with
+  `Symphony-No-PR: design proposed`.
+- Do not ask the local operator for clarification. Use GitHub issue comments
+  for clarification/design questions.
 - Create or update branch
   `symphony/{{{{ issue.owner }}}}-{{{{ issue.repo }}}}-{{{{ issue.number }}}}`
   when code changes are needed.
 - Open or update a pull request against `main`.
 - Include `Closes {{{{ issue.identifier }}}}` in the PR body.
+- If a PR already exists for this issue from the Symphony branch, update that
+  PR instead of opening a duplicate.
+- Run the relevant tests/checks for the changed area when feasible.
+- In the PR body, include a concise summary and the tests/checks you ran.
 - Respond to review comments by updating the same PR.
 - Do not add Linear or Codex assumptions.
+- Do not finish as successful unless you opened/updated a PR or explicitly
+  reply with `Symphony-No-PR: <reason>`.
 """
 
 

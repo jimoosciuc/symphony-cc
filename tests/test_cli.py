@@ -93,13 +93,20 @@ def test_init_github_implementer_writes_loadable_workflow(
             owner="acme",
             repo="proj",
             title="Fix bug",
-            body="body",
+            body="The detailed issue body matters.",
             state="open",
             url="https://github.com/acme/proj/issues/42",
         ),
     )
+    assert "The detailed issue body matters." in prompt
+    assert "First inspect the issue, current labels, existing comments, and open PRs" in prompt
+    assert "Do not ask the local operator for clarification" in prompt
+    assert "Use GitHub issue comments" in prompt
+    assert "for clarification/design questions" in prompt
     assert "symphony/acme-proj-42" in prompt
     assert "Closes acme/proj#42" in prompt
+    assert "update that\n  PR instead of opening a duplicate" in prompt
+    assert "opened/updated a PR or explicitly" in prompt
 
 
 def test_init_refuses_to_overwrite_without_force(
