@@ -143,11 +143,13 @@ remote credential boundaries, and security profile guidance.
 - `SYMPHONY_RUN_FULL_E2E=1`
 - `SYMPHONY_RUN_REMOTE_CLAUDE_E2E=1`
 - `SYMPHONY_RUN_CONCURRENCY_E2E=1`
+- `SYMPHONY_RUN_LANES_E2E=1`
 
 Live tests can be run locally through `make live-integration`, individually
 with `make live-github`, `make live-graphql`, `make live-claude`,
 `make live-remote`, `make live-remote-claude`, `make live-e2e`, and
-`make live-concurrency-e2e`, or as a full matrix with `make live-validation`.
+`make live-concurrency-e2e`, `make live-lanes-e2e`, or as a full matrix with
+`make live-validation`.
 They are also available in GitHub Actions through the manual
 `live-integration` workflow; they are not required for default PR CI because
 they need credentials and real external services.
@@ -209,6 +211,36 @@ parallel. For production-readiness proof, run trusted disposable issues with
 finished issue records `completed_with_pr` plus GitHub PR evidence in
 `terminal.json` and `concurrency_e2e_evidence.json`. Default CI only verifies
 the harness configuration contract and skip gate.
+
+#### Runtime Lanes E2E Harness
+
+The runtime lanes harness (`make live-lanes-e2e`) runs a real orchestrator tick
+with two lane profiles selected by distinct issue labels:
+`status:ready-for-implementation` routes to the `implementer` lane and
+`status:ready-for-review` routes to the `reviewer` lane. It records dispatched
+and finished issues, selected lane names, artifact directories, task outcomes,
+and PR summaries to local evidence.
+
+Required environment:
+
+- `SYMPHONY_RUN_LANES_E2E=1`
+- `GITHUB_TOKEN`
+- `SYMPHONY_LANES_E2E_ISSUES=<issue1>,<issue2>`
+
+Optional environment:
+
+- `SYMPHONY_GITHUB_TEST_OWNER`
+- `SYMPHONY_GITHUB_TEST_REPO`
+- `SYMPHONY_CLAUDE_TEST_MODEL`
+- `SYMPHONY_LANES_E2E_PERMISSION_MODE`
+- `SYMPHONY_LANES_E2E_REQUIRE_PR=1`
+
+For production-readiness proof, use trusted disposable issues with the lane
+labels above, `SYMPHONY_LANES_E2E_PERMISSION_MODE=bypassPermissions`, and
+`SYMPHONY_LANES_E2E_REQUIRE_PR=1`. The harness fails if either issue is routed
+to the wrong lane or finishes without `completed_with_pr` plus linked PR
+evidence. Default CI only verifies the harness configuration contract and skip
+gate.
 
 #### Remote Claude E2E Harness
 

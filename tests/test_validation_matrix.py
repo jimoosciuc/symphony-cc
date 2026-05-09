@@ -18,6 +18,7 @@ def test_makefile_exposes_full_live_validation_matrix() -> None:
         "live-e2e:",
         "live-remote-claude:",
         "live-concurrency-e2e:",
+        "live-lanes-e2e:",
         "live-validation:",
     ]
     for target in required_targets:
@@ -34,6 +35,7 @@ def test_makefile_exposes_full_live_validation_matrix() -> None:
         "live-e2e",
         "live-remote-claude",
         "live-concurrency-e2e",
+        "live-lanes-e2e",
     ]:
         assert dependency in live_validation_line
 
@@ -55,6 +57,7 @@ def test_manual_live_workflow_exposes_all_validation_targets() -> None:
         "full-e2e",
         "remote-claude",
         "concurrency-e2e",
+        "lanes-e2e",
         "validation-matrix",
     }
 
@@ -71,6 +74,7 @@ def test_manual_live_workflow_exposes_all_validation_targets() -> None:
         "make live-e2e",
         "make live-remote-claude",
         "make live-concurrency-e2e",
+        "make live-lanes-e2e",
     ]:
         assert command in step_runs
 
@@ -83,3 +87,4 @@ def test_production_readiness_doc_distinguishes_ci_from_production_ready() -> No
     assert "Do not claim production readiness before L4" in doc
     assert "SYMPHONY_RUN_REMOTE_CLAUDE_E2E=1" in doc
     assert "SYMPHONY_RUN_CONCURRENCY_E2E=1" in doc
+    assert "SYMPHONY_RUN_LANES_E2E=1" in doc

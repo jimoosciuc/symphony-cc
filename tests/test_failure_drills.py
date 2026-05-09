@@ -38,6 +38,7 @@ def test_failure_drill_doc_covers_required_failure_modes() -> None:
         "Invalid workflow reload",
         "make live-remote-claude",
         "make live-concurrency-e2e",
+        "make live-lanes-e2e",
         "no provider or infrastructure error is reported as completed work",
     ]:
         assert phrase in doc

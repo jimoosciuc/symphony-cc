@@ -15,7 +15,7 @@ configuration, stop/restart/recovery procedures, and pilot go/no-go operations.
 | L0: default CI | Offline unit, contract, fake tracker/provider, and static validation pass. | `make ci` is green locally and in required PR CI. |
 | L1: live integrations | Individual live GitHub, GitHub GraphQL, Claude, and remote transport checks pass. | `make live-integration` or the matching individual targets pass with real credentials. |
 | L2: full local E2E | A real GitHub issue is claimed, Claude Code performs work, a branch/PR is produced, and evidence gates resolve the terminal outcome. | `make live-e2e` writes E2E evidence with `completed_with_pr` or another explicitly accepted terminal outcome. |
-| L3: production topology E2E | Remote Claude and multi-issue concurrency are validated against real test issues and a real remote worker host. | `make live-remote-claude` and `make live-concurrency-e2e` pass and produce evidence artifacts. |
+| L3: production topology E2E | Remote Claude, multi-issue concurrency, and runtime lanes are validated against real test issues and a real remote worker host when those features are enabled. | `make live-remote-claude`, `make live-concurrency-e2e`, and `make live-lanes-e2e` pass and produce evidence artifacts for the enabled topology. |
 | L4: operated pilot | The daemon runs under the chosen supervisor with dashboard/status visibility, restart recovery, cleanup, and operator procedures exercised. | A dated operator report links CI, live evidence, dashboard/status snapshots, and any follow-up issues. |
 
 Do not claim production readiness before L4. L0 through L3 prove behavior in
@@ -41,6 +41,7 @@ make live-remote
 make live-e2e
 make live-remote-claude
 make live-concurrency-e2e
+make live-lanes-e2e
 ```
 
 Full live validation matrix:
@@ -66,6 +67,7 @@ The `live-integration` workflow can be triggered manually with these targets:
 | `full-e2e` | Full GitHub issue to Claude PR E2E. |
 | `remote-claude` | Real remote worker plus Claude E2E. |
 | `concurrency-e2e` | Multi-issue Claude concurrency E2E. |
+| `lanes-e2e` | Runtime lane routing plus Claude Code terminal evidence. |
 | `all` or `validation-matrix` | All of the above, in workflow step order. |
 
 ## Required Environment
@@ -97,6 +99,20 @@ Concurrency E2E:
   for trusted production-readiness smoke issues that must push branches and
   open PRs.
 - `SYMPHONY_CONCURRENCY_E2E_REQUIRE_PR=1`: fail the run unless every finished
+  issue records `completed_with_pr` and linked PR evidence.
+
+Runtime Lanes E2E:
+
+- `SYMPHONY_RUN_LANES_E2E=1`
+- `SYMPHONY_LANES_E2E_ISSUES=<issue1>,<issue2>`
+- authenticated `claude` CLI on `PATH`
+- installed `claude-agent-sdk`
+- the configured issues must have distinct lane labels:
+  `status:ready-for-implementation` and `status:ready-for-review`.
+- `SYMPHONY_LANES_E2E_PERMISSION_MODE=bypassPermissions`: recommended for
+  trusted production-readiness smoke issues that must push branches and open
+  PRs.
+- `SYMPHONY_LANES_E2E_REQUIRE_PR=1`: fail the run unless every finished lane
   issue records `completed_with_pr` and linked PR evidence.
 
 Remote Claude E2E:

@@ -189,6 +189,7 @@ Add these before enabling the matching features:
 ```bash
 make live-remote-claude       # required before remote.enabled: true
 make live-concurrency-e2e     # required before agent.max_concurrency > 1
+make live-lanes-e2e           # required before runtime lanes are enabled
 ```
 
 Record the evidence listed in `docs/production-readiness.md`.
@@ -393,5 +394,6 @@ No-go:
 - live E2E was skipped accidentally;
 - remote workers are enabled without remote Claude E2E evidence;
 - concurrency is raised without concurrency E2E evidence;
+- runtime lanes are enabled without lanes E2E evidence;
 - a provider error is reported as completed work;
 - token-like values appear in logs, dashboard, status JSON, or artifacts.
