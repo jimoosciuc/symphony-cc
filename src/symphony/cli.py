@@ -86,6 +86,22 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["debug", "info", "warning", "error", "critical"],
         help="Override the workflow file's logging.level for this invocation.",
     )
+    run.add_argument(
+        "--dashboard",
+        action="store_true",
+        help=(
+            "Start a localhost dashboard server at http://127.0.0.1:8080. "
+            "Serves live status as HTML (/) and JSON (/status.json). "
+            "Read-only, no write controls."
+        ),
+    )
+    run.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=8080,
+        metavar="PORT",
+        help="Dashboard server port (default: 8080). Only used with --dashboard.",
+    )
     run.set_defaults(func=_cmd_run)
 
     return parser
@@ -101,6 +117,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # Local imports keep the top-level CLI fast; heavy deps (httpx,
     # claude-agent-sdk) are only paid for when ``run`` is invoked.
     from symphony.config import ConfigError
+    from symphony.dashboard_server import DashboardServer
     from symphony.github import GitHubTracker
     from symphony.orchestrator import Orchestrator
     from symphony.provider import ClaudeCodeProvider
@@ -145,6 +162,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
         remote_dispatcher=build_ssh_remote_issue_dispatcher(config),
     )
 
+    # Start dashboard server if requested
+    dashboard_server = None
+    if args.dashboard:
+        dashboard_server = DashboardServer(
+            status_provider=orchestrator.status_snapshot,
+            port=args.dashboard_port,
+        )
+        dashboard_server.start()
+
     try:
         if args.once:
             result = asyncio.run(_run_once_with_recovery(orchestrator))
@@ -155,6 +181,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         log.info("received interrupt, exiting")
         return 130  # standard SIGINT exit code
     finally:
+        if dashboard_server:
+            dashboard_server.stop()
         try:
             tracker.close()
         except Exception as exc:  # noqa: BLE001 - cleanup must not mask outcome

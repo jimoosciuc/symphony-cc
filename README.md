@@ -62,6 +62,7 @@ pip install -e ".[dev]"
 symphony --help
 symphony --version
 symphony run --workflow WORKFLOW.example.md --once
+symphony run --workflow WORKFLOW.example.md --dashboard
 ```
 
 The `run` subcommand loads the workflow, performs restart recovery, then runs
@@ -71,12 +72,29 @@ the last-known-good config active for current workers and pause new dispatch
 until the file is fixed. Reload evidence is written under
 `<claude.artifact_store>/_retention_reports/_reload_events.jsonl`.
 
+#### Dashboard
+
+Add `--dashboard` to start a localhost dashboard server at `http://127.0.0.1:8080`:
+
+```bash
+symphony run --workflow WORKFLOW.example.md --dashboard
+```
+
+The dashboard serves:
+- `GET /` → HTML dashboard with auto-refresh (every 5 seconds)
+- `GET /status.json` → JSON status snapshot
+- `GET /health` → Health check endpoint
+
+The dashboard is read-only and shows daemon state, active workers, retry queue,
+recently finished runs, usage/cost totals, workflow revision, and remote host
+identity when present. Use `--dashboard-port PORT` to change the default port.
+
 Runtime status is available as a read-only in-memory Python API:
 `orchestrator.status_snapshot()` or `symphony.status.build_status_snapshot(...)`.
 It redacts configured secret keys and is intended as the data source for the
-future dashboard, not as a write-control surface.
+dashboard, not as a write-control surface.
 
-For a human-readable local view, render that snapshot with
+For a human-readable local view without the server, render that snapshot with
 `symphony.dashboard.render_dashboard_html(...)` or
 `write_dashboard_html(...)`. The renderer produces static HTML only; it does
 not start a server or add write controls.
