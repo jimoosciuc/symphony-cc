@@ -18,6 +18,8 @@ provider states; they ride the existing ``non_retryable_failure`` /
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 from symphony.config import (
@@ -27,6 +29,10 @@ from symphony.config import (
     LoggingConfig,
     PollingConfig,
     RetryConfig,
+    RoleConfig,
+    RoleGraphConfig,
+    RoleStateConfig,
+    RoleTransitionConfig,
     TrackerConfig,
     WorkflowConfig,
     WorkspaceConfig,
@@ -64,6 +70,10 @@ def _issue(*, number: int = 1) -> Issue:
     )
 
 
+def _role_issue(*, number: int = 1) -> Issue:
+    return replace(_issue(number=number), labels=("symphony-ready-impl",))
+
+
 def _config(tmp_path: Path) -> WorkflowConfig:
     return WorkflowConfig(
         tracker=TrackerConfig(
@@ -87,6 +97,101 @@ def _config(tmp_path: Path) -> WorkflowConfig:
         retry=RetryConfig(),
         logging=LoggingConfig(),
         workflow_path=tmp_path / "WORKFLOW.md",
+    )
+
+
+def _role_graph(*, include_done: bool = True) -> RoleGraphConfig:
+    transitions = {
+        "pr_delivered": RoleTransitionConfig(
+            name="pr_delivered",
+            role="implementer",
+            from_states=("implementing",),
+            to_state="ready_review",
+            requires=("pr_link",),
+        ),
+        "design_needed": RoleTransitionConfig(
+            name="design_needed",
+            role="implementer",
+            from_states=("implementing",),
+            to_state="needs_design",
+            requires=("issue_comment",),
+        ),
+        "operator_blocked": RoleTransitionConfig(
+            name="operator_blocked",
+            role="implementer",
+            from_states=("implementing",),
+            to_state="blocked_operator",
+            requires=("issue_comment",),
+        ),
+    }
+    if include_done:
+        transitions["no_work_needed"] = RoleTransitionConfig(
+            name="no_work_needed",
+            role="implementer",
+            from_states=("implementing",),
+            to_state="done",
+            requires=("issue_comment",),
+        )
+    return RoleGraphConfig(
+        roles={
+            "implementer": RoleConfig(
+                name="implementer",
+                actor="agent",
+                provider="claude_code",
+                can_claim=("ready_impl",),
+                claim_state="implementing",
+            ),
+            "reviewer": RoleConfig(
+                name="reviewer",
+                actor="human",
+                can_claim=("ready_review",),
+                claim_state="reviewing",
+            ),
+            "leader": RoleConfig(
+                name="leader",
+                actor="human",
+                can_claim=("needs_design", "blocked_operator"),
+                claim_state="leader_reviewing",
+            ),
+        },
+        states={
+            "ready_impl": RoleStateConfig(
+                name="ready_impl",
+                labels=("symphony-ready-impl",),
+            ),
+            "implementing": RoleStateConfig(
+                name="implementing",
+                labels=("symphony-implementing",),
+            ),
+            "ready_review": RoleStateConfig(
+                name="ready_review",
+                labels=("symphony-ready-review",),
+            ),
+            "reviewing": RoleStateConfig(
+                name="reviewing",
+                labels=("symphony-reviewing",),
+            ),
+            "needs_design": RoleStateConfig(
+                name="needs_design",
+                labels=("symphony-needs-design",),
+                gate_owner="leader",
+            ),
+            "blocked_operator": RoleStateConfig(
+                name="blocked_operator",
+                labels=("symphony-blocked-operator",),
+                gate_owner="leader",
+            ),
+            "leader_reviewing": RoleStateConfig(
+                name="leader_reviewing",
+                labels=("symphony-leader-reviewing",),
+            ),
+            "done": RoleStateConfig(
+                name="done",
+                labels=("symphony-done",),
+                terminal=True,
+            ),
+        },
+        transitions=transitions,
     )
 
 
@@ -130,6 +235,28 @@ def _make_orch(
 ) -> tuple[Orchestrator, FakeGitHubTracker]:
     cfg = _config(tmp_path)
     tracker = FakeGitHubTracker(issues=[_issue()])
+    mgr = WorkspaceManager(cfg.workspace)
+    detector = _StubDetector(outcome, evidence=evidence, no_pr_reason=no_pr_reason)
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=FakeProvider(),
+        workspace_manager=mgr,
+        evidence_detector=detector,
+    )
+    return orch, tracker
+
+
+def _make_role_orch(
+    tmp_path: Path,
+    outcome: str,
+    *,
+    evidence: list | None = None,
+    no_pr_reason: str | None = None,
+    include_done: bool = True,
+) -> tuple[Orchestrator, FakeGitHubTracker]:
+    cfg = replace(_config(tmp_path), role_graph=_role_graph(include_done=include_done))
+    tracker = FakeGitHubTracker(issues=[_role_issue()], ready_label="")
     mgr = WorkspaceManager(cfg.workspace)
     detector = _StubDetector(outcome, evidence=evidence, no_pr_reason=no_pr_reason)
     orch = Orchestrator(
@@ -297,6 +424,139 @@ async def test_unknown_outcome_releases_claim(tmp_path: Path) -> None:
     state = tracker.states["acme/proj#1"]
     assert state.blocked is False
     assert state.claimed_by is None
+
+
+# -- Role graph routing (#259) ----------------------------------------------
+
+
+async def test_role_graph_completed_with_pr_transitions_to_review(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_WITH_PR,
+        evidence=[
+            {
+                "type": "pr_linked",
+                "url": "https://github.com/acme/proj/pull/10",
+                "number": 10,
+            }
+        ],
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-ready-review" in state.issue.labels
+    assert "symphony-implementing" not in state.issue.labels
+    assert "symphony-done" not in state.issue.labels
+    assert any("transition:pr_delivered" in entry[1] for entry in state.claim_history)
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "pr_delivered"
+    assert transition["applied"] == "pr_delivered"
+    assert transition["to_state"] == "ready_review"
+
+
+async def test_role_graph_design_proposed_transitions_to_design_gate(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_NO_PR_DECLARED,
+        no_pr_reason="design proposed",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-needs-design" in state.issue.labels
+    assert "symphony-implementing" not in state.issue.labels
+    assert any("transition:design_needed" in entry[1] for entry in state.claim_history)
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "design_needed"
+    assert transition["applied"] == "design_needed"
+    assert transition["to_state"] == "needs_design"
+
+
+async def test_role_graph_no_work_can_transition_to_done_when_allowed(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_NO_PR_DECLARED,
+        no_pr_reason="already fixed elsewhere",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-done" in state.issue.labels
+    assert "symphony-implementing" not in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "no_work_needed"
+    assert transition["applied"] == "no_work_needed"
+    assert transition["to_state"] == "done"
+
+
+async def test_role_graph_no_work_without_allowed_done_transition_blocks(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_NO_PR_DECLARED,
+        no_pr_reason="already fixed elsewhere",
+        include_done=False,
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-blocked-operator" in state.issue.labels
+    assert "symphony-done" not in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] is None
+    assert transition["fallback"] == "operator_blocked"
+    assert transition["applied"] == "operator_blocked"
+
+
+async def test_role_graph_missing_pr_evidence_does_not_move_to_review(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(tmp_path, OUTCOME_COMPLETED_WITH_PR, evidence=[])
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-ready-review" not in state.issue.labels
+    assert "symphony-blocked-operator" in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "pr_delivered"
+    assert transition["error"]["code"] == "missing_evidence"
+    assert transition["fallback"] == "operator_blocked"
+    assert transition["applied"] == "operator_blocked"
+    terminal_files = list((tmp_path / "artifacts").rglob("terminal.json"))
+    record = json.loads(terminal_files[0].read_text())
+    assert record["role_transition"]["error"]["code"] == "missing_evidence"
+
+
+async def test_role_graph_incomplete_permission_denied_routes_to_operator_gate(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_INCOMPLETE_PERMISSION_DENIED,
+        evidence=[{"type": "permission_denied", "denials_count": 1}],
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-blocked-operator" in state.issue.labels
+    assert "symphony-implementing" not in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "operator_blocked"
+    assert transition["applied"] == "operator_blocked"
+    assert transition["to_state"] == "blocked_operator"
 
 
 # -- terminal.json reflects the unified `blocked` decision ------------------

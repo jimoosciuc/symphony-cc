@@ -31,7 +31,7 @@ from typing import Any
 from symphony.artifact_retention import ArtifactRetentionExecutor
 from symphony.artifacts import ArtifactWriter, redact_text
 from symphony.cleanup import WorkspaceCleanupExecutor
-from symphony.config import LaneConfig, WorkflowConfig
+from symphony.config import LaneConfig, RoleGraphConfig, WorkflowConfig
 from symphony.events import TERMINAL_TURN_EVENTS, AgentEvent
 from symphony.evidence import (
     OUTCOME_COMPLETED_NO_PR_DECLARED,
@@ -71,6 +71,7 @@ from symphony.role_graph import (
     TransitionPlan,
     plan_claim,
     plan_reverse_claim,
+    plan_transition,
     resolve_issue_state,
 )
 from symphony.status import build_status_snapshot
@@ -120,6 +121,7 @@ class WorkerState:
     role_state: str | None = None
     role_actor: str | None = None
     gate_owner: str | None = None
+    role_transition: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -987,6 +989,256 @@ class Orchestrator:
             evidence_summary=f"release_reason={reason}; run_id={self.run_id}",
         )
 
+    def _route_terminal_issue_state(
+        self,
+        worker: WorkerState,
+        detector_result: DetectorResult,
+        *,
+        should_block: bool,
+        block_reason: str,
+        outcome_reason: str,
+    ) -> dict[str, Any]:
+        if self.config.role_graph is not None and worker.role_name and worker.role_state:
+            return self._route_role_terminal_issue_state(
+                worker,
+                detector_result,
+                should_block=should_block,
+                block_reason=block_reason,
+                outcome_reason=outcome_reason,
+            )
+        return self._route_legacy_terminal_issue_state(
+            worker,
+            detector_result,
+            should_block=should_block,
+            block_reason=block_reason,
+            outcome_reason=outcome_reason,
+        )
+
+    def _route_legacy_terminal_issue_state(
+        self,
+        worker: WorkerState,
+        detector_result: DetectorResult,
+        *,
+        should_block: bool,
+        block_reason: str,
+        outcome_reason: str,
+    ) -> dict[str, Any]:
+        route = {
+            "mode": "legacy",
+            "requested": None,
+            "applied": None,
+            "error": None,
+        }
+        if should_block:
+            _comment_blocked_outcome(
+                self.tracker,
+                worker=worker,
+                detector_result=detector_result,
+                block_reason=block_reason,
+                config=self.config,
+            )
+            try:
+                self.tracker.mark_issue_blocked(worker.issue, block_reason)
+                route["applied"] = "mark_issue_blocked"
+            except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
+                route["error"] = str(exc)
+                _LOG.warning(
+                    "mark_issue_blocked failed for %s: %s",
+                    worker.issue.identifier,
+                    exc,
+                )
+            return route
+
+        try:
+            if detector_result.task_outcome == OUTCOME_COMPLETED_WITH_PR:
+                self.tracker.dequeue_issue(worker.issue, outcome_reason)
+                route["applied"] = "dequeue_issue"
+            elif detector_result.task_outcome == OUTCOME_COMPLETED_NO_PR_DECLARED:
+                self.tracker.mark_issue_done(worker.issue, outcome_reason)
+                route["applied"] = "mark_issue_done"
+            else:
+                self.tracker.release_issue(worker.issue, outcome_reason)
+                route["applied"] = "release_issue"
+        except Exception as exc:  # noqa: BLE001 - same rationale
+            route["error"] = str(exc)
+            _LOG.warning(
+                "terminal issue state update failed for %s: %s",
+                worker.issue.identifier,
+                exc,
+            )
+        return route
+
+    def _route_role_terminal_issue_state(
+        self,
+        worker: WorkerState,
+        detector_result: DetectorResult,
+        *,
+        should_block: bool,
+        block_reason: str,
+        outcome_reason: str,
+    ) -> dict[str, Any]:
+        graph = self.config.role_graph
+        if graph is None:  # pragma: no cover - guarded by caller
+            return {"mode": "role_graph", "error": "missing role graph"}
+
+        requested = _role_transition_for_outcome(
+            graph,
+            worker=worker,
+            detector_result=detector_result,
+            should_block=should_block,
+        )
+        route: dict[str, Any] = {
+            "mode": "role_graph",
+            "role": worker.role_name,
+            "from_state": worker.role_state,
+            "task_outcome": detector_result.task_outcome,
+            "requested": requested,
+            "applied": None,
+            "to_state": None,
+            "fallback": None,
+            "error": None,
+        }
+        if requested is None:
+            route["error"] = "no_transition_for_outcome"
+            return self._route_role_fallback(
+                worker,
+                route,
+                block_reason=block_reason,
+                outcome_reason=outcome_reason,
+            )
+
+        evidence = _transition_evidence_for_outcome(
+            detector_result,
+            transition_name=requested,
+            should_block=should_block,
+        )
+        planned = plan_transition(
+            graph,
+            role_name=worker.role_name,
+            transition_name=requested,
+            from_state_name=worker.role_state,
+            evidence=evidence,
+        )
+        if isinstance(planned, TransitionError):
+            route["error"] = {
+                "code": planned.code,
+                "message": planned.message,
+            }
+            return self._route_role_fallback(
+                worker,
+                route,
+                block_reason=block_reason,
+                outcome_reason=outcome_reason,
+            )
+
+        if self._apply_role_transition(
+            worker,
+            planned,
+            route,
+            evidence_summary=_transition_evidence_summary(
+                detector_result,
+                block_reason=block_reason if should_block else None,
+                outcome_reason=outcome_reason,
+            ),
+        ):
+            return route
+        return self._route_role_fallback(
+            worker,
+            route,
+            block_reason=block_reason,
+            outcome_reason=outcome_reason,
+        )
+
+    def _route_role_fallback(
+        self,
+        worker: WorkerState,
+        route: dict[str, Any],
+        *,
+        block_reason: str,
+        outcome_reason: str,
+    ) -> dict[str, Any]:
+        graph = self.config.role_graph
+        if graph is None or worker.role_name is None or worker.role_state is None:
+            return route
+        fallback_name = _first_role_transition(graph, worker.role_name, ("operator_blocked",))
+        if fallback_name is not None and fallback_name != route.get("requested"):
+            planned = plan_transition(
+                graph,
+                role_name=worker.role_name,
+                transition_name=fallback_name,
+                from_state_name=worker.role_state,
+                evidence=("issue_comment",),
+            )
+            if isinstance(planned, TransitionPlan) and self._apply_role_transition(
+                worker,
+                planned,
+                route,
+                evidence_summary=(
+                    f"fallback_reason={route.get('error')}; "
+                    f"block_reason={block_reason}; outcome_reason={outcome_reason}"
+                ),
+                fallback=True,
+            ):
+                return route
+        try:
+            self.tracker.mark_issue_blocked(worker.issue, block_reason)
+            route["fallback"] = "mark_issue_blocked"
+        except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
+            route["error"] = {
+                "code": "fallback_failed",
+                "message": str(exc),
+                "previous": route.get("error"),
+            }
+            _LOG.warning(
+                "role terminal fallback failed for %s: %s",
+                worker.issue.identifier,
+                exc,
+            )
+        return route
+
+    def _apply_role_transition(
+        self,
+        worker: WorkerState,
+        plan: TransitionPlan,
+        route: dict[str, Any],
+        *,
+        evidence_summary: str,
+        fallback: bool = False,
+    ) -> bool:
+        try:
+            result = self.tracker.apply_transition_plan(
+                worker.issue,
+                plan,
+                evidence_summary=evidence_summary,
+            )
+        except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
+            route["error"] = {
+                "code": "apply_transition_failed",
+                "message": str(exc),
+                "previous": route.get("error"),
+            }
+            _LOG.warning(
+                "role terminal transition failed for %s: %s",
+                worker.issue.identifier,
+                exc,
+            )
+            return False
+        if not result.ok:
+            route["error"] = {
+                "code": "apply_transition_not_ok",
+                "message": result.reason,
+                "previous": route.get("error"),
+            }
+            return False
+        route["applied"] = plan.transition.name
+        route["to_state"] = plan.to_state.name
+        if fallback:
+            route["fallback"] = plan.transition.name
+        worker.role_state = plan.to_state.name
+        worker.role_actor = plan.next_actor
+        worker.gate_owner = plan.gate_owner
+        return True
+
     async def _run_remote_dispatch(
         self,
         issue: Issue,
@@ -1382,45 +1634,22 @@ class Orchestrator:
             should_block = non_retryable_failure or completion_blocked
             _maybe_log_task_outcome(worker, detector_result)
 
-            if should_block:
-                block_reason = (
-                    worker.error
-                    or (
-                        f"no_pr_reason={detector_result.no_pr_reason}"
-                        if no_pr_operator_required and detector_result.no_pr_reason
-                        else None
-                    )
-                    or f"task_outcome={detector_result.task_outcome}"
+            block_reason = (
+                worker.error
+                or (
+                    f"no_pr_reason={detector_result.no_pr_reason}"
+                    if no_pr_operator_required and detector_result.no_pr_reason
+                    else None
                 )
-                _comment_blocked_outcome(
-                    self.tracker,
-                    worker=worker,
-                    detector_result=detector_result,
-                    block_reason=block_reason,
-                    config=self.config,
-                )
-                try:
-                    self.tracker.mark_issue_blocked(worker.issue, block_reason)
-                except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
-                    _LOG.warning(
-                        "mark_issue_blocked failed for %s: %s",
-                        worker.issue.identifier,
-                        exc,
-                    )
-            else:
-                try:
-                    if detector_result.task_outcome == OUTCOME_COMPLETED_WITH_PR:
-                        self.tracker.dequeue_issue(worker.issue, outcome_reason)
-                    elif detector_result.task_outcome == OUTCOME_COMPLETED_NO_PR_DECLARED:
-                        self.tracker.mark_issue_done(worker.issue, outcome_reason)
-                    else:
-                        self.tracker.release_issue(worker.issue, outcome_reason)
-                except Exception as exc:  # noqa: BLE001 - same rationale
-                    _LOG.warning(
-                        "terminal issue state update failed for %s: %s",
-                        worker.issue.identifier,
-                        exc,
-                    )
+                or f"task_outcome={detector_result.task_outcome}"
+            )
+            worker.role_transition = self._route_terminal_issue_state(
+                worker,
+                detector_result,
+                should_block=should_block,
+                block_reason=block_reason,
+                outcome_reason=outcome_reason,
+            )
 
             worker.artifacts.write_json(
                 "terminal.json",
@@ -1454,6 +1683,7 @@ class Orchestrator:
                     # incomplete runs without reparsing events.jsonl.
                     "permission_denials_count": permission_denials_count,
                     "usage": worker.usage.to_json() if worker.usage.has_usage else None,
+                    "role_transition": worker.role_transition,
                     # SPEC §17.1 task-outcome row (M5.1 #61, populated by
                     # the M5.2 #60 detector). Routing decisions remain
                     # driven by terminal_state / retryable / blocked —
@@ -1479,10 +1709,20 @@ class Orchestrator:
                 # needs the workspace preserved for inspection. No-op
                 # when workspace.cleanup.enabled or on_terminal_issue
                 # is False.
-                if detector_result.task_outcome in {
-                    OUTCOME_COMPLETED_WITH_PR,
-                    OUTCOME_COMPLETED_NO_PR_DECLARED,
-                }:
+                role_transition_terminal = (
+                    self.config.role_graph is not None
+                    and worker.role_state in self.config.role_graph.states
+                    and self.config.role_graph.states[worker.role_state].terminal
+                )
+                legacy_terminal_cleanup = (
+                    self.config.role_graph is None
+                    and detector_result.task_outcome
+                    in {
+                        OUTCOME_COMPLETED_WITH_PR,
+                        OUTCOME_COMPLETED_NO_PR_DECLARED,
+                    }
+                )
+                if role_transition_terminal or legacy_terminal_cleanup:
                     self._cleanup.cleanup_for_terminal_issue(worker.workspace)
 
     async def _run_one_turn(self, worker: WorkerState, message: str) -> str:
@@ -1660,6 +1900,7 @@ class Orchestrator:
                 "role_state": worker.role_state,
                 "role_actor": worker.role_actor,
                 "gate_owner": worker.gate_owner,
+                "role_transition": worker.role_transition,
                 "security_profile": _worker_config(worker, self.config).security.profile,
                 "terminal_state": (
                     worker.terminal_state.value if worker.terminal_state else None
@@ -1743,6 +1984,84 @@ def _issue_after_transition(issue: Issue, plan: TransitionPlan) -> Issue:
         if label not in labels:
             labels.append(label)
     return replace(issue, labels=tuple(labels))
+
+
+def _role_transition_for_outcome(
+    graph: RoleGraphConfig,
+    *,
+    worker: WorkerState,
+    detector_result: DetectorResult,
+    should_block: bool,
+) -> str | None:
+    if worker.role_name is None:
+        return None
+    if detector_result.task_outcome == OUTCOME_COMPLETED_WITH_PR:
+        return _first_role_transition(graph, worker.role_name, ("pr_delivered",))
+    if detector_result.task_outcome == OUTCOME_COMPLETED_NO_PR_DECLARED:
+        if _no_pr_reason_requires_operator(detector_result.no_pr_reason):
+            return _first_role_transition(graph, worker.role_name, ("design_needed",))
+        return _first_role_transition(graph, worker.role_name, ("no_work_needed", "done"))
+    if should_block:
+        return _first_role_transition(graph, worker.role_name, ("operator_blocked",))
+    return None
+
+
+def _first_role_transition(
+    graph: RoleGraphConfig,
+    role_name: str,
+    names: tuple[str, ...],
+) -> str | None:
+    for name in names:
+        transition = graph.transitions.get(name)
+        if transition is not None and transition.role == role_name:
+            return name
+    return None
+
+
+def _transition_evidence_for_outcome(
+    detector_result: DetectorResult,
+    *,
+    transition_name: str,
+    should_block: bool,
+) -> tuple[str, ...]:
+    evidence: list[str] = []
+    if _task_evidence_has(detector_result, "pr_linked"):
+        evidence.append("pr_link")
+    if (
+        transition_name in {"design_needed", "operator_blocked", "no_work_needed"}
+        or detector_result.no_pr_reason
+        or should_block
+    ):
+        evidence.append("issue_comment")
+    return tuple(dict.fromkeys(evidence))
+
+
+def _task_evidence_has(detector_result: DetectorResult, evidence_type: str) -> bool:
+    return any(entry.get("type") == evidence_type for entry in detector_result.task_evidence)
+
+
+def _transition_evidence_summary(
+    detector_result: DetectorResult,
+    *,
+    block_reason: str | None,
+    outcome_reason: str,
+) -> str:
+    parts = [
+        f"task_outcome={detector_result.task_outcome}",
+        f"outcome_reason={outcome_reason}",
+    ]
+    if detector_result.no_pr_reason:
+        parts.append(f"no_pr_reason={detector_result.no_pr_reason}")
+    if block_reason:
+        parts.append(f"block_reason={block_reason}")
+    pr_urls = [
+        str(entry.get("url"))
+        for entry in detector_result.task_evidence
+        if entry.get("type") == "pr_linked" and entry.get("url")
+    ]
+    if pr_urls:
+        parts.append(f"pr_link={pr_urls[0]}")
+    return "; ".join(parts)
 
 
 def _terminal_reason(worker: WorkerState) -> str:
