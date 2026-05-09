@@ -34,6 +34,7 @@ Run these only against disposable issues and trusted test repositories:
 make live-e2e
 make live-remote-claude
 make live-concurrency-e2e
+make live-lanes-e2e
 ```
 
 Before enabling a production topology:
@@ -41,6 +42,7 @@ Before enabling a production topology:
 - run `make live-e2e` before any unattended pilot;
 - run `make live-remote-claude` before `remote.enabled: true`;
 - run `make live-concurrency-e2e` before `agent.max_concurrency > 1`;
+- run `make live-lanes-e2e` before enabling runtime lanes;
 - save `/status.json`, `terminal.json`, evidence JSON, PR URLs, and issue URLs;
 - file follow-up issues for every skipped, failed, or inconclusive live path.
 

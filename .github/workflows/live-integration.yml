@@ -17,6 +17,7 @@ on:
           - full-e2e
           - remote-claude
           - concurrency-e2e
+          - lanes-e2e
           - validation-matrix
 
 jobs:
@@ -104,3 +105,15 @@ jobs:
           SYMPHONY_CONCURRENCY_E2E_PERMISSION_MODE: ${{ vars.SYMPHONY_CONCURRENCY_E2E_PERMISSION_MODE }}
           SYMPHONY_CLAUDE_TEST_MODEL: ${{ vars.SYMPHONY_CLAUDE_TEST_MODEL }}
         run: make live-concurrency-e2e
+
+      - name: Run runtime lanes E2E
+        if: ${{ inputs.target == 'all' || inputs.target == 'validation-matrix' || inputs.target == 'lanes-e2e' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.SYMPHONY_GITHUB_TOKEN || github.token }}
+          SYMPHONY_GITHUB_TEST_OWNER: ${{ vars.SYMPHONY_GITHUB_TEST_OWNER }}
+          SYMPHONY_GITHUB_TEST_REPO: ${{ vars.SYMPHONY_GITHUB_TEST_REPO }}
+          SYMPHONY_LANES_E2E_ISSUES: ${{ vars.SYMPHONY_LANES_E2E_ISSUES }}
+          SYMPHONY_LANES_E2E_PERMISSION_MODE: ${{ vars.SYMPHONY_LANES_E2E_PERMISSION_MODE }}
+          SYMPHONY_LANES_E2E_REQUIRE_PR: ${{ vars.SYMPHONY_LANES_E2E_REQUIRE_PR }}
+          SYMPHONY_CLAUDE_TEST_MODEL: ${{ vars.SYMPHONY_CLAUDE_TEST_MODEL }}
+        run: make live-lanes-e2e

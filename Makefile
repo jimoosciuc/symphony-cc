@@ -1,9 +1,9 @@
-.PHONY: help setup lint test ci all failure-drills security-audit live-github live-graphql live-claude live-remote live-remote-claude live-e2e live-concurrency-e2e live-integration live-validation
+.PHONY: help setup lint test ci all failure-drills security-audit live-github live-graphql live-claude live-remote live-remote-claude live-e2e live-concurrency-e2e live-lanes-e2e live-integration live-validation
 
 PYTHON ?= python
 
 help:
-	@echo "Targets: setup, lint, test, ci, all, failure-drills, security-audit, live-github, live-graphql, live-claude, live-remote, live-remote-claude, live-e2e, live-concurrency-e2e, live-integration, live-validation"
+	@echo "Targets: setup, lint, test, ci, all, failure-drills, security-audit, live-github, live-graphql, live-claude, live-remote, live-remote-claude, live-e2e, live-concurrency-e2e, live-lanes-e2e, live-integration, live-validation"
 
 setup:
 	$(PYTHON) -m pip install --upgrade pip
@@ -46,6 +46,9 @@ live-e2e:
 live-concurrency-e2e:
 	SYMPHONY_RUN_CONCURRENCY_E2E=1 PYTHONPATH=src pytest tests/test_live_e2e_concurrency.py -v -s
 
+live-lanes-e2e:
+	SYMPHONY_RUN_LANES_E2E=1 PYTHONPATH=src pytest tests/test_live_e2e_lanes.py -v -s
+
 live-integration: live-github live-graphql live-claude live-remote
 
-live-validation: live-github live-graphql live-claude live-remote live-e2e live-remote-claude live-concurrency-e2e
+live-validation: live-github live-graphql live-claude live-remote live-e2e live-remote-claude live-concurrency-e2e live-lanes-e2e

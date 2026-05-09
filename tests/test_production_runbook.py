@@ -33,6 +33,7 @@ def test_production_operations_runbook_preserves_key_safety_guidance() -> None:
         "Never put token literals in `WORKFLOW.md`",
         "make live-remote-claude",
         "make live-concurrency-e2e",
+        "make live-lanes-e2e",
         "Do not delete workspaces or artifacts during a restart",
         "Verify no tracker token appears in remote worker payloads or logs",
         "No-go",
