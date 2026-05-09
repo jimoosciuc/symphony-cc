@@ -580,7 +580,10 @@ def test_expected_branch_name_uses_prefix_owner_repo_number() -> None:
 
 
 def test_find_linked_pull_requests_returns_normalized_pr() -> None:
+    calls: list[str] = []
+
     def h(req: httpx.Request) -> httpx.Response:
+        calls.append(str(req.url))
         # Verify head filter is correct.
         assert req.url.params.get("head") == "acme:symphony/acme-proj-42"
         assert req.url.params.get("state") == "open"
@@ -617,6 +620,101 @@ def test_find_linked_pull_requests_returns_normalized_pr() -> None:
     assert pr.base_ref == "main"
     assert pr.is_draft is True
     assert pr.linked_issue_identifier == "#42"
+    assert len(calls) == 1
+
+
+def test_find_linked_pull_requests_falls_back_to_closing_reference() -> None:
+    calls: list[httpx.URL] = []
+
+    def h(req: httpx.Request) -> httpx.Response:
+        calls.append(req.url)
+        if req.url.params.get("head"):
+            return httpx.Response(200, json=[])
+        assert req.url.params.get("state") == "open"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 100,
+                    "node_id": "PR_100",
+                    "number": 8,
+                    "title": "Agent branch",
+                    "html_url": "https://x/pulls/8",
+                    "state": "open",
+                    "draft": True,
+                    "head": {
+                        "ref": "live-e2e-smoke-20260509T073327Z",
+                        "repo": {
+                            "name": "proj",
+                            "owner": {"login": "acme"},
+                        },
+                    },
+                    "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                    "body": "Summary\n\nCloses #42",
+                },
+                {
+                    "id": 101,
+                    "node_id": "PR_101",
+                    "number": 9,
+                    "title": "Other issue",
+                    "html_url": "https://x/pulls/9",
+                    "state": "open",
+                    "draft": True,
+                    "head": {
+                        "ref": "other-branch",
+                        "repo": {
+                            "name": "proj",
+                            "owner": {"login": "acme"},
+                        },
+                    },
+                    "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                    "body": "Closes #99",
+                },
+            ],
+        )
+
+    client = _make_client(h)
+    out = find_linked_pull_requests(client, _issue(), _github_config())
+
+    assert len(calls) == 2
+    assert len(out) == 1
+    assert out[0].number == 8
+    assert out[0].head_ref == "live-e2e-smoke-20260509T073327Z"
+    assert out[0].linked_issue_identifier == "#42"
+
+
+def test_find_linked_pull_requests_fallback_matches_owner_repo_reference() -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        if req.url.params.get("head"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 100,
+                    "node_id": "PR_100",
+                    "number": 8,
+                    "title": "Agent branch",
+                    "html_url": "https://x/pulls/8",
+                    "state": "open",
+                    "draft": True,
+                    "head": {
+                        "ref": "agent-branch",
+                        "repo": {
+                            "name": "proj",
+                            "owner": {"login": "acme"},
+                        },
+                    },
+                    "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                    "body": "Resolves acme/proj#42",
+                }
+            ],
+        )
+
+    out = find_linked_pull_requests(_make_client(h), _issue(), _github_config())
+
+    assert len(out) == 1
+    assert out[0].linked_issue_identifier == "acme/proj#42"
 
 
 def test_find_linked_pull_requests_handles_404_as_empty() -> None:
