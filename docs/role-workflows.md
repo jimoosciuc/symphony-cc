@@ -1,176 +1,305 @@
-# Role-Specific Workflow Examples
+# Role Workflow Model
 
-Symphony can run a production-line model by starting multiple `symphony run`
-processes, each with a different workflow file and a different issue label
-filter. This does not require a new scheduler. GitHub issues, labels, comments,
-and PRs remain the required coordination surface.
+Symphony role workflows model a GitHub-first production line. The core
+abstraction is not a fixed set of job titles. It is a graph of states,
+roles, actors, transitions, and gates.
 
-GitHub Projects can be useful for visibility, but they are optional metadata.
-Do not make project membership a prerequisite for a role daemon to work.
+This document describes the product model that should replace prompt-only
+role conventions. GitHub issues, PRs, labels, and comments remain the source
+of truth. GitHub Projects may mirror status, but they must not be required for
+routing.
 
-## Roles
+## Product Objects
 
-| Role | Primary input | Primary output |
-| --- | --- | --- |
-| Leader | `role:leader`, `status:blocked`, stale PRs/issues | Decisions, split issues, follow-ups, `leader-owned` work |
-| Planner | `status:needs-spec` | Implementation-ready issue body and acceptance criteria |
-| Implementer | `status:ready-for-implementation` | Draft or ready PR, `status:ready-for-review` |
-| Reviewer | `status:ready-for-review` | Review comments, `status:changes-requested` or `status:ready-for-verification` |
-| Fixer | `status:changes-requested`, `status:test-failed` | PR updates, `status:ready-for-review` |
-| Verifier | `status:ready-for-verification` | Evidence comment, `status:ready-to-merge` or `status:test-failed` |
-| Release | `status:ready-to-merge` | Merged PR, closed issue |
-
-The examples use `role:*` and `status:*` labels because they are explicit and
-easy to route. Repositories can map these to existing labels, but every role
-should have a narrow input label set.
-
-## Ownership Rules
-
-- A role must only claim issues matching its input labels.
-- A role must inspect recent issue comments, linked PRs, and labels before
-  starting work.
-- A role must not claim issues labeled `do-not-claim`.
-- A role must not claim issues labeled `leader-owned` unless it is the leader.
-- A role should post a short claim/status comment when it starts work.
-- A role should remove its input label and add the next status label when it
-  hands off work.
-- If a task is too broad, the leader or planner should split it before
-  implementation starts.
-
-Leader direct implementation has an extra rule: the leader must first mark the
-issue `leader-owned` and `do-not-claim`, then comment that the leader is taking
-the work. This prevents an implementer from starting the same issue.
-
-## Permission Model
-
-Use separate GitHub tokens when possible.
-
-| Role | Suggested permission shape |
+| Object | Meaning |
 | --- | --- |
-| Planner | Issues read/write for comments and labels. Contents read. |
-| Reviewer | Pull requests read/write for review comments. Contents read. Issues read/write for status labels. |
-| Implementer | Contents write, pull requests write, issues read/write. No merge permission. |
-| Fixer | Same as implementer. |
-| Verifier | Contents read, pull requests read, issues read/write for evidence/status labels. |
-| Release | Pull requests write/merge and issues write/close. Avoid broad code editing duties. |
-| Leader | Issues/PRs read/write. Code write only when explicitly using `leader-owned`. |
+| Role | A named responsibility boundary, such as `implementer`, `reviewer`, or `leader`. |
+| Actor | Who performs the role: `agent`, `human`, or `hybrid`. |
+| State | A routable issue or PR state represented by labels. |
+| Transition | A permitted move from one state to another. |
+| Gate | A state that requires a specific role to make or record a decision. |
+| Audit policy | The comment/evidence required before a transition is accepted. |
 
-For small teams, the same token can run multiple roles, but the workflow prompt
-should still state the role boundary clearly.
+Roles define what work can be claimed. States define where work currently is.
+Transitions define what a role is allowed to change.
 
-## Label Handoff
+## Scheduler Contract
 
-Recommended lifecycle:
+The role graph is a scheduler contract. It is not just documentation and it is
+not just prompt text.
 
-```text
-status:needs-spec
-  -> planner
-  -> status:ready-for-implementation
-  -> implementer
-  -> status:ready-for-review
-  -> reviewer
-  -> status:changes-requested
-  -> fixer
-  -> status:ready-for-review
+The scheduler is responsible for:
+
+1. resolving the current state from tracker labels;
+2. selecting the role allowed to claim that state;
+3. skipping states owned by human actors;
+4. creating the claim transition;
+5. rendering the role-specific prompt for agent actors;
+6. collecting outcome evidence from the run;
+7. validating that the requested transition is allowed for the active role;
+8. applying source and destination label changes;
+9. writing or verifying required audit evidence;
+10. exposing the next actor and gate owner in status surfaces.
+
+The agent is responsible for execution inside that boundary:
+
+1. inspect the issue, PR, comments, and workspace;
+2. make code or review changes allowed by the role;
+3. produce evidence such as a PR link, review summary, design proposal, or
+   blocker explanation;
+4. report one of the role's allowed outcomes.
+
+An agent should not be trusted to decide arbitrary tracker transitions. If an
+agent reports an outcome that is not permitted by the role graph, Symphony must
+leave the issue in a safe gate state and surface the mismatch.
+
+## Minimal Production Roles
+
+The recommended production preset has three roles. Teams may rename or split
+them, but the workflow must still encode ownership of implementation, review,
+and decision gates.
+
+| Role | Default actor | Owns | Must not do |
+| --- | --- | --- | --- |
+| Implementer | Agent | Code changes, tests, PR creation, PR updates after requested changes. | Mark an open issue done, approve its own PR, clear design gates. |
+| Reviewer | Human or agent | PR review, quality gate, requested changes, approval recommendation. | Implement non-trivial fixes unless explicitly configured. |
+| Leader | Human, agent, or hybrid | Product/design decisions, issue splitting, stalled work, gate overrides. | Silently unblock without an auditable comment. |
+
+Other roles are refinements of these boundaries:
+
+| Optional role | Usually split from |
+| --- | --- |
+| Planner | Leader |
+| Fixer | Implementer |
+| Verifier | Reviewer |
+| Release | Reviewer or Leader |
+| Operator | Leader |
+
+## State Graph
+
+Default production states should be explicit role handoffs:
+
+```mermaid
+flowchart TD
+    ReadyImpl["symphony-ready-impl"]
+    Implementing["symphony-implementing"]
+    ReadyReview["symphony-ready-review"]
+    Reviewing["symphony-reviewing"]
+    Changes["symphony-changes-requested"]
+    Approved["symphony-approved"]
+    Done["symphony-done"]
+
+    NeedsDesign["symphony-needs-design"]
+    NeedsLeader["symphony-needs-leader"]
+    BlockedOperator["symphony-blocked-operator"]
+
+    ReadyImpl -->|implementer claims| Implementing
+    Implementing -->|PR opened or updated| ReadyReview
+    Implementing -->|needs product/design decision| NeedsDesign
+    Implementing -->|tooling, auth, environment blocker| BlockedOperator
+
+    ReadyReview -->|reviewer claims| Reviewing
+    Reviewing -->|changes requested| Changes
+    Reviewing -->|approved| Approved
+    Reviewing -->|scope/design ambiguity| NeedsLeader
+
+    Changes -->|implementer claims| Implementing
+    Approved -->|release policy satisfied| Done
+
+    NeedsDesign -->|leader decision comment| ReadyImpl
+    NeedsLeader -->|leader decision comment| ReadyImpl
+    BlockedOperator -->|operator or leader fix comment| ReadyImpl
 ```
 
-or, after approval:
+`symphony-done` is terminal. Opening or updating a PR is not terminal; it is a
+handoff from implementation to review.
 
-```text
-status:ready-for-review
-  -> reviewer
-  -> status:ready-for-verification
-  -> verifier
-  -> status:ready-to-merge
-  -> release
-  -> closed
-```
+## Gate Ownership
 
-Blocked work:
+Blocked states are not generic. Each gate has an owner role and an unblock
+rule.
 
-```text
-status:blocked
-  -> leader
-  -> status:ready-for-implementation
-```
+| Gate state | Owner role | Unblock requirement | Next state |
+| --- | --- | --- | --- |
+| `symphony-needs-design` | Leader | Comment with concrete design decision or issue split. | `symphony-ready-impl` |
+| `symphony-needs-leader` | Leader | Comment resolving scope, priority, duplicate PR, or ownership conflict. | `symphony-ready-impl` or `symphony-ready-review` |
+| `symphony-blocked-operator` | Operator or Leader | Comment explaining the environmental fix. | `symphony-ready-impl` |
+| `symphony-changes-requested` | Implementer | PR update addressing review comments. | `symphony-ready-review` |
 
-Use comments to explain each transition. A label change without a handoff
-comment is hard for the next role to trust.
+A role may only clear gates it owns. If a role needs a decision it does not
+own, it must route to the owning gate instead of guessing.
 
-## Running Roles
+## Transition Rules
 
-Copy the example workflows and edit owner, repo, paths, and model:
+Every transition has three parts:
 
-```bash
-cp -R examples/roles /tmp/symphony-roles
-$EDITOR /tmp/symphony-roles/WORKFLOW.implementer.md
-```
+1. Source labels to remove.
+2. Destination labels to add.
+3. Audit evidence to write or verify.
 
-Run one daemon per role:
+Examples:
 
-```bash
-symphony run --workflow /tmp/symphony-roles/WORKFLOW.leader.md
-symphony run --workflow /tmp/symphony-roles/WORKFLOW.implementer.md
-symphony run --workflow /tmp/symphony-roles/WORKFLOW.reviewer.md
-```
+| Transition | Remove | Add | Required evidence |
+| --- | --- | --- | --- |
+| Claim implementation | `symphony-ready-impl` | `symphony-implementing` | Claim comment with run id. |
+| PR delivered | `symphony-implementing` | `symphony-ready-review` | PR link comment. |
+| Design needed | `symphony-implementing` | `symphony-needs-design` | Issue comment with concrete question/proposal. |
+| Review changes requested | `symphony-reviewing` | `symphony-changes-requested` | PR review or issue comment listing required changes. |
+| Review approved | `symphony-reviewing` | `symphony-approved` | PR approval or review summary. |
+| Leader unblocks design | `symphony-needs-design` | `symphony-ready-impl` | Leader decision comment. |
+| Complete issue | `symphony-approved` | `symphony-done` | Merge/close evidence, or explicit terminal no-work decision. |
 
-Use separate workspace/session/artifact roots for each role. This avoids
-artifact overlap and makes it clear which role produced a PR or comment.
+Label updates should be performed together where the tracker API allows it.
+GitHub REST label operations are not fully atomic, so Symphony must tolerate
+intermediate states by excluding active and gate labels during candidate
+selection.
 
-For smaller deployments, one daemon can also define runtime lanes in a single
-workflow file. Lanes keep the same GitHub-first label handoff model but let the
-orchestrator select a role profile per issue:
+## Actor Modes
+
+A role can be handled by an agent, a human, or both.
+
+| Actor | Behavior |
+| --- | --- |
+| `agent` | Symphony may claim matching work and perform allowed transitions. |
+| `human` | Symphony must not claim the state; it may only observe and surface dashboard status. |
+| `hybrid` | Symphony may draft recommendations, but a human-owned approval marker is required before unblocking. |
+
+This keeps the model useful for teams where humans are reviewers or leaders.
+Human roles are still part of the graph, so the system can explain what is
+waiting and who owns the next move.
+
+## Configuration Sketch
+
+The final schema may differ, but it should preserve these concepts:
 
 ```yaml
-lanes:
-  - name: implementer
-    include_labels: ["status:ready-for-implementation"]
-    exclude_labels: ["do-not-claim", "leader-owned"]
-    max_concurrency: 2
-    prompt_prefix: "You are the implementer. Make scoped code changes."
-    prompt_suffix: "When complete, open a PR linked to the issue."
-  - name: reviewer
-    include_labels: ["status:ready-for-review"]
-    exclude_labels: ["do-not-claim", "leader-owned"]
-    max_concurrency: 1
-    prompt_prefix: "You are the reviewer. Review the linked PR only."
-  - name: leader
-    include_labels: ["status:blocked"]
-    exclude_labels: ["do-not-claim"]
-    max_concurrency: 1
-    prompt_prefix: "You are the leader. Clarify, split, or unblock work."
+roles:
+  implementer:
+    actor: agent
+    provider: claude_code
+    can_claim: [ready_impl, changes_requested]
+    claim_state: implementing
+    transitions:
+      pr_delivered:
+        from: implementing
+        to: ready_review
+        requires: pr_link
+      design_needed:
+        from: implementing
+        to: needs_design
+        requires: issue_comment
+      operator_blocked:
+        from: implementing
+        to: blocked_operator
+        requires: issue_comment
+
+  reviewer:
+    actor: human
+    can_claim: [ready_review]
+    claim_state: reviewing
+    transitions:
+      changes_requested:
+        from: reviewing
+        to: changes_requested
+        requires: review_comment
+      approved:
+        from: reviewing
+        to: approved
+        requires: pr_approval
+      needs_leader:
+        from: reviewing
+        to: needs_leader
+        requires: issue_comment
+
+  leader:
+    actor: hybrid
+    can_claim: [needs_design, needs_leader, blocked_operator]
+    claim_state: leader_reviewing
+    transitions:
+      decision_to_impl:
+        from: [needs_design, needs_leader, blocked_operator]
+        to: ready_impl
+        requires: decision_comment
+
+states:
+  ready_impl:
+    labels: [symphony-ready-impl]
+  implementing:
+    labels: [symphony-implementing]
+  ready_review:
+    labels: [symphony-ready-review]
+  reviewing:
+    labels: [symphony-reviewing]
+  changes_requested:
+    labels: [symphony-changes-requested]
+  needs_design:
+    labels: [symphony-needs-design]
+    gate_owner: leader
+  needs_leader:
+    labels: [symphony-needs-leader]
+    gate_owner: leader
+  blocked_operator:
+    labels: [symphony-blocked-operator]
+    gate_owner: leader
+  approved:
+    labels: [symphony-approved]
+  done:
+    labels: [symphony-done]
+    terminal: true
 ```
 
-Runtime lanes are optional. Existing single-role workflow files still work.
-Use lane-level prompts for role boundaries; use GitHub labels and comments for
-handoff. GitHub Projects remain optional metadata and must not be required for
-lane selection.
+## Presets
 
-## Example Files
+Presets should compile to the same role graph model.
 
-The repository includes copyable workflow examples:
+| Preset | Intended use |
+| --- | --- |
+| `solo-agent` | One agent does simple implementation work. It still routes PR delivery to a review/waiting state instead of done. |
+| `human-review` | Agent implements; human reviews and approves; leader gates are human-owned. |
+| `production-line` | Implementer, reviewer, leader, verifier, and release roles are explicit. |
 
-- `examples/roles/WORKFLOW.leader.md`
-- `examples/roles/WORKFLOW.planner.md`
-- `examples/roles/WORKFLOW.implementer.md`
-- `examples/roles/WORKFLOW.reviewer.md`
-- `examples/roles/WORKFLOW.fixer.md`
-- `examples/roles/WORKFLOW.verifier.md`
-- `examples/roles/WORKFLOW.release.md`
+The default production recommendation should be `human-review` or
+`production-line`. `solo-agent` is for low-risk repositories and should be
+documented as less reliable.
 
-They are examples, not a hard protocol. The invariant is that every role has a
-clear input label set, a clear output handoff, and a prompt that tells it not to
-duplicate another role's work.
+## Dashboard Requirements
+
+The dashboard should show:
+
+- current role;
+- current state;
+- gate owner, when blocked;
+- next expected actor;
+- last transition evidence;
+- linked PR and review status.
+
+An operator should not have to infer ownership from raw labels.
+
+## Backward Compatibility
+
+Existing single-lane workflows remain valid. Compatibility mapping:
+
+| Existing label | Role-graph meaning |
+| --- | --- |
+| `symphony-ready` | `ready_impl` |
+| `symphony-running` | `implementing` |
+| `symphony-blocked` | `blocked_operator` unless a more specific reason is available |
+| `symphony-done` | `done` |
+
+New init templates should prefer role-specific labels. Existing templates may
+keep the compatibility labels until the role graph implementation is complete.
 
 ## Non-Goals
 
-This role model does not add:
+This model does not require:
 
-- a database,
-- GitHub Projects as a requirement,
-- Linear support,
-- Codex support,
-- automatic merge authority for non-release roles.
+- a database;
+- Linear support;
+- Codex support;
+- GitHub Projects;
+- automatic merge authority for implementation or review agents;
+- fixed role names across all teams.
 
-Those can be designed later if the simple multi-process or runtime-lane model
-proves useful.
+The required invariant is explicit ownership: for every state, Symphony must
+know who can claim it, who can unblock it, and what evidence is required to
+move it forward.
