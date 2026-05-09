@@ -9,6 +9,8 @@ from symphony.role_graph import (
     TransitionError,
     TransitionPlan,
     graph_for_config,
+    plan_claim,
+    plan_reverse_claim,
     plan_transition,
     resolve_issue_state,
 )
@@ -123,6 +125,46 @@ def test_design_needed_transition_plans_leader_gate() -> None:
     assert plan.next_role == "leader"
     assert plan.next_actor == "hybrid"
     assert plan.gate_owner == "leader"
+
+
+def test_claim_transition_moves_dispatchable_state_to_role_claim_state() -> None:
+    graph = _graph()
+    resolution = resolve_issue_state(graph, _issue(labels=("symphony-ready-impl",)))
+
+    plan = plan_claim(graph, resolution)
+
+    assert isinstance(plan, TransitionPlan)
+    assert plan.transition.name == "claim:implementer"
+    assert plan.from_state.name == "ready_impl"
+    assert plan.to_state.name == "implementing"
+    assert plan.labels_to_remove == ("symphony-ready-impl",)
+    assert plan.labels_to_add == ("symphony-implementing",)
+    assert plan.required_evidence == ("claim_comment",)
+
+
+def test_claim_transition_requires_dispatch_role() -> None:
+    graph = _graph()
+    resolution = resolve_issue_state(graph, _issue(labels=("symphony-done",)))
+
+    error = plan_claim(graph, resolution)
+
+    assert isinstance(error, TransitionError)
+    assert error.code == "no_dispatch_role"
+
+
+def test_reverse_claim_returns_to_original_state() -> None:
+    graph = _graph()
+    resolution = resolve_issue_state(graph, _issue(labels=("symphony-ready-impl",)))
+    claim = plan_claim(graph, resolution)
+    assert isinstance(claim, TransitionPlan)
+
+    reverse = plan_reverse_claim(graph, claim, reason="start-failed")
+
+    assert reverse.transition.name == "release:implementer:start-failed"
+    assert reverse.from_state.name == "implementing"
+    assert reverse.to_state.name == "ready_impl"
+    assert reverse.labels_to_remove == ("symphony-implementing",)
+    assert reverse.labels_to_add == ("symphony-ready-impl",)
 
 
 def test_missing_evidence_blocks_transition_plan() -> None:

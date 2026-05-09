@@ -23,7 +23,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -65,6 +65,14 @@ from symphony.recovery import (
 from symphony.remote.dispatcher import RemoteIssueDispatcher
 from symphony.remote.runner import RemoteDispatchRunResult
 from symphony.retry import RetryState, next_backoff_ms
+from symphony.role_graph import (
+    StateResolution,
+    TransitionError,
+    TransitionPlan,
+    plan_claim,
+    plan_reverse_claim,
+    resolve_issue_state,
+)
 from symphony.status import build_status_snapshot
 from symphony.usage import UsageTotals
 from symphony.workflow import render_prompt
@@ -108,6 +116,10 @@ class WorkerState:
     timeout_subtype: str | None = None
     usage: UsageTotals = field(default_factory=UsageTotals)
     lane: LaneConfig | None = None
+    role_name: str | None = None
+    role_state: str | None = None
+    role_actor: str | None = None
+    gate_owner: str | None = None
 
 
 @dataclass(slots=True)
@@ -163,6 +175,7 @@ class Orchestrator:
         self.active: dict[str, WorkerState] = {}
         self.retry_states: dict[str, RetryState] = {}
         self.recent_finished: list[dict[str, Any]] = []
+        self.role_waiting: dict[str, dict[str, Any]] = {}
         # Recovery handoff: when restart recovery decides to drop a session
         # and let normal dispatch start a fresh one (the
         # ``new_session_with_summary`` policy), it stashes the prior
@@ -312,16 +325,26 @@ class Orchestrator:
         return self._render_prompt_for_issue(
             worker.issue,
             workspace_path=str(worker.workspace.path),
+            role_info=_role_info_for_worker(worker),
         )
 
-    def _render_prompt_for_issue(self, issue: Issue, *, workspace_path: str) -> str:
+    def _render_prompt_for_issue(
+        self,
+        issue: Issue,
+        *,
+        workspace_path: str,
+        role_info: dict[str, str | None] | None = None,
+    ) -> str:
         workflow = self._workflow_reloader.snapshot.workflow if self._workflow_reloader else None
         if workflow is None:
             return f"Work on {issue.identifier}."
+        extra: dict[str, Any] = {"workspace_path": workspace_path}
+        if role_info is not None:
+            extra["role"] = role_info
         return render_prompt(
             workflow,
             issue=issue,
-            extra={"workspace_path": workspace_path},
+            extra=extra,
         )
 
     # -- Restart recovery (#31) ---------------------------------------------
@@ -763,59 +786,122 @@ class Orchestrator:
             return
         now = self._clock()
         local_runs = []
+        role_graph = self.config.role_graph
+        if role_graph is not None:
+            self.role_waiting = {}
         for issue in candidates:
             if slots_open == 0:
                 break
-            lane = self._select_lane(issue)
-            if lane is None and self.config.lanes:
-                continue
-            if self.config.lanes:
-                if not self._lane_has_capacity(lane):
-                    continue
             if issue.identifier in self.active:
                 continue
             retry = self.retry_states.get(issue.identifier)
             if retry is not None and not retry.should_run(now=now):
                 continue
 
+            lane: LaneConfig | None = None
+            role_resolution: StateResolution | None = None
+            role_claim_plan: TransitionPlan | None = None
+            dispatch_issue = issue
+            if role_graph is not None:
+                role_resolution = resolve_issue_state(role_graph, issue)
+                if not role_resolution.dispatchable:
+                    self._remember_role_waiting(issue, role_resolution)
+                    continue
+                planned = plan_claim(role_graph, role_resolution)
+                if isinstance(planned, TransitionError):
+                    _LOG.warning(
+                        "role claim planning failed for %s: %s",
+                        issue.identifier,
+                        planned.message,
+                    )
+                    self._remember_role_waiting(issue, role_resolution, error=planned.message)
+                    continue
+                role_claim_plan = planned
+            else:
+                lane = self._select_lane(issue)
+                if lane is None and self.config.lanes:
+                    continue
+                if self.config.lanes:
+                    if not self._lane_has_capacity(lane):
+                        continue
+
             # Claim BEFORE provider start. If claim fails, do not run.
             run_metadata = {
                 "run_id": self.run_id,
                 "started_at": now.isoformat(),
             }
-            try:
-                claim = self.tracker.claim_issue(issue, run_metadata)
-            except TrackerError as exc:
-                _LOG.warning("claim raised for %s: %s", issue.identifier, exc)
-                continue
-            if not claim.ok:
-                if claim.conflict:
+            if role_claim_plan is not None:
+                try:
+                    transition_result = self.tracker.apply_transition_plan(
+                        issue,
+                        role_claim_plan,
+                        evidence_summary=(
+                            f"run_id={self.run_id}; started_at={now.isoformat()}"
+                        ),
+                    )
+                except TrackerError as exc:
+                    _LOG.warning("role claim raised for %s: %s", issue.identifier, exc)
+                    continue
+                if not transition_result.ok:
                     result.skipped_claim_conflict.append(issue.identifier)
-                continue
+                    continue
+                dispatch_issue = _issue_after_transition(issue, role_claim_plan)
+                claim = ClaimResult(ok=True, reason=transition_result.reason)
+            else:
+                try:
+                    claim = self.tracker.claim_issue(issue, run_metadata)
+                except TrackerError as exc:
+                    _LOG.warning("claim raised for %s: %s", issue.identifier, exc)
+                    continue
+                if not claim.ok:
+                    if claim.conflict:
+                        result.skipped_claim_conflict.append(issue.identifier)
+                    continue
 
+            role_info = _role_info(role_resolution, role_claim_plan)
+            role_claim = role_claim_plan
             if self.config.remote.enabled:
-                await self._run_remote_dispatch(issue, retry=retry, result=result)
+                await self._run_remote_dispatch(
+                    dispatch_issue,
+                    retry=retry,
+                    result=result,
+                    role_info=role_info,
+                    role_claim=role_claim,
+                )
                 slots_open -= 1
                 continue
 
             try:
-                worker = await self._start_worker(issue, retry=retry, lane=lane)
+                worker = await self._start_worker(
+                    dispatch_issue,
+                    retry=retry,
+                    lane=lane,
+                    role_info=role_info,
+                )
             except ProviderRetryableError as exc:
                 # Restore-startup failure under resume_same_session, or any
                 # other startup-time retryable provider error. Schedule a
                 # retry per RetryConfig.
                 _LOG.warning("start_worker retryable failure for %s: %s", issue.identifier, exc)
-                self.tracker.release_issue(issue, "start-failed-retryable")
-                self._on_worker_failed(issue, str(exc), retryable=True)
+                self._release_claim_after_start_failure(
+                    dispatch_issue,
+                    role_claim,
+                    reason="start-failed-retryable",
+                )
+                self._on_worker_failed(dispatch_issue, str(exc), retryable=True)
                 result.retries_scheduled.append(issue.identifier)
                 continue
             except Exception as exc:  # noqa: BLE001 - every other failure releases the claim
                 _LOG.exception("start_worker failed for %s", issue.identifier)
-                self.tracker.release_issue(issue, "start-failed")
-                self._on_worker_failed(issue, str(exc), retryable=False)
+                self._release_claim_after_start_failure(
+                    dispatch_issue,
+                    role_claim,
+                    reason="start-failed",
+                )
+                self._on_worker_failed(dispatch_issue, str(exc), retryable=False)
                 continue
-            self.active[issue.identifier] = worker
-            result.dispatched.append(issue.identifier)
+            self.active[dispatch_issue.identifier] = worker
+            result.dispatched.append(dispatch_issue.identifier)
             slots_open -= 1
             local_runs.append(self._run_worker(worker, result, claim))
 
@@ -843,12 +929,72 @@ class Orchestrator:
         )
         return active < limit
 
+    def _remember_role_waiting(
+        self,
+        issue: Issue,
+        resolution: StateResolution,
+        *,
+        error: str | None = None,
+    ) -> None:
+        state = resolution.state
+        role = resolution.dispatch_role
+        self.role_waiting[issue.identifier] = {
+            "issue_identifier": issue.identifier,
+            "issue_url": issue.url,
+            "issue_title": issue.title,
+            "role": role.name if role else None,
+            "state": state.name if state else None,
+            "actor": resolution.actor,
+            "gate_owner": resolution.gate_owner,
+            "dispatchable": resolution.dispatchable,
+            "waiting": resolution.waiting,
+            "terminal": resolution.terminal,
+            "reason": resolution.reason,
+            "ambiguous_states": list(resolution.ambiguous_states),
+            "matched_labels": list(resolution.matched_labels),
+            "error": error,
+        }
+
+    def _release_claim_after_start_failure(
+        self,
+        issue: Issue,
+        role_claim: TransitionPlan | None,
+        *,
+        reason: str,
+    ) -> None:
+        try:
+            if role_claim is not None:
+                self._release_role_claim(issue, role_claim, reason=reason)
+            else:
+                self.tracker.release_issue(issue, reason)
+        except TrackerError as exc:
+            _LOG.warning("release after start failure failed for %s: %s", issue.identifier, exc)
+
+    def _release_role_claim(
+        self,
+        issue: Issue,
+        role_claim: TransitionPlan,
+        *,
+        reason: str,
+    ) -> None:
+        if self.config.role_graph is None:
+            self.tracker.release_issue(issue, reason)
+            return
+        reverse = plan_reverse_claim(self.config.role_graph, role_claim, reason=reason)
+        self.tracker.apply_transition_plan(
+            issue,
+            reverse,
+            evidence_summary=f"release_reason={reason}; run_id={self.run_id}",
+        )
+
     async def _run_remote_dispatch(
         self,
         issue: Issue,
         *,
         retry: RetryState | None,
         result: TickResult,
+        role_info: dict[str, str | None] | None = None,
+        role_claim: TransitionPlan | None = None,
     ) -> None:
         attempt = (retry.attempts + 1) if retry else 1
         artifacts = ArtifactWriter.for_attempt(
@@ -867,6 +1013,7 @@ class Orchestrator:
                 "execution": "remote",
                 "security_profile": self.config.security.profile,
                 "run_id": self.run_id,
+                "role": role_info,
             },
         )
 
@@ -881,7 +1028,11 @@ class Orchestrator:
                 issue,
                 attempt=attempt,
                 config=self.config,
-                prompt=self._render_prompt_for_issue(issue, workspace_path=""),
+                prompt=self._render_prompt_for_issue(
+                    issue,
+                    workspace_path="",
+                    role_info=role_info,
+                ),
             )
             errors = _redact_error_texts(remote_result.errors, self.config)
             if remote_result.failed:
@@ -963,10 +1114,17 @@ class Orchestrator:
                 _LOG.warning("mark_issue_blocked failed for %s: %s", issue.identifier, exc)
         else:
             try:
-                self.tracker.release_issue(
-                    issue,
-                    "remote_completed" if not retryable else "remote_failed",
-                )
+                if role_claim is not None:
+                    self._release_role_claim(
+                        issue,
+                        role_claim,
+                        reason="remote_completed" if not retryable else "remote_failed",
+                    )
+                else:
+                    self.tracker.release_issue(
+                        issue,
+                        "remote_completed" if not retryable else "remote_failed",
+                    )
             except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
                 _LOG.warning("release_issue failed for %s: %s", issue.identifier, exc)
 
@@ -978,6 +1136,7 @@ class Orchestrator:
         *,
         retry: RetryState | None,
         lane: LaneConfig | None = None,
+        role_info: dict[str, str | None] | None = None,
     ) -> WorkerState:
         workspace = self.workspaces.prepare(issue)
 
@@ -1006,6 +1165,7 @@ class Orchestrator:
                 "security_profile": self.config.security.profile,
                 "run_id": self.run_id,
                 "lane": _lane_summary(lane),
+                "role": role_info,
             },
         )
 
@@ -1088,6 +1248,10 @@ class Orchestrator:
             artifacts=artifacts,
             config=self.config,
             lane=lane,
+            role_name=role_info.get("role") if role_info else None,
+            role_state=role_info.get("state") if role_info else None,
+            role_actor=role_info.get("actor") if role_info else None,
+            gate_owner=role_info.get("gate_owner") if role_info else None,
         )
 
     async def _run_worker(
@@ -1492,6 +1656,10 @@ class Orchestrator:
                 "provider_session_id": worker.session.provider_session_id,
                 "attempt": worker.session.attempt,
                 "lane": worker.lane.name if worker.lane else None,
+                "role": worker.role_name,
+                "role_state": worker.role_state,
+                "role_actor": worker.role_actor,
+                "gate_owner": worker.gate_owner,
                 "security_profile": _worker_config(worker, self.config).security.profile,
                 "terminal_state": (
                     worker.terminal_state.value if worker.terminal_state else None
@@ -1540,6 +1708,41 @@ def _lane_summary(lane: LaneConfig | None) -> dict[str, Any] | None:
         "prompt_prefix": bool(lane.prompt_prefix),
         "prompt_suffix": bool(lane.prompt_suffix),
     }
+
+
+def _role_info(
+    resolution: StateResolution | None,
+    claim_plan: TransitionPlan | None,
+) -> dict[str, str | None] | None:
+    if resolution is None:
+        return None
+    state = claim_plan.to_state if claim_plan is not None else resolution.state
+    role = resolution.dispatch_role
+    return {
+        "role": role.name if role else None,
+        "state": state.name if state else None,
+        "actor": resolution.actor,
+        "gate_owner": resolution.gate_owner,
+    }
+
+
+def _role_info_for_worker(worker: WorkerState) -> dict[str, str | None] | None:
+    if worker.role_name is None and worker.role_state is None:
+        return None
+    return {
+        "role": worker.role_name,
+        "state": worker.role_state,
+        "actor": worker.role_actor,
+        "gate_owner": worker.gate_owner,
+    }
+
+
+def _issue_after_transition(issue: Issue, plan: TransitionPlan) -> Issue:
+    labels = [label for label in issue.labels if label not in set(plan.labels_to_remove)]
+    for label in plan.labels_to_add:
+        if label not in labels:
+            labels.append(label)
+    return replace(issue, labels=tuple(labels))
 
 
 def _terminal_reason(worker: WorkerState) -> str:
