@@ -623,6 +623,42 @@ def test_find_linked_pull_requests_returns_normalized_pr() -> None:
     assert len(calls) == 1
 
 
+def test_find_linked_pull_requests_head_match_allows_body_without_reference() -> None:
+    """The deterministic head lookup proves the PR belongs to the issue."""
+
+    def h(req: httpx.Request) -> httpx.Response:
+        assert req.url.params.get("head") == "acme:symphony/acme-proj-42"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 100,
+                    "node_id": "PR_100",
+                    "number": 7,
+                    "title": "Fix",
+                    "html_url": "https://x/pulls/7",
+                    "state": "open",
+                    "draft": False,
+                    "head": {
+                        "ref": "symphony/acme-proj-42",
+                        "repo": {
+                            "name": "proj",
+                            "owner": {"login": "acme"},
+                        },
+                    },
+                    "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                    "body": "No closing reference yet.",
+                }
+            ],
+        )
+
+    out = find_linked_pull_requests(_make_client(h), _issue(), _github_config())
+
+    assert len(out) == 1
+    assert out[0].number == 7
+    assert out[0].linked_issue_identifier == "acme/proj#42"
+
+
 def test_find_linked_pull_requests_falls_back_to_closing_reference() -> None:
     calls: list[httpx.URL] = []
 
@@ -681,6 +717,57 @@ def test_find_linked_pull_requests_falls_back_to_closing_reference() -> None:
     assert out[0].number == 8
     assert out[0].head_ref == "live-e2e-smoke-20260509T073327Z"
     assert out[0].linked_issue_identifier == "#42"
+
+
+def test_find_linked_pull_requests_fallback_ignores_pr_without_closing_reference() -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        if req.url.params.get("head"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 100,
+                    "node_id": "PR_100",
+                    "number": 8,
+                    "title": "Unrelated PR with no issue reference",
+                    "html_url": "https://x/pulls/8",
+                    "state": "open",
+                    "draft": False,
+                    "head": {
+                        "ref": "agent-branch",
+                        "repo": {
+                            "name": "proj",
+                            "owner": {"login": "acme"},
+                        },
+                    },
+                    "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                    "body": "Summary only.",
+                },
+                {
+                    "id": 101,
+                    "node_id": "PR_101",
+                    "number": 9,
+                    "title": "Other issue",
+                    "html_url": "https://x/pulls/9",
+                    "state": "open",
+                    "draft": False,
+                    "head": {
+                        "ref": "other-branch",
+                        "repo": {
+                            "name": "proj",
+                            "owner": {"login": "acme"},
+                        },
+                    },
+                    "base": {"ref": "main", "repo": {"default_branch": "main"}},
+                    "body": "Closes #99",
+                },
+            ],
+        )
+
+    out = find_linked_pull_requests(_make_client(h), _issue(), _github_config())
+
+    assert out == []
 
 
 def test_find_linked_pull_requests_fallback_matches_owner_repo_reference() -> None:

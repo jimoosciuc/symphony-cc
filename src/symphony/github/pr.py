@@ -75,7 +75,7 @@ def find_linked_pull_requests(
     )
     return [
         pr
-        for pr in (_normalize_pull_request(item, issue.identifier) for item in raw or [])
+        for pr in (_normalize_pull_request(item, None) for item in raw or [])
         if _matches_issue_reference(pr.linked_issue_identifier, issue)
     ]
 
@@ -94,7 +94,7 @@ _ISSUE_REF = re.compile(
 )
 
 
-def _normalize_pull_request(raw: dict, fallback_identifier: str) -> PullRequest:
+def _normalize_pull_request(raw: dict, fallback_identifier: str | None) -> PullRequest:
     head = raw.get("head", {}) or {}
     base = raw.get("base", {}) or {}
     head_repo = head.get("repo") or {}
