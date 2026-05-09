@@ -261,6 +261,11 @@ Required environment:
 The remote host must have `symphony-worker`, `claude`, authenticated Claude
 credentials, and writable workspace/artifact/session roots. The harness remains
 opt-in; default CI only verifies payload assembly and redaction boundaries.
+For production-readiness proof, run trusted disposable issues with
+`SYMPHONY_REMOTE_CLAUDE_REQUIRE_PR=1`; the harness then fails unless read-side
+GitHub evidence finds a linked PR. In require-PR mode, tune GitHub indexing
+retry with `SYMPHONY_REMOTE_CLAUDE_PR_DETECT_ATTEMPTS` and
+`SYMPHONY_REMOTE_CLAUDE_PR_DETECT_INTERVAL_SECONDS`.
 
 ### Lint and format
 
