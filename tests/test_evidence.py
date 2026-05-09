@@ -113,6 +113,19 @@ def _client_pr_lookup_fails() -> GitHubClient:
     return GitHubClient("ghp_test_xxxx", transport=httpx.MockTransport(handler))
 
 
+def _client_head_empty_fallback_returning(prs: list[dict[str, Any]]) -> GitHubClient:
+    """Return no deterministic head match, then return ``prs`` for fallback scan."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/pulls"):
+            if request.url.params.get("head"):
+                return httpx.Response(200, json=[])
+            return httpx.Response(200, json=prs)
+        return httpx.Response(404, json={"message": "not found"})
+
+    return GitHubClient("ghp_test_xxxx", transport=httpx.MockTransport(handler))
+
+
 def _last_event(payload: dict[str, Any]) -> AgentEvent:
     from datetime import datetime, timezone
 
@@ -240,6 +253,35 @@ def test_completed_permission_denied_promotes_to_incomplete(tmp_path: Path) -> N
     assert len(perm) == 1
     assert perm[0]["denials_count"] == 2
     assert sorted(perm[0]["tool_names"]) == ["AskUserQuestion", "Bash"]
+
+
+def test_unrelated_fallback_pr_does_not_mask_permission_denial(tmp_path: Path) -> None:
+    pr = _fake_pr_payload(number=264, head_ref="unrelated-branch")
+    pr["body"] = "Summary only."
+    detector = EvidenceDetector(
+        _github(),
+        client=_client_head_empty_fallback_returning([pr]),
+    )
+    result = detector.detect(
+        issue=_issue(number=405),
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=1,
+        last_event=_last_event(
+            {
+                "result": "I need clarification.",
+                "permission_denials": [
+                    {"tool_name": "AskUserQuestion", "tool_use_id": "tu_1"},
+                ],
+            }
+        ),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    assert result.task_outcome == OUTCOME_INCOMPLETE_PERMISSION_DENIED
+    assert [e for e in result.task_evidence if e["type"] == "pr_linked"] == []
 
 
 # -- COMPLETED + nothing → incomplete_no_evidence ---------------------------
