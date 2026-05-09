@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from symphony import __version__
-from symphony.cli import NotYetImplementedError, build_parser, main
+from symphony.cli import STANDARD_LABELS, NotYetImplementedError, build_parser, main
 from symphony.models import Issue
 from symphony.workflow import load_workflow, render_prompt
 
@@ -108,6 +108,74 @@ def test_init_github_implementer_writes_loadable_workflow(
     assert "Closes acme/proj#42" in prompt
     assert "update that\n  PR instead of opening a duplicate" in prompt
     assert "opened/updated a PR or explicitly" in prompt
+
+
+def test_init_github_human_review_writes_role_workflow(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token_value_1234567890")
+    target = tmp_path / "WORKFLOW.md"
+
+    rc = main(["init", "github-human-review", "--repo", "acme/proj", "--output", str(target)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ready label: symphony-ready-impl" in out
+    workflow = load_workflow(target)
+    graph = workflow.config.role_graph
+    assert graph is not None
+    assert workflow.config.tracker.include_labels == ()
+    assert graph.roles["implementer"].actor == "agent"
+    assert graph.roles["reviewer"].actor == "human"
+    assert graph.roles["leader"].actor == "hybrid"
+    assert graph.transitions["pr_delivered"].to_state == "ready_review"
+    assert graph.transitions["approved"].to_state == "approved"
+    assert "symphony-ready-impl" in target.read_text(encoding="utf-8")
+
+
+def test_init_github_production_line_writes_extended_role_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token_value_1234567890")
+    target = tmp_path / "WORKFLOW.md"
+
+    rc = main(
+        [
+            "init",
+            "github-production-line",
+            "--repo",
+            "acme/proj",
+            "--output",
+            str(target),
+        ]
+    )
+
+    assert rc == 0
+    workflow = load_workflow(target)
+    graph = workflow.config.role_graph
+    assert graph is not None
+    assert graph.roles["verifier"].actor == "human"
+    assert graph.roles["release"].actor == "human"
+    assert graph.transitions["approved"].to_state == "ready_verify"
+    assert graph.transitions["verified"].to_state == "ready_release"
+    assert graph.transitions["released"].to_state == "done"
+    assert graph.states["done"].terminal is True
+
+
+def test_standard_labels_include_role_states() -> None:
+    for name in (
+        "symphony-ready-impl",
+        "symphony-implementing",
+        "symphony-ready-review",
+        "symphony-needs-design",
+        "symphony-blocked-operator",
+        "symphony-ready-verify",
+        "symphony-ready-release",
+    ):
+        assert STANDARD_LABELS[name]["name"] == name
 
 
 def test_init_refuses_to_overwrite_without_force(

@@ -113,7 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument(
         "template",
-        choices=["github-implementer"],
+        choices=["github-implementer", "github-human-review", "github-production-line"],
         help="Workflow template to generate.",
     )
     init.add_argument(
@@ -181,20 +181,33 @@ def _cmd_init(args: argparse.Namespace) -> int:
         )
         return 1
 
-    workflow = _github_implementer_workflow(
-        owner=owner,
-        repo=repo,
-        model=args.model,
-        permission_mode=args.permission_mode,
-        security_profile=args.security_profile,
-        token_env=args.token_env,
-    )
+    if args.template == "github-implementer":
+        workflow = _github_implementer_workflow(
+            owner=owner,
+            repo=repo,
+            model=args.model,
+            permission_mode=args.permission_mode,
+            security_profile=args.security_profile,
+            token_env=args.token_env,
+        )
+        ready_label = STANDARD_LABELS["symphony-ready"]["name"]
+    else:
+        workflow = _github_role_workflow(
+            owner=owner,
+            repo=repo,
+            model=args.model,
+            permission_mode=args.permission_mode,
+            security_profile=args.security_profile,
+            token_env=args.token_env,
+            production_line=args.template == "github-production-line",
+        )
+        ready_label = STANDARD_LABELS["symphony-ready-impl"]["name"]
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(workflow, encoding="utf-8")
 
     print(f"wrote {output}")
     print(f"repo: {owner}/{repo}")
-    print(f"ready label: {STANDARD_LABELS['symphony-ready']['name']}")
+    print(f"ready label: {ready_label}")
     if args.create_labels:
         token = os.environ.get(args.token_env, "")
         if not token:
@@ -314,6 +327,81 @@ STANDARD_LABELS: dict[str, dict[str, str]] = {
         "color": "5319e7",
         "description": "Symphony completed work; PR opened or no-PR declared",
     },
+    "symphony-ready-impl": {
+        "name": "symphony-ready-impl",
+        "color": "0e8a16",
+        "description": "Ready for Symphony implementer role",
+    },
+    "symphony-implementing": {
+        "name": "symphony-implementing",
+        "color": "fbca04",
+        "description": "Symphony implementer role is working",
+    },
+    "symphony-ready-review": {
+        "name": "symphony-ready-review",
+        "color": "1d76db",
+        "description": "Ready for review role",
+    },
+    "symphony-reviewing": {
+        "name": "symphony-reviewing",
+        "color": "0052cc",
+        "description": "Review role is working",
+    },
+    "symphony-changes-requested": {
+        "name": "symphony-changes-requested",
+        "color": "d93f0b",
+        "description": "Review requested implementation changes",
+    },
+    "symphony-needs-design": {
+        "name": "symphony-needs-design",
+        "color": "5319e7",
+        "description": "Needs design or leader decision before implementation",
+    },
+    "symphony-needs-leader": {
+        "name": "symphony-needs-leader",
+        "color": "5319e7",
+        "description": "Needs leader decision before continuing",
+    },
+    "symphony-blocked-operator": {
+        "name": "symphony-blocked-operator",
+        "color": "d73a4a",
+        "description": "Needs operator or leader intervention",
+    },
+    "symphony-leader-reviewing": {
+        "name": "symphony-leader-reviewing",
+        "color": "6f42c1",
+        "description": "Leader role is working a gate",
+    },
+    "symphony-approved": {
+        "name": "symphony-approved",
+        "color": "0e8a16",
+        "description": "Review approved",
+    },
+    "symphony-ready-verify": {
+        "name": "symphony-ready-verify",
+        "color": "1d76db",
+        "description": "Ready for verifier role",
+    },
+    "symphony-verifying": {
+        "name": "symphony-verifying",
+        "color": "0052cc",
+        "description": "Verifier role is working",
+    },
+    "symphony-ready-release": {
+        "name": "symphony-ready-release",
+        "color": "0e8a16",
+        "description": "Ready for release role",
+    },
+    "symphony-releasing": {
+        "name": "symphony-releasing",
+        "color": "fbca04",
+        "description": "Release role is working",
+    },
+    "symphony-released": {
+        "name": "symphony-released",
+        "color": "5319e7",
+        "description": "Release role completed",
+    },
 }
 
 
@@ -418,6 +506,225 @@ Rules:
 - Do not add Linear or Codex assumptions.
 - Do not finish as successful unless you opened/updated a PR or explicitly
   reply with `Symphony-No-PR: <reason>`.
+"""
+
+
+def _github_role_workflow(
+    *,
+    owner: str,
+    repo: str,
+    model: str,
+    permission_mode: str,
+    security_profile: str,
+    token_env: str,
+    production_line: bool,
+) -> str:
+    production_roles = ""
+    production_states = ""
+    production_transitions = ""
+    reviewer_approved_to = "approved"
+    if production_line:
+        reviewer_approved_to = "ready_verify"
+        production_roles = """
+  verifier:
+    actor: human
+    can_claim: [ready_verify]
+    claim_state: verifying
+    transitions:
+      verified:
+        from: verifying
+        to: ready_release
+        requires: review_comment
+      verification_failed:
+        from: verifying
+        to: changes_requested
+        requires: review_comment
+
+  release:
+    actor: human
+    can_claim: [ready_release]
+    claim_state: releasing
+    transitions:
+      released:
+        from: releasing
+        to: done
+        requires: decision_comment
+      release_blocked:
+        from: releasing
+        to: needs_leader
+        requires: decision_comment
+"""
+        production_states = """
+  ready_verify:
+    labels: [symphony-ready-verify]
+  verifying:
+    labels: [symphony-verifying]
+  ready_release:
+    labels: [symphony-ready-release]
+  releasing:
+    labels: [symphony-releasing]
+"""
+        production_transitions = ""
+
+    return f"""---
+tracker:
+  kind: github
+  owner: {owner}
+  repo: {repo}
+  token: ${token_env}
+  include_labels: []
+  exclude_labels: [symphony-done]
+
+agent:
+  provider: claude_code
+  max_concurrency: 1
+  max_turns: 3
+
+workspace:
+  root: .symphony/workspaces
+  populate: git
+
+github:
+  ready_label: symphony-ready-impl
+  claim_label: symphony-implementing
+  blocked_label: symphony-blocked-operator
+  done_label: symphony-done
+  branch_prefix: symphony
+  base_branch: main
+  draft_pr: true
+  claim_comment: true
+  pr_link_comment: true
+  close_issue_on_done: false
+
+roles:
+  implementer:
+    actor: agent
+    provider: claude_code
+    can_claim: [ready_impl, changes_requested]
+    claim_state: implementing
+    transitions:
+      pr_delivered:
+        from: implementing
+        to: ready_review
+        requires: pr_link
+      design_needed:
+        from: implementing
+        to: needs_design
+        requires: issue_comment
+      operator_blocked:
+        from: implementing
+        to: blocked_operator
+        requires: issue_comment
+      no_work_needed:
+        from: implementing
+        to: done
+        requires: issue_comment
+
+  reviewer:
+    actor: human
+    can_claim: [ready_review]
+    claim_state: reviewing
+    transitions:
+      approved:
+        from: reviewing
+        to: {reviewer_approved_to}
+        requires: pr_approval
+      changes_requested:
+        from: reviewing
+        to: changes_requested
+        requires: review_comment
+      needs_leader:
+        from: reviewing
+        to: needs_leader
+        requires: issue_comment
+
+  leader:
+    actor: hybrid
+    provider: claude_code
+    can_claim: [needs_design, needs_leader, blocked_operator]
+    claim_state: leader_reviewing
+    transitions:
+      decision_to_impl:
+        from: [leader_reviewing]
+        to: ready_impl
+        requires: decision_comment
+{production_roles}
+states:
+  ready_impl:
+    labels: [symphony-ready-impl]
+  implementing:
+    labels: [symphony-implementing]
+  ready_review:
+    labels: [symphony-ready-review]
+  reviewing:
+    labels: [symphony-reviewing]
+  changes_requested:
+    labels: [symphony-changes-requested]
+  needs_design:
+    labels: [symphony-needs-design]
+    gate_owner: leader
+  needs_leader:
+    labels: [symphony-needs-leader]
+    gate_owner: leader
+  blocked_operator:
+    labels: [symphony-blocked-operator]
+    gate_owner: leader
+  leader_reviewing:
+    labels: [symphony-leader-reviewing]
+  approved:
+    labels: [symphony-approved]
+{production_states}
+  done:
+    labels: [symphony-done]
+    terminal: true
+{production_transitions}
+security:
+  profile: {security_profile}
+
+claude:
+  model: {model}
+  permission_mode: {permission_mode}
+  session_store: .symphony/sessions
+  transcript_store: .symphony/transcripts
+  artifact_store: .symphony/runs
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
+  retry_resume_policy: resume_same_session
+
+polling:
+  interval_ms: 60000
+
+retry:
+  max_attempts: 2
+  initial_backoff_ms: 60000
+  max_backoff_ms: 900000
+  multiplier: 2.0
+---
+You are working under the Symphony role contract injected above this prompt.
+
+Repository: {owner}/{repo}
+Issue title: {{{{ issue.title }}}}
+Issue URL: {{{{ issue.url }}}}
+
+Issue body:
+{{{{ issue.body }}}}
+
+Rules:
+- Work on exactly this issue and exactly the active Symphony role.
+- Inspect the issue, labels, comments, linked PRs, and existing branch before acting.
+- If another contributor already owns the work or an open PR resolves it, reply with
+  `Symphony-No-PR: <reason>`.
+- If implementation needs design approval, comment a concrete design proposal on the
+  GitHub issue and reply with `Symphony-No-PR: design proposed`.
+- For code changes, create or update
+  `symphony/{{{{ issue.owner }}}}-{{{{ issue.repo }}}}-{{{{ issue.number }}}}`.
+- Open or update one pull request against `main` and include
+  `Closes {{{{ issue.identifier }}}}` in the PR body.
+- Use GitHub issue or PR comments for review responses, clarification, and audit trails.
+- Run relevant tests/checks when feasible and summarize them in the PR.
+- Do not add Linear or Codex assumptions.
+- Do not finish as successful unless you produced the evidence required by the
+  role contract or explicitly reply with `Symphony-No-PR: <reason>`.
 """
 
 
