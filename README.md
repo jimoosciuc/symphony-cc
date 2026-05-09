@@ -115,7 +115,7 @@ session → branch/commit/PR → evidence detector → terminal artifacts. This 
 
 - Requires `SYMPHONY_RUN_FULL_E2E=1`, `GITHUB_TOKEN`, authenticated `claude` CLI,
   and `claude-agent-sdk`
-- Uses `[REDACTED]` by default (override with `SYMPHONY_CLAUDE_TEST_MODEL`)
+- Uses `claude-opus-4-7` by default (override with `SYMPHONY_CLAUDE_TEST_MODEL`)
 - Discovers a `symphony-ready` issue or uses `SYMPHONY_E2E_TEST_ISSUE=<number>`
 - Records evidence to `evidence/e2e_evidence_issue_<N>.json` including:
   - `task_outcome` (completed_with_pr, completed_no_pr_declared, etc.)
