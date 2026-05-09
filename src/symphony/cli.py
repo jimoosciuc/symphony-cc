@@ -14,8 +14,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from symphony import __version__
 
@@ -104,7 +106,108 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.set_defaults(func=_cmd_run)
 
+    init = subparsers.add_parser(
+        "init",
+        help="Generate a starter Symphony workflow.",
+        description="Generate a starter Symphony workflow for a supported use case.",
+    )
+    init.add_argument(
+        "template",
+        choices=["github-implementer"],
+        help="Workflow template to generate.",
+    )
+    init.add_argument(
+        "--repo",
+        required=True,
+        metavar="OWNER/REPO",
+        help="GitHub repository the workflow should operate on.",
+    )
+    init.add_argument(
+        "--output",
+        default="WORKFLOW.md",
+        metavar="PATH",
+        help="Workflow file to write (default: WORKFLOW.md).",
+    )
+    init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the output file if it already exists.",
+    )
+    init.add_argument(
+        "--model",
+        default="claude-opus-4-7",
+        help="Claude model for the generated workflow.",
+    )
+    init.add_argument(
+        "--permission-mode",
+        default="bypassPermissions",
+        choices=["default", "acceptEdits", "bypassPermissions"],
+        help="Claude permission mode for the generated workflow.",
+    )
+    init.add_argument(
+        "--security-profile",
+        default="trusted_unattended",
+        choices=["restricted", "conservative", "trusted_unattended"],
+        help="Security profile for the generated workflow.",
+    )
+    init.add_argument(
+        "--create-labels",
+        action="store_true",
+        help="Create or update the standard Symphony labels in the target repo.",
+    )
+    init.add_argument(
+        "--token-env",
+        default="GITHUB_TOKEN",
+        metavar="NAME",
+        help="Environment variable holding the GitHub token (default: GITHUB_TOKEN).",
+    )
+    init.set_defaults(func=_cmd_init)
+
     return parser
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    try:
+        owner, repo = _parse_repo(args.repo)
+    except ValueError as exc:
+        print(f"symphony: init failed: {exc}", file=sys.stderr)
+        return 1
+
+    output = Path(args.output)
+    if output.exists() and not args.force:
+        print(
+            f"symphony: init failed: {output} already exists; use --force to overwrite",
+            file=sys.stderr,
+        )
+        return 1
+
+    workflow = _github_implementer_workflow(
+        owner=owner,
+        repo=repo,
+        model=args.model,
+        permission_mode=args.permission_mode,
+        security_profile=args.security_profile,
+        token_env=args.token_env,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(workflow, encoding="utf-8")
+
+    print(f"wrote {output}")
+    print(f"repo: {owner}/{repo}")
+    print(f"ready label: {STANDARD_LABELS['symphony-ready']['name']}")
+    if args.create_labels:
+        token = os.environ.get(args.token_env, "")
+        if not token:
+            print(
+                f"symphony: init failed: ${args.token_env} is not set for --create-labels",
+                file=sys.stderr,
+            )
+            return 1
+        _ensure_standard_labels(owner=owner, repo=repo, token=token)
+        print("labels: created or updated")
+    else:
+        print("labels: skipped; pass --create-labels to create/update standard labels")
+    return 0
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -188,6 +291,132 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except Exception as exc:  # noqa: BLE001 - cleanup must not mask outcome
             log.warning("tracker close failed: %s", exc)
     return 0
+
+
+STANDARD_LABELS: dict[str, dict[str, str]] = {
+    "symphony-ready": {
+        "name": "symphony-ready",
+        "color": "0e8a16",
+        "description": "Eligible for Symphony to pick up",
+    },
+    "symphony-running": {
+        "name": "symphony-running",
+        "color": "fbca04",
+        "description": "Symphony has claimed and is working on this",
+    },
+    "symphony-blocked": {
+        "name": "symphony-blocked",
+        "color": "d73a4a",
+        "description": "Symphony hit a non-retryable or operator-required failure",
+    },
+    "symphony-done": {
+        "name": "symphony-done",
+        "color": "5319e7",
+        "description": "Symphony completed work; PR opened or no-PR declared",
+    },
+}
+
+
+def _parse_repo(value: str) -> tuple[str, str]:
+    parts = value.strip().split("/")
+    if len(parts) != 2 or not all(parts):
+        raise ValueError("--repo must be in OWNER/REPO form")
+    return parts[0], parts[1]
+
+
+def _github_implementer_workflow(
+    *,
+    owner: str,
+    repo: str,
+    model: str,
+    permission_mode: str,
+    security_profile: str,
+    token_env: str,
+) -> str:
+    return f"""---
+tracker:
+  kind: github
+  owner: {owner}
+  repo: {repo}
+  token: ${token_env}
+  include_labels: ["symphony-ready"]
+  exclude_labels: ["symphony-running", "symphony-blocked"]
+
+agent:
+  provider: claude_code
+  max_concurrency: 1
+  max_turns: 3
+
+workspace:
+  root: .symphony/workspaces
+  populate: git
+
+github:
+  ready_label: symphony-ready
+  claim_label: symphony-running
+  blocked_label: symphony-blocked
+  done_label: symphony-done
+  branch_prefix: symphony
+  base_branch: main
+  draft_pr: true
+  claim_comment: true
+  pr_link_comment: true
+  close_issue_on_done: false
+
+security:
+  profile: {security_profile}
+
+claude:
+  model: {model}
+  permission_mode: {permission_mode}
+  session_store: .symphony/sessions
+  transcript_store: .symphony/transcripts
+  artifact_store: .symphony/runs
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
+  retry_resume_policy: resume_same_session
+
+polling:
+  interval_ms: 60000
+
+retry:
+  max_attempts: 2
+  initial_backoff_ms: 60000
+  max_backoff_ms: 900000
+  multiplier: 2.0
+---
+You are the Symphony implementer for {{{{ issue.identifier }}}}.
+
+Repository: {owner}/{repo}
+Issue title: {{{{ issue.title }}}}
+Issue URL: {{{{ issue.url }}}}
+
+Rules:
+- Work on exactly this issue. If another contributor has claimed it or an
+  open PR already resolves it, do not duplicate the work; reply with
+  `Symphony-No-PR: <reason>`.
+- If the issue needs design approval before implementation, comment a concrete
+  design proposal on the issue and reply with `Symphony-No-PR: design proposed`.
+- Create or update branch
+  `symphony/{{{{ issue.owner }}}}-{{{{ issue.repo }}}}-{{{{ issue.number }}}}`
+  when code changes are needed.
+- Open or update a pull request against `main`.
+- Include `Closes {{{{ issue.identifier }}}}` in the PR body.
+- Respond to review comments by updating the same PR.
+- Do not add Linear or Codex assumptions.
+"""
+
+
+def _ensure_standard_labels(*, owner: str, repo: str, token: str) -> None:
+    from symphony.github.client import GitHubClaimConflict, GitHubClient
+
+    with GitHubClient(token) as client:
+        for label in STANDARD_LABELS.values():
+            path = f"/repos/{owner}/{repo}/labels"
+            try:
+                client.post(path, json_body=label)
+            except GitHubClaimConflict:
+                client.patch(f"{path}/{label['name']}", json_body=label)
 
 
 def _setup_logging(level_name: str) -> None:
