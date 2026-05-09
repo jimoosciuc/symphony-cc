@@ -213,6 +213,7 @@ class EvidenceDetector:
                     "url": pr.url,
                     "number": pr.number,
                     "state": pr.state,
+                    "head_ref": pr.head_ref,
                     # We can't tell from a single read whether THIS run
                     # created the PR vs. updated it; conservative
                     # default is False (the run linked an existing PR).

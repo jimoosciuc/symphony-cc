@@ -229,6 +229,7 @@ def _summarize_detector_result(
         if entry.get("type") == "pr_linked" and pr_number is None:
             pr_number = entry.get("number")
             pr_url = entry.get("url")
+            branch_name = entry.get("head_ref")
         if entry.get("type") == "branch_pushed" and branch_name is None:
             branch_name = entry.get("name")
     return {
