@@ -14,6 +14,10 @@ on:
           - graphql
           - claude
           - remote
+          - full-e2e
+          - remote-claude
+          - concurrency-e2e
+          - validation-matrix
 
 jobs:
   live-integration:
@@ -32,7 +36,7 @@ jobs:
         run: make setup
 
       - name: Run live GitHub tracker tests
-        if: ${{ inputs.target == 'all' || inputs.target == 'github' }}
+        if: ${{ inputs.target == 'all' || inputs.target == 'validation-matrix' || inputs.target == 'github' }}
         env:
           GITHUB_TOKEN: ${{ secrets.SYMPHONY_GITHUB_TOKEN || github.token }}
           SYMPHONY_GITHUB_TEST_OWNER: ${{ vars.SYMPHONY_GITHUB_TEST_OWNER }}
@@ -40,22 +44,23 @@ jobs:
         run: make live-github
 
       - name: Run live GitHub GraphQL tool tests
-        if: ${{ inputs.target == 'all' || inputs.target == 'graphql' }}
+        if: ${{ inputs.target == 'all' || inputs.target == 'validation-matrix' || inputs.target == 'graphql' }}
         env:
           GITHUB_TOKEN: ${{ secrets.SYMPHONY_GITHUB_TOKEN || github.token }}
         run: make live-graphql
 
       - name: Run live Claude provider tests
-        if: ${{ inputs.target == 'all' || inputs.target == 'claude' }}
+        if: ${{ inputs.target == 'all' || inputs.target == 'validation-matrix' || inputs.target == 'claude' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+          SYMPHONY_CLAUDE_TEST_MODEL: ${{ vars.SYMPHONY_CLAUDE_TEST_MODEL }}
         run: make live-claude
 
       - name: Run live remote execution tests
-        if: ${{ inputs.target == 'all' || inputs.target == 'remote' }}
+        if: ${{ inputs.target == 'all' || inputs.target == 'validation-matrix' || inputs.target == 'remote' }}
         env:
           SYMPHONY_REMOTE_TEST_HOST: ${{ vars.SYMPHONY_REMOTE_TEST_HOST }}
           SYMPHONY_REMOTE_WORKSPACE_ROOT: ${{ vars.SYMPHONY_REMOTE_WORKSPACE_ROOT }}
@@ -63,3 +68,39 @@ jobs:
           SYMPHONY_REMOTE_SESSION_STORE: ${{ vars.SYMPHONY_REMOTE_SESSION_STORE }}
           SYMPHONY_REMOTE_GIT_TOKEN: ${{ secrets.SYMPHONY_REMOTE_GIT_TOKEN }}
         run: make live-remote
+
+      - name: Run full GitHub issue to Claude PR E2E
+        if: ${{ inputs.target == 'all' || inputs.target == 'validation-matrix' || inputs.target == 'full-e2e' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.SYMPHONY_GITHUB_TOKEN || github.token }}
+          SYMPHONY_GITHUB_TEST_OWNER: ${{ vars.SYMPHONY_GITHUB_TEST_OWNER }}
+          SYMPHONY_GITHUB_TEST_REPO: ${{ vars.SYMPHONY_GITHUB_TEST_REPO }}
+          SYMPHONY_E2E_TEST_ISSUE: ${{ vars.SYMPHONY_E2E_TEST_ISSUE }}
+          SYMPHONY_CLAUDE_TEST_MODEL: ${{ vars.SYMPHONY_CLAUDE_TEST_MODEL }}
+        run: make live-e2e
+
+      - name: Run remote Claude E2E
+        if: ${{ inputs.target == 'all' || inputs.target == 'validation-matrix' || inputs.target == 'remote-claude' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.SYMPHONY_GITHUB_TOKEN || github.token }}
+          SYMPHONY_GITHUB_TEST_OWNER: ${{ vars.SYMPHONY_GITHUB_TEST_OWNER }}
+          SYMPHONY_GITHUB_TEST_REPO: ${{ vars.SYMPHONY_GITHUB_TEST_REPO }}
+          SYMPHONY_REMOTE_CLAUDE_TEST_ISSUE: ${{ vars.SYMPHONY_REMOTE_CLAUDE_TEST_ISSUE }}
+          SYMPHONY_CLAUDE_TEST_MODEL: ${{ vars.SYMPHONY_CLAUDE_TEST_MODEL }}
+          SYMPHONY_REMOTE_TEST_HOST: ${{ vars.SYMPHONY_REMOTE_TEST_HOST }}
+          SYMPHONY_REMOTE_WORKSPACE_ROOT: ${{ vars.SYMPHONY_REMOTE_WORKSPACE_ROOT }}
+          SYMPHONY_REMOTE_ARTIFACT_ROOT: ${{ vars.SYMPHONY_REMOTE_ARTIFACT_ROOT }}
+          SYMPHONY_REMOTE_SESSION_STORE: ${{ vars.SYMPHONY_REMOTE_SESSION_STORE }}
+          SYMPHONY_REMOTE_GIT_TOKEN: ${{ secrets.SYMPHONY_REMOTE_GIT_TOKEN }}
+        run: make live-remote-claude
+
+      - name: Run multi-issue concurrency E2E
+        if: ${{ inputs.target == 'all' || inputs.target == 'validation-matrix' || inputs.target == 'concurrency-e2e' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.SYMPHONY_GITHUB_TOKEN || github.token }}
+          SYMPHONY_GITHUB_TEST_OWNER: ${{ vars.SYMPHONY_GITHUB_TEST_OWNER }}
+          SYMPHONY_GITHUB_TEST_REPO: ${{ vars.SYMPHONY_GITHUB_TEST_REPO }}
+          SYMPHONY_CONCURRENCY_E2E_ISSUES: ${{ vars.SYMPHONY_CONCURRENCY_E2E_ISSUES }}
+          SYMPHONY_CONCURRENCY_E2E_PERMISSION_MODE: ${{ vars.SYMPHONY_CONCURRENCY_E2E_PERMISSION_MODE }}
+          SYMPHONY_CLAUDE_TEST_MODEL: ${{ vars.SYMPHONY_CLAUDE_TEST_MODEL }}
+        run: make live-concurrency-e2e

@@ -1,19 +1,21 @@
 # Symphony
 
 This repository is `symphony-cc`, the Claude Code first and GitHub first
-implementation plan for Symphony. The product name, Python package name, and
-CLI name remain `symphony`.
+implementation of Symphony. The product name, Python package name, and CLI name
+remain `symphony`.
 
-The first milestone is design-only:
+The current implementation focuses on:
 
-- adapt the original Symphony service contract to Claude Code;
-- define a provider-neutral agent runtime boundary;
-- make Claude Code sessions, streaming input, resume, cancellation, GitHub issue
-  coordination, pull requests, and logs first-class in the spec;
-- create implementation issues before writing runtime code.
+- polling and claiming GitHub issues;
+- running Claude Code with session continuity through a provider boundary;
+- preparing deterministic local or remote workspaces;
+- producing GitHub pull requests and evidence-gated terminal outcomes;
+- exposing logs, artifacts, status snapshots, usage totals, and a read-only
+  localhost dashboard.
 
-`SPEC.md` is the source of truth for the new system. Implementation should not
-begin until the design PR is reviewed.
+`SPEC.md` is the source of truth for the system behavior. `docs/` contains the
+implementation playbook, runbooks, validation guidance, and operator-facing
+notes.
 
 ## Intended Shape
 
@@ -27,13 +29,11 @@ GitHub issue
   -> JSONL logs and run artifacts
 ```
 
-The first implementation will be Python, with package and CLI name `symphony`.
+The implementation is Python, with package and CLI name `symphony`.
 
-## Non-Goals For The Design PR
+## Non-Goals
 
-- No runtime implementation.
 - No Codex provider.
-- No dashboard.
 - No database.
 - No migration from the existing Elixir codebase.
 
@@ -42,6 +42,14 @@ The first implementation will be Python, with package and CLI name `symphony`.
 ```bash
 symphony run --workflow WORKFLOW.md
 ```
+
+## Current Validation Status
+
+Default CI is the required PR gate and is safe to run without external
+credentials. It does not prove production readiness by itself because the
+highest-risk paths require real GitHub, Claude Code, SSH, and long-running
+operator behavior. Use `docs/production-readiness.md` for the full validation
+matrix and go/no-go checklist.
 
 ## Development
 
@@ -121,12 +129,13 @@ their opt-in environment variables are set:
 - `SYMPHONY_RUN_REMOTE_CLAUDE_E2E=1`
 - `SYMPHONY_RUN_CONCURRENCY_E2E=1`
 
-Live tests can be run locally through `make live-integration` or individually
+Live tests can be run locally through `make live-integration`, individually
 with `make live-github`, `make live-graphql`, `make live-claude`,
 `make live-remote`, `make live-remote-claude`, `make live-e2e`, and
-`make live-concurrency-e2e`. They are also available in GitHub Actions through
-the manual `live-integration` workflow; they are not required for default PR CI
-because they need credentials and real external services.
+`make live-concurrency-e2e`, or as a full matrix with `make live-validation`.
+They are also available in GitHub Actions through the manual
+`live-integration` workflow; they are not required for default PR CI because
+they need credentials and real external services.
 
 #### Full E2E Harness
 
