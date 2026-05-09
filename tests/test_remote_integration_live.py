@@ -90,6 +90,7 @@ def _config(tmp_path: Path, remote_env: dict[str, str]):
         "artifact_root": remote_env["artifact_root"],
         "session_store": remote_env["session_store"],
         "worker_timeout_ms": 60_000,
+        "heartbeat_interval_ms": 10_000,
         "stall_timeout_ms": 30_000,
     }
     if os.environ.get("SYMPHONY_REMOTE_GIT_TOKEN"):
