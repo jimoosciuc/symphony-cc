@@ -99,12 +99,34 @@ their opt-in environment variables are set:
 - `SYMPHONY_RUN_GITHUB_INTEGRATION=1`
 - `SYMPHONY_RUN_GRAPHQL_TOOL_INTEGRATION=1`
 - `SYMPHONY_RUN_CLAUDE_INTEGRATION=1`
+- `SYMPHONY_RUN_FULL_E2E=1`
 
 Live tests can be run locally through `make live-integration` or individually
 with `make live-github`, `make live-graphql`, and `make live-claude`. They are
 also available in GitHub Actions through the manual `live-integration` workflow;
 they are not required for default PR CI because they need credentials and real
 external services.
+
+#### Full E2E Harness
+
+The full end-to-end harness (`make live-e2e`) exercises the complete production
+path: GitHub issue discovery → claim → workspace.populate=git → Claude Code
+session → branch/commit/PR → evidence detector → terminal artifacts. This test:
+
+- Requires `SYMPHONY_RUN_FULL_E2E=1`, `GITHUB_TOKEN`, authenticated `claude` CLI,
+  and `claude-agent-sdk`
+- Uses `claude-opus-4-7` by default (override with `SYMPHONY_CLAUDE_TEST_MODEL`)
+- Discovers a `symphony-ready` issue or uses `SYMPHONY_E2E_TEST_ISSUE=<number>`
+- Records evidence to `evidence/e2e_evidence_issue_<N>.json` including:
+  - `task_outcome` (completed_with_pr, completed_no_pr_declared, etc.)
+  - `outcome_decided_by` (detector, timeout, error)
+  - `permission_denials_count`
+  - `branch_name`, `pr_number`, `pr_url`
+  - `provider_session_id`, `terminal_json_path`
+
+Run with: `make live-e2e`
+
+This harness is opt-in and skipped by default to keep `make ci` fast and offline.
 
 ### Lint and format
 

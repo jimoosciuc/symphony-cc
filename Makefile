@@ -1,9 +1,9 @@
-.PHONY: help setup lint test ci all live-github live-graphql live-claude live-remote live-integration
+.PHONY: help setup lint test ci all live-github live-graphql live-claude live-remote live-e2e live-integration
 
 PYTHON ?= python
 
 help:
-	@echo "Targets: setup, lint, test, ci, all, live-github, live-graphql, live-claude, live-remote, live-integration"
+	@echo "Targets: setup, lint, test, ci, all, live-github, live-graphql, live-claude, live-remote, live-e2e, live-integration"
 
 setup:
 	$(PYTHON) -m pip install --upgrade pip
@@ -30,5 +30,8 @@ live-claude:
 
 live-remote:
 	SYMPHONY_RUN_REMOTE_INTEGRATION=1 PYTHONPATH=src pytest tests/test_remote_integration_live.py -q
+
+live-e2e:
+	SYMPHONY_RUN_FULL_E2E=1 PYTHONPATH=src pytest tests/test_live_e2e_full.py -v -s
 
 live-integration: live-github live-graphql live-claude live-remote
