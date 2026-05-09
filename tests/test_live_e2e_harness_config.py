@@ -62,7 +62,14 @@ async def test_pr_required_detector_retries_until_pr_evidence(monkeypatch) -> No
                 return DetectorResult(task_outcome="incomplete_no_evidence")
             return DetectorResult(
                 task_outcome="completed_with_pr",
-                task_evidence=[{"type": "pr_linked", "number": 188}],
+                task_evidence=[
+                    {
+                        "type": "pr_linked",
+                        "number": 188,
+                        "url": "https://github.com/jimoosciuc/symphony-cc/pull/188",
+                        "head_ref": "live-e2e-smoke",
+                    }
+                ],
             )
 
     detector = FakeDetector()
@@ -77,6 +84,27 @@ async def test_pr_required_detector_retries_until_pr_evidence(monkeypatch) -> No
         "detector_wait_seconds": 0.0,
         "detector_pr_retry_enabled": True,
     }
+
+
+def test_summary_uses_pr_head_ref_when_branch_probe_is_absent() -> None:
+    from tests.test_live_e2e_full import _summarize_detector_result
+
+    result = DetectorResult(
+        task_outcome="completed_with_pr",
+        task_evidence=[
+            {
+                "type": "pr_linked",
+                "number": 195,
+                "url": "https://github.com/jimoosciuc/symphony-cc/pull/195",
+                "head_ref": "live-e2e-smoke-20260509T073327Z",
+            }
+        ],
+    )
+
+    summary = _summarize_detector_result(result, permission_denials_count=0)
+
+    assert summary["pr_number"] == 195
+    assert summary["branch_name"] == "live-e2e-smoke-20260509T073327Z"
 
 
 async def test_detector_does_not_retry_when_pr_not_required(monkeypatch) -> None:

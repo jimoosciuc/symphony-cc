@@ -153,6 +153,7 @@ def test_completed_with_pr(tmp_path: Path) -> None:
     assert pr_entries[0]["number"] == 42
     assert pr_entries[0]["url"].endswith("/pull/42")
     assert pr_entries[0]["state"] == "open"
+    assert pr_entries[0]["head_ref"] == "symphony/acme-proj-1"
     # Conservative default: detector cannot tell created vs. updated
     # from a single read; M5.3 may tighten by snapshot diffing.
     assert pr_entries[0]["created"] is False
