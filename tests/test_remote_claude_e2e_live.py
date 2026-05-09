@@ -80,16 +80,25 @@ def _issue() -> Issue:
     number = int(os.environ.get("SYMPHONY_REMOTE_CLAUDE_TEST_ISSUE", "987655"))
     owner = os.environ.get("SYMPHONY_GITHUB_TEST_OWNER", "jimoosciuc")
     repo = os.environ.get("SYMPHONY_GITHUB_TEST_REPO", "symphony-cc")
+    marker_path = f"docs/live-e2e-smoke/remote-claude-{number}.md"
     return Issue(
         id=f"remote-claude-live#{number}",
         number=number,
         identifier=f"{owner}/{repo}#{number}",
         owner=owner,
         repo=repo,
-        title="Remote Claude live E2E smoke",
+        title=f"Remote Claude live E2E smoke #{number}",
         body=(
-            "Remote Claude live E2E smoke. Reply with a concise completion; "
-            "do not make unrelated changes."
+            "Remote Claude live E2E smoke.\n\n"
+            "Requirements:\n"
+            f"- Create exactly one new file: {marker_path}\n"
+            f"- Put this line in the file: remote Claude smoke {number}\n"
+            "- Commit the change, push a branch, and open a GitHub PR.\n"
+            f"- Link the PR to this issue with `Closes #{number}` or equivalent "
+            "GitHub closing syntax.\n"
+            "- Do not modify unrelated files.\n\n"
+            "This is disposable validation work; the PR will be closed after "
+            "evidence is collected."
         ),
         state="open",
         url=f"https://github.com/{owner}/{repo}/issues/{number}",
@@ -212,6 +221,8 @@ def test_remote_claude_e2e_payload_contract(
     assert plan.remote_snapshot_path.endswith("/snapshot.json")
     assert plan.remote_dispatch_path.endswith("/dispatch.json")
     assert _require_completed_with_pr() is False
+    assert "Commit the change, push a branch, and open a GitHub PR." in issue.body
+    assert f"docs/live-e2e-smoke/remote-claude-{issue.number}.md" in issue.body
 
 
 def test_remote_claude_e2e_can_require_completed_with_pr(monkeypatch) -> None:
