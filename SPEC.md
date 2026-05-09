@@ -344,6 +344,12 @@ lanes:
 `lanes` is optional. A workflow with no lanes MUST behave like the single-lane
 runtime.
 
+Runtime lanes are a routing primitive, not the full role workflow model. The
+role workflow product model is defined in `docs/role-workflows.md`: roles,
+actors, states, transitions, gate ownership, and audit requirements MUST be
+modeled explicitly before lanes are used for production implementer/reviewer/
+leader flows.
+
 When lanes are configured:
 
 - The orchestrator MUST dispatch an issue only to the first lane whose label
