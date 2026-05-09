@@ -114,12 +114,15 @@ class _StubDetector:
 
 
 def _make_orch(
-    tmp_path: Path, outcome: str
+    tmp_path: Path,
+    outcome: str,
+    *,
+    evidence: list | None = None,
 ) -> tuple[Orchestrator, FakeGitHubTracker]:
     cfg = _config(tmp_path)
     tracker = FakeGitHubTracker(issues=[_issue()])
     mgr = WorkspaceManager(cfg.workspace)
-    detector = _StubDetector(outcome)
+    detector = _StubDetector(outcome, evidence=evidence)
     orch = Orchestrator(
         cfg,
         tracker=tracker,
@@ -152,6 +155,13 @@ async def test_incomplete_no_evidence_marks_blocked(tmp_path: Path) -> None:
         "task_outcome=incomplete_no_evidence" in entry[1]
         for entry in state.claim_history
     )
+    assert len(state.progress_comments) == 1
+    comment = state.progress_comments[0]
+    assert "symphony:blocked-outcome" in comment
+    assert "task_outcome: `incomplete_no_evidence`" in comment
+    assert "terminal_state: `completed`" in comment
+    assert "artifacts:" in comment
+    assert "Required operator action" in comment
 
 
 async def test_incomplete_permission_denied_marks_blocked(tmp_path: Path) -> None:
@@ -160,7 +170,17 @@ async def test_incomplete_permission_denied_marks_blocked(tmp_path: Path) -> Non
     Mirrors the leader E2E case where `permission_mode: acceptEdits`
     denied Bash mid-run and Claude fell back to a clarification message.
     Auto-retry would just spin under the same permission_mode."""
-    orch, tracker = _make_orch(tmp_path, OUTCOME_INCOMPLETE_PERMISSION_DENIED)
+    orch, tracker = _make_orch(
+        tmp_path,
+        OUTCOME_INCOMPLETE_PERMISSION_DENIED,
+        evidence=[
+            {
+                "type": "permission_denied",
+                "denials_count": 1,
+                "tool_names": ["AskUserQuestion", "ghp_12345678901234567890"],
+            }
+        ],
+    )
     await orch.run_once()
 
     state = tracker.states["acme/proj#1"]
@@ -170,6 +190,27 @@ async def test_incomplete_permission_denied_marks_blocked(tmp_path: Path) -> Non
         "task_outcome=incomplete_permission_denied" in entry[1]
         for entry in state.claim_history
     )
+    assert len(state.progress_comments) == 1
+    comment = state.progress_comments[0]
+    assert "permission_denied: denials_count=1" in comment
+    assert "AskUserQuestion" in comment
+    assert "ghp_12345678901234567890" not in comment
+    assert "<redacted>" in comment
+
+
+async def test_block_comment_failure_does_not_prevent_blocking(tmp_path: Path) -> None:
+    orch, tracker = _make_orch(tmp_path, OUTCOME_INCOMPLETE_NO_EVIDENCE)
+
+    def _fail_comment(_issue: Issue, _body: str) -> None:
+        raise RuntimeError("comment failed")
+
+    tracker.create_or_update_progress_comment = _fail_comment  # type: ignore[method-assign]
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert state.blocked is True
+    assert state.claimed_by is None
 
 
 # -- Release routing for clean / unverifiable outcomes (#62) ----------------
@@ -186,6 +227,7 @@ async def test_completed_with_pr_releases_claim(tmp_path: Path) -> None:
     # Claim history records the release, not a block.
     assert any("release:" in entry[1] for entry in state.claim_history)
     assert all("blocked:" not in entry[1] for entry in state.claim_history)
+    assert state.progress_comments == []
 
 
 async def test_completed_no_pr_declared_releases_claim(tmp_path: Path) -> None:
