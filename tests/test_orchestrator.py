@@ -37,6 +37,8 @@ from symphony.orchestrator import Orchestrator, WorkerState
 from symphony.provider.base import ProviderRetryableError
 from symphony.provider.fake import FakeProvider, FakeTurnScript
 from symphony.retry import RetryState, next_backoff_ms
+from symphony.workflow import load_workflow
+from symphony.workflow_reload import WorkflowReloader
 from symphony.workspace import WorkspaceManager
 
 # -- Fixtures ----------------------------------------------------------------
@@ -179,6 +181,57 @@ class RecordingProvider(FakeProvider):
         self.messages[session.issue_identifier] = message
         async for event in super().send_input(session, message):
             yield event
+
+
+async def test_default_continuation_renders_workflow_prompt(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(
+        f"""---
+tracker:
+  kind: github
+  owner: acme
+  repo: proj
+  token: literal-token
+  include_labels: [symphony-ready]
+agent:
+  provider: claude_code
+  max_concurrency: 1
+  max_turns: 1
+workspace:
+  root: {tmp_path / "ws"}
+claude:
+  model: fake-model
+  permission_mode: acceptEdits
+  session_store: {tmp_path / "sessions"}
+  transcript_store: {tmp_path / "transcripts"}
+  artifact_store: {tmp_path / "artifacts"}
+github: {{}}
+security:
+  profile: conservative
+---
+Implement {{{{ issue.identifier }}}}: {{{{ issue.title }}}}
+Workspace: {{{{ workspace_path }}}}
+""",
+        encoding="utf-8",
+    )
+    workflow = load_workflow(workflow_path)
+    issue = _issue(number=1)
+    tracker = FakeGitHubTracker(issues=[issue])
+    provider = RecordingProvider()
+    orch = Orchestrator(
+        workflow.config,
+        tracker=tracker,
+        provider=provider,
+        workspace_manager=WorkspaceManager(workflow.config.workspace),
+        workflow_reloader=WorkflowReloader.from_workflow(workflow),
+    )
+
+    await orch.run_once()
+
+    message = provider.messages[issue.identifier]
+    assert "Implement acme/proj#1: Issue 1" in message
+    assert str(tmp_path / "ws" / "acme_proj_1") in message
+    assert "first prompt for" not in message
 
 
 # -- Acceptance: dispatch one eligible issue --------------------------------

@@ -340,7 +340,7 @@ async def run_real_worker(
         terminal_event: AgentEvent | None = None
         async for event in provider.send_input(
             session,
-            f"first prompt for {dispatch.issue_identifier}",
+            dispatch.prompt_ref or f"Work on {dispatch.issue_identifier}.",
         ):
             artifacts.append_event(event)
             session.last_event_at = event.timestamp

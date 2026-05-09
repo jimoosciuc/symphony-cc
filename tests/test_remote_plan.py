@@ -84,6 +84,21 @@ def test_build_remote_dispatch_plan_basic(tmp_path: Path):
     assert plan.dispatch_request.base_branch == "main"
 
 
+def test_build_remote_dispatch_plan_carries_rendered_prompt(tmp_path: Path):
+    config = _config(tmp_path)
+    issue = _make_issue("test-owner", "test-repo", 42)
+
+    plan = build_remote_dispatch_plan(
+        issue,
+        attempt=1,
+        config=config,
+        prompt="Rendered workflow prompt",
+    )
+
+    assert plan.dispatch_request.prompt_ref == "Rendered workflow prompt"
+    assert "Rendered workflow prompt" in plan.serialize_dispatch_request()
+
+
 def test_build_remote_dispatch_plan_paths_deterministic(tmp_path: Path):
     """Test remote dispatch plan paths are deterministic."""
     config = _config(tmp_path)
