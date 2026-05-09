@@ -99,9 +99,16 @@ class _StubDetector:
     needing a real GitHubClient or workspace.
     """
 
-    def __init__(self, outcome: str, *, evidence: list | None = None) -> None:
+    def __init__(
+        self,
+        outcome: str,
+        *,
+        evidence: list | None = None,
+        no_pr_reason: str | None = None,
+    ) -> None:
         self._outcome = outcome
         self._evidence = list(evidence or [])
+        self._no_pr_reason = no_pr_reason
         self.calls: list[dict] = []
 
     def detect(self, **kwargs) -> DetectorResult:
@@ -109,6 +116,7 @@ class _StubDetector:
         return DetectorResult(
             task_outcome=self._outcome,
             task_evidence=self._evidence,
+            no_pr_reason=self._no_pr_reason,
             outcome_decided_by=DECIDED_BY_DETECTOR,
         )
 
@@ -118,11 +126,12 @@ def _make_orch(
     outcome: str,
     *,
     evidence: list | None = None,
+    no_pr_reason: str | None = None,
 ) -> tuple[Orchestrator, FakeGitHubTracker]:
     cfg = _config(tmp_path)
     tracker = FakeGitHubTracker(issues=[_issue()])
     mgr = WorkspaceManager(cfg.workspace)
-    detector = _StubDetector(outcome, evidence=evidence)
+    detector = _StubDetector(outcome, evidence=evidence, no_pr_reason=no_pr_reason)
     orch = Orchestrator(
         cfg,
         tracker=tracker,
@@ -216,28 +225,62 @@ async def test_block_comment_failure_does_not_prevent_blocking(tmp_path: Path) -
 # -- Release routing for clean / unverifiable outcomes (#62) ----------------
 
 
-async def test_completed_with_pr_releases_claim(tmp_path: Path) -> None:
-    """`completed_with_pr` → release_issue (clean success, label cleared)."""
+async def test_completed_with_pr_marks_done_and_removes_ready(tmp_path: Path) -> None:
+    """`completed_with_pr` → terminal done; no future ready reclaims."""
     orch, tracker = _make_orch(tmp_path, OUTCOME_COMPLETED_WITH_PR)
     await orch.run_once()
 
     state = tracker.states["acme/proj#1"]
     assert state.blocked is False
     assert state.claimed_by is None
-    # Claim history records the release, not a block.
-    assert any("release:" in entry[1] for entry in state.claim_history)
+    assert "symphony-ready" not in state.issue.labels
+    assert "symphony-running" not in state.issue.labels
+    assert "symphony-done" in state.issue.labels
+    # Claim history records terminal completion, not a block.
+    assert any("done:" in entry[1] for entry in state.claim_history)
     assert all("blocked:" not in entry[1] for entry in state.claim_history)
     assert state.progress_comments == []
 
 
-async def test_completed_no_pr_declared_releases_claim(tmp_path: Path) -> None:
-    """`completed_no_pr_declared` → release_issue (operator-documented no-PR)."""
-    orch, tracker = _make_orch(tmp_path, OUTCOME_COMPLETED_NO_PR_DECLARED)
+async def test_completed_no_pr_declared_marks_done_and_removes_ready(
+    tmp_path: Path,
+) -> None:
+    """Clean no-PR declarations leave the ready set instead of being reclaimed."""
+    orch, tracker = _make_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_NO_PR_DECLARED,
+        no_pr_reason="already fixed by another PR",
+    )
     await orch.run_once()
 
     state = tracker.states["acme/proj#1"]
     assert state.blocked is False
     assert state.claimed_by is None
+    assert "symphony-ready" not in state.issue.labels
+    assert "symphony-running" not in state.issue.labels
+    assert "symphony-done" in state.issue.labels
+
+
+async def test_completed_no_pr_design_proposed_marks_blocked_and_removes_ready(
+    tmp_path: Path,
+) -> None:
+    """Design proposals need human approval, so they must not be reclaimed."""
+    orch, tracker = _make_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_NO_PR_DECLARED,
+        no_pr_reason="design proposed",
+    )
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert state.blocked is True
+    assert state.claimed_by is None
+    assert "symphony-ready" not in state.issue.labels
+    assert "symphony-running" not in state.issue.labels
+    assert "symphony-blocked" in state.issue.labels
+    assert "symphony-done" not in state.issue.labels
+    assert len(state.progress_comments) == 1
+    assert "no_pr_reason=design proposed" in state.progress_comments[0]
 
 
 async def test_unknown_outcome_releases_claim(tmp_path: Path) -> None:

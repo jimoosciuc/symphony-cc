@@ -411,6 +411,29 @@ def test_release_issue_deletes_label() -> None:
     assert deletes == ["/repos/acme/proj/issues/42/labels/symphony-running"]
 
 
+def test_mark_issue_done_adds_done_and_drops_claim_and_ready() -> None:
+    posts: list[dict] = []
+    deletes: list[str] = []
+
+    def h(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST":
+            posts.append(json.loads(req.content))
+            return httpx.Response(200, json=[])
+        if req.method == "DELETE":
+            deletes.append(req.url.path)
+            return httpx.Response(200, json=[])
+        return httpx.Response(500)
+
+    tracker = _make_tracker(h)
+    result = tracker.mark_issue_done(_issue(), reason="completed_with_pr")
+    assert result.ok is True
+    assert posts == [{"labels": ["symphony-done"]}]
+    assert deletes == [
+        "/repos/acme/proj/issues/42/labels/symphony-running",
+        "/repos/acme/proj/issues/42/labels/symphony-ready",
+    ]
+
+
 def test_release_issue_swallows_404_on_missing_label() -> None:
     def h(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"message": "Label does not exist"})
@@ -550,7 +573,7 @@ def test_not_found_propagates_only_outside_per_method_handlers() -> None:
 # -- mark_issue_blocked ------------------------------------------------------
 
 
-def test_mark_issue_blocked_adds_label_and_drops_claim() -> None:
+def test_mark_issue_blocked_adds_label_and_drops_claim_and_ready() -> None:
     posts: list[dict] = []
     deletes: list[str] = []
 
@@ -567,7 +590,10 @@ def test_mark_issue_blocked_adds_label_and_drops_claim() -> None:
     result = tracker.mark_issue_blocked(_issue(), reason="non-retryable")
     assert result.ok is True
     assert posts == [{"labels": ["symphony-blocked"]}]
-    assert deletes == ["/repos/acme/proj/issues/42/labels/symphony-running"]
+    assert deletes == [
+        "/repos/acme/proj/issues/42/labels/symphony-running",
+        "/repos/acme/proj/issues/42/labels/symphony-ready",
+    ]
 
 
 # -- find_linked_pull_requests ----------------------------------------------
@@ -855,6 +881,7 @@ def test_github_tracker_is_a_tracker_protocol() -> None:
         "fetch_issues_by_numbers",
         "claim_issue",
         "release_issue",
+        "mark_issue_done",
         "mark_issue_blocked",
         "find_linked_pull_requests",
         "create_or_update_progress_comment",

@@ -78,6 +78,7 @@ def test_init_github_implementer_writes_loadable_workflow(
     assert "wrote" in out
     text = target.read_text(encoding="utf-8")
     assert "symphony-ready" in text
+    assert 'exclude_labels: ["symphony-running", "symphony-blocked", "symphony-done"]' in text
     assert "workspace:\n  root: .symphony/workspaces\n  populate: git" in text
     assert "model: claude-opus-4-7" in text
     workflow = load_workflow(target)

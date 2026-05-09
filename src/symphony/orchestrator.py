@@ -1208,16 +1208,24 @@ class Orchestrator:
                 recent_assistant_text="",
                 workspace_path=worker.workspace.path,
             )
+            no_pr_operator_required = _no_pr_reason_requires_operator(
+                detector_result.no_pr_reason
+            )
             completion_blocked = detector_result.task_outcome in {
                 OUTCOME_INCOMPLETE_NO_EVIDENCE,
                 OUTCOME_INCOMPLETE_PERMISSION_DENIED,
-            }
+            } or no_pr_operator_required
             should_block = non_retryable_failure or completion_blocked
             _maybe_log_task_outcome(worker, detector_result)
 
             if should_block:
                 block_reason = (
                     worker.error
+                    or (
+                        f"no_pr_reason={detector_result.no_pr_reason}"
+                        if no_pr_operator_required and detector_result.no_pr_reason
+                        else None
+                    )
                     or f"task_outcome={detector_result.task_outcome}"
                 )
                 _comment_blocked_outcome(
@@ -1237,10 +1245,16 @@ class Orchestrator:
                     )
             else:
                 try:
-                    self.tracker.release_issue(worker.issue, outcome_reason)
+                    if detector_result.task_outcome in {
+                        OUTCOME_COMPLETED_WITH_PR,
+                        OUTCOME_COMPLETED_NO_PR_DECLARED,
+                    }:
+                        self.tracker.mark_issue_done(worker.issue, outcome_reason)
+                    else:
+                        self.tracker.release_issue(worker.issue, outcome_reason)
                 except Exception as exc:  # noqa: BLE001 - same rationale
                     _LOG.warning(
-                        "release_issue failed for %s: %s",
+                        "terminal issue state update failed for %s: %s",
                         worker.issue.identifier,
                         exc,
                     )
@@ -1682,6 +1696,24 @@ def _comment_blocked_outcome(
             worker.issue.identifier,
             exc,
         )
+
+
+def _no_pr_reason_requires_operator(reason: str | None) -> bool:
+    if not reason:
+        return False
+    normalized = reason.strip().lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "design proposed",
+            "design approval",
+            "needs design",
+            "requires design",
+            "needs maintainer",
+            "requires maintainer",
+            "clarification",
+        )
+    )
 
 
 def _format_blocked_outcome_comment(
