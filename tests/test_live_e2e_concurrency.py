@@ -32,6 +32,7 @@ from symphony.workspace import GitWorkspacePopulator, WorkspaceManager
 
 _GATE_ENV = "SYMPHONY_RUN_CONCURRENCY_E2E"
 _ISSUES_ENV = "SYMPHONY_CONCURRENCY_E2E_ISSUES"
+_REQUIRE_PR_ENV = "SYMPHONY_CONCURRENCY_E2E_REQUIRE_PR"
 _DEFAULT_MODEL = "claude-opus-4-7"
 
 
@@ -63,6 +64,11 @@ def _issue_numbers(*, required: bool) -> list[int]:
     if required and len(numbers) < 2:
         pytest.skip(f"{_ISSUES_ENV} must contain at least two issue numbers")
     return numbers
+
+
+def _require_completed_with_pr() -> bool:
+    """Return whether concurrency E2E must prove PR-producing completion."""
+    return os.environ.get(_REQUIRE_PR_ENV) == "1"
 
 
 def _config(tmp_path: Path):
@@ -109,6 +115,7 @@ def _config(tmp_path: Path):
 
 def test_concurrency_e2e_harness_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SYMPHONY_CLAUDE_TEST_MODEL", raising=False)
+    monkeypatch.delenv(_REQUIRE_PR_ENV, raising=False)
     monkeypatch.setenv(_ISSUES_ENV, "101,102")
     config = _config(tmp_path)
     numbers = _issue_numbers(required=True)
@@ -118,11 +125,88 @@ def test_concurrency_e2e_harness_contract(tmp_path: Path, monkeypatch: pytest.Mo
     assert config.claude.model == _DEFAULT_MODEL
     assert config.workspace.populate == "git"
     assert "token" in config.logging.redact_keys
+    assert _require_completed_with_pr() is False
+
+
+def test_concurrency_e2e_can_require_completed_with_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(_ISSUES_ENV, "101,102")
+    monkeypatch.setenv(_REQUIRE_PR_ENV, "1")
+    monkeypatch.setenv("SYMPHONY_CONCURRENCY_E2E_PERMISSION_MODE", "bypassPermissions")
+
+    config = _config(tmp_path)
+
+    assert config.claude.permission_mode == "bypassPermissions"
+    assert _require_completed_with_pr() is True
+
+
+def test_concurrency_pr_required_assertion_reads_terminal_evidence(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    (artifact_dir / "terminal.json").write_text(
+        json.dumps(
+            {
+                "task_outcome": "completed_with_pr",
+                "task_evidence": [
+                    {
+                        "type": "pr_linked",
+                        "number": 198,
+                        "url": "https://github.com/jimoosciuc/symphony-cc/pull/198",
+                        "head_ref": "symphony/test",
+                    }
+                ],
+            }
+        )
+    )
+
+    summaries = _finished_pr_summaries(
+        [
+            {
+                "issue_identifier": "jimoosciuc/symphony-cc#198",
+                "artifact_dir": str(artifact_dir),
+                "task_outcome": "completed_with_pr",
+            }
+        ]
+    )
+
+    _assert_completed_with_pr(summaries)
+    assert summaries == [
+        {
+            "issue_identifier": "jimoosciuc/symphony-cc#198",
+            "terminal_json_path": str(artifact_dir / "terminal.json"),
+            "task_outcome": "completed_with_pr",
+            "pr_number": 198,
+            "pr_url": "https://github.com/jimoosciuc/symphony-cc/pull/198",
+            "branch_name": "symphony/test",
+        }
+    ]
+
+
+def test_concurrency_pr_required_assertion_fails_without_pr(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    (artifact_dir / "terminal.json").write_text(
+        json.dumps({"task_outcome": "completed_no_pr_declared", "task_evidence": []})
+    )
+    summaries = _finished_pr_summaries(
+        [
+            {
+                "issue_identifier": "jimoosciuc/symphony-cc#199",
+                "artifact_dir": str(artifact_dir),
+                "task_outcome": "completed_no_pr_declared",
+            }
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="completed_with_pr"):
+        _assert_completed_with_pr(summaries)
 
 
 async def test_live_multi_issue_concurrency(tmp_path: Path) -> None:
     numbers = _gate()
     config = _config(tmp_path)
+    require_completed_with_pr = _require_completed_with_pr()
     base_tracker = GitHubTracker(config.tracker, config.github)
     issues = base_tracker.fetch_issues_by_numbers(numbers[: config.agent.max_concurrency])
     found = {issue.number for issue in issues}
@@ -152,14 +236,18 @@ async def test_live_multi_issue_concurrency(tmp_path: Path) -> None:
         base_tracker.client.close()
 
     expected = {issue.identifier for issue in issues}
+    finished_pr_summaries = _finished_pr_summaries(orchestrator.recent_finished)
     evidence = {
         "issue_urls": {issue.identifier: issue.url for issue in issues},
+        "permission_mode": config.claude.permission_mode,
+        "require_completed_with_pr": require_completed_with_pr,
         "dispatched": result.dispatched,
         "finished": result.finished,
         "retries_scheduled": result.retries_scheduled,
         "skipped_claim_conflict": result.skipped_claim_conflict,
         "status": orchestrator.status_snapshot(),
         "recent_finished": orchestrator.recent_finished,
+        "finished_pr_summaries": finished_pr_summaries,
     }
     evidence_file = evidence_dir / "concurrency_e2e_evidence.json"
     evidence_file.write_text(json.dumps(evidence, indent=2, sort_keys=True))
@@ -168,6 +256,9 @@ async def test_live_multi_issue_concurrency(tmp_path: Path) -> None:
     assert set(result.finished).issubset(expected)
     assert len(orchestrator.recent_finished) == len(result.finished)
     _assert_isolated_finished(orchestrator.recent_finished)
+    if require_completed_with_pr:
+        assert set(result.finished) == expected
+        _assert_completed_with_pr(finished_pr_summaries)
 
 
 def _live_prompt(worker: WorkerState) -> str | None:
@@ -187,6 +278,55 @@ def _assert_isolated_finished(items: list[dict[str, Any]]) -> None:
     assert len(artifact_dirs) == len(set(artifact_dirs))
     assert len(session_ids) == len(set(session_ids))
     assert len(issue_ids) == len(set(issue_ids))
+
+
+def _finished_pr_summaries(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for item in items:
+        terminal_path = Path(item["artifact_dir"]) / "terminal.json"
+        terminal_data: dict[str, Any] = {}
+        if terminal_path.exists():
+            terminal_data = json.loads(terminal_path.read_text())
+
+        pr_number = None
+        pr_url = None
+        branch_name = None
+        for entry in terminal_data.get("task_evidence", []):
+            if entry.get("type") == "pr_linked" and pr_number is None:
+                pr_number = entry.get("number")
+                pr_url = entry.get("url")
+                branch_name = entry.get("head_ref")
+            if entry.get("type") == "branch_pushed" and branch_name is None:
+                branch_name = entry.get("name")
+
+        summaries.append(
+            {
+                "issue_identifier": item["issue_identifier"],
+                "terminal_json_path": str(terminal_path),
+                "task_outcome": terminal_data.get(
+                    "task_outcome",
+                    item.get("task_outcome"),
+                ),
+                "pr_number": pr_number,
+                "pr_url": pr_url,
+                "branch_name": branch_name,
+            }
+        )
+    return summaries
+
+
+def _assert_completed_with_pr(summaries: list[dict[str, Any]]) -> None:
+    failures = [
+        summary
+        for summary in summaries
+        if summary.get("task_outcome") != "completed_with_pr"
+        or not summary.get("pr_number")
+        or not summary.get("pr_url")
+    ]
+    assert not failures, (
+        "Concurrency E2E required completed_with_pr for every finished issue; "
+        f"failures={failures}"
+    )
 
 
 class _SelectedIssueTracker:
