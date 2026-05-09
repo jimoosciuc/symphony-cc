@@ -19,6 +19,7 @@ from symphony.config import (
     LoggingConfig,
     PollingConfig,
     RetryConfig,
+    RoleGraphConfig,
     WorkflowConfig,
     build_config,
 )
@@ -277,6 +278,161 @@ def test_duplicate_lane_names_fail() -> None:
     assert excinfo.value.location == "lanes[1].name"
 
 
+def test_role_graph_defaults_to_none_for_backwards_compatibility() -> None:
+    raw = _minimal_raw()
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.role_graph is None
+
+
+def test_role_graph_parses_default_production_shape() -> None:
+    raw = _minimal_raw()
+    raw.update(_role_graph_raw())
+
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    graph = cfg.role_graph
+    assert isinstance(graph, RoleGraphConfig)
+    assert graph.roles["implementer"].actor == "agent"
+    assert graph.roles["reviewer"].actor == "human"
+    assert graph.roles["leader"].actor == "hybrid"
+    assert graph.roles["implementer"].can_claim == ("ready_impl", "changes_requested")
+    assert graph.roles["implementer"].claim_state == "implementing"
+    assert graph.states["needs_design"].gate_owner == "leader"
+    assert graph.states["done"].terminal is True
+    transition = graph.transitions["pr_delivered"]
+    assert transition.role == "implementer"
+    assert transition.from_states == ("implementing",)
+    assert transition.to_state == "ready_review"
+    assert transition.requires == ("pr_link",)
+
+
+def test_role_graph_accepts_top_level_transitions() -> None:
+    raw = _minimal_raw()
+    graph_raw = _role_graph_raw()
+    graph_raw["roles"]["implementer"].pop("transitions")
+    graph_raw["transitions"] = {
+        "pr_delivered": {
+            "role": "implementer",
+            "from": ["implementing"],
+            "to": "ready_review",
+            "requires": ["pr_link"],
+        }
+    }
+    raw.update(graph_raw)
+
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert cfg.role_graph is not None
+    assert cfg.role_graph.transitions["pr_delivered"].role == "implementer"
+
+
+def test_role_graph_rejects_missing_states_section() -> None:
+    raw = _minimal_raw()
+    raw["roles"] = {"implementer": {"actor": "agent"}}
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert excinfo.value.location == "states"
+
+
+def test_role_graph_rejects_invalid_actor() -> None:
+    raw = _minimal_raw()
+    graph_raw = _role_graph_raw()
+    graph_raw["roles"]["implementer"]["actor"] = "robot"
+    raw.update(graph_raw)
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "roles.implementer.actor"
+
+
+def test_role_graph_rejects_unknown_claim_state() -> None:
+    raw = _minimal_raw()
+    graph_raw = _role_graph_raw()
+    graph_raw["roles"]["implementer"]["can_claim"] = ["missing"]
+    raw.update(graph_raw)
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "roles.implementer.can_claim[0]"
+
+
+def test_role_graph_rejects_unknown_gate_owner() -> None:
+    raw = _minimal_raw()
+    graph_raw = _role_graph_raw()
+    graph_raw["states"]["needs_design"]["gate_owner"] = "architect"
+    raw.update(graph_raw)
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "states.needs_design.gate_owner"
+
+
+def test_role_graph_rejects_unknown_transition_role() -> None:
+    raw = _minimal_raw()
+    graph_raw = _role_graph_raw()
+    graph_raw["transitions"] = {
+        "bad": {"role": "architect", "from": "ready_impl", "to": "done"}
+    }
+    raw.update(graph_raw)
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "transitions.bad.role"
+
+
+def test_role_graph_rejects_unknown_transition_state() -> None:
+    raw = _minimal_raw()
+    graph_raw = _role_graph_raw()
+    graph_raw["roles"]["implementer"]["transitions"]["pr_delivered"]["to"] = "missing"
+    raw.update(graph_raw)
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "transitions.pr_delivered.to"
+
+
+def test_role_graph_rejects_invalid_evidence_requirement() -> None:
+    raw = _minimal_raw()
+    graph_raw = _role_graph_raw()
+    graph_raw["roles"]["implementer"]["transitions"]["pr_delivered"]["requires"] = "magic"
+    raw.update(graph_raw)
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "roles.implementer.transitions.pr_delivered.requires"
+
+
+def test_role_graph_rejects_duplicate_state_labels() -> None:
+    raw = _minimal_raw()
+    graph_raw = _role_graph_raw()
+    graph_raw["states"]["ready_review"]["labels"] = ["symphony-ready-impl"]
+    raw.update(graph_raw)
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "states.ready_review.labels"
+
+
+def test_role_graph_compatibility_mode_allows_duplicate_state_labels() -> None:
+    raw = _minimal_raw()
+    graph_raw = _role_graph_raw()
+    graph_raw["role_workflow"] = {"compatibility_mode": True}
+    graph_raw["states"]["ready_review"]["labels"] = ["symphony-ready-impl"]
+    raw.update(graph_raw)
+
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert cfg.role_graph is not None
+    assert cfg.role_graph.compatibility_mode is True
+
+
 def test_remote_enabled_valid_config_preserves_remote_paths() -> None:
     raw = _minimal_raw()
     raw["remote"] = {
@@ -400,6 +556,54 @@ def _minimal_raw() -> dict[str, object]:
             "artifact_store": "a",
         },
         "github": {},
+    }
+
+
+def _role_graph_raw() -> dict[str, object]:
+    return {
+        "roles": {
+            "implementer": {
+                "actor": "agent",
+                "provider": "claude_code",
+                "can_claim": ["ready_impl", "changes_requested"],
+                "claim_state": "implementing",
+                "transitions": {
+                    "pr_delivered": {
+                        "from": "implementing",
+                        "to": "ready_review",
+                        "requires": "pr_link",
+                    },
+                    "design_needed": {
+                        "from": "implementing",
+                        "to": "needs_design",
+                        "requires": "issue_comment",
+                    },
+                },
+            },
+            "reviewer": {
+                "actor": "human",
+                "can_claim": ["ready_review"],
+                "claim_state": "reviewing",
+            },
+            "leader": {
+                "actor": "hybrid",
+                "can_claim": ["needs_design"],
+                "claim_state": "leader_reviewing",
+            },
+        },
+        "states": {
+            "ready_impl": {"labels": ["symphony-ready-impl"]},
+            "implementing": {"labels": ["symphony-implementing"]},
+            "ready_review": {"labels": ["symphony-ready-review"]},
+            "reviewing": {"labels": ["symphony-reviewing"]},
+            "changes_requested": {"labels": ["symphony-changes-requested"]},
+            "needs_design": {
+                "labels": ["symphony-needs-design"],
+                "gate_owner": "leader",
+            },
+            "leader_reviewing": {"labels": ["symphony-leader-reviewing"]},
+            "done": {"labels": ["symphony-done"], "terminal": True},
+        },
     }
 
 

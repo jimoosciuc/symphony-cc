@@ -86,6 +86,20 @@ ALLOWED_SECURITY_PROFILES: frozenset[str] = frozenset(
     {"conservative", "trusted_unattended", "restricted"}
 )
 
+ALLOWED_ROLE_ACTORS: frozenset[str] = frozenset({"agent", "human", "hybrid"})
+
+ALLOWED_TRANSITION_REQUIREMENTS: frozenset[str] = frozenset(
+    {
+        "claim_comment",
+        "decision_comment",
+        "issue_comment",
+        "none",
+        "pr_approval",
+        "pr_link",
+        "review_comment",
+    }
+)
+
 
 # -- Section dataclasses -------------------------------------------------------
 
@@ -299,6 +313,41 @@ class LaneConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RoleStateConfig:
+    name: str
+    labels: tuple[str, ...]
+    terminal: bool = False
+    gate_owner: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RoleConfig:
+    name: str
+    actor: str
+    provider: str | None = None
+    can_claim: tuple[str, ...] = ()
+    claim_state: str | None = None
+    transitions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RoleTransitionConfig:
+    name: str
+    role: str
+    from_states: tuple[str, ...]
+    to_state: str
+    requires: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RoleGraphConfig:
+    roles: dict[str, RoleConfig]
+    states: dict[str, RoleStateConfig]
+    transitions: dict[str, RoleTransitionConfig]
+    compatibility_mode: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowConfig:
     tracker: TrackerConfig
     agent: AgentConfig
@@ -311,6 +360,7 @@ class WorkflowConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
     lanes: tuple[LaneConfig, ...] = ()
+    role_graph: RoleGraphConfig | None = None
     workflow_path: Path | None = None
     warnings: tuple[ConfigWarning, ...] = ()
 
@@ -409,6 +459,22 @@ def _opt_str_list(
             )
         out.append(item)
     return tuple(out)
+
+
+def _str_or_str_list(value: Any, location: str) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list):
+        out: list[str] = []
+        for index, item in enumerate(value):
+            if not isinstance(item, str):
+                raise ConfigError(
+                    f"{location}[{index}]",
+                    f"must be a string, got {type(item).__name__}",
+                )
+            out.append(item)
+        return tuple(out)
+    raise ConfigError(location, f"must be a string or list, got {type(value).__name__}")
 
 
 def _resolve_path(value: str, base: Path) -> Path:
@@ -794,6 +860,247 @@ def _build_lanes(raw: dict[str, Any]) -> tuple[LaneConfig, ...]:
     return tuple(lanes)
 
 
+def _build_role_graph(raw: dict[str, Any]) -> RoleGraphConfig | None:
+    present = any(key in raw for key in ("roles", "states", "transitions", "role_graph"))
+    if not present:
+        return None
+    if "role_graph" in raw:
+        raise ConfigError(
+            "role_graph",
+            "inline role_graph is not supported; use top-level roles/states/transitions",
+        )
+    roles_raw = raw.get("roles")
+    states_raw = raw.get("states")
+    transitions_raw = raw.get("transitions") or {}
+    compatibility_raw = raw.get("role_workflow") or {}
+
+    if roles_raw is None:
+        raise ConfigError("roles", "required when role workflow config is present")
+    if states_raw is None:
+        raise ConfigError("states", "required when role workflow config is present")
+    if not isinstance(roles_raw, dict):
+        raise ConfigError("roles", f"must be a mapping, got {type(roles_raw).__name__}")
+    if not isinstance(states_raw, dict):
+        raise ConfigError("states", f"must be a mapping, got {type(states_raw).__name__}")
+    if not isinstance(transitions_raw, dict):
+        raise ConfigError(
+            "transitions",
+            f"must be a mapping, got {type(transitions_raw).__name__}",
+        )
+    if not isinstance(compatibility_raw, dict):
+        raise ConfigError(
+            "role_workflow",
+            f"must be a mapping, got {type(compatibility_raw).__name__}",
+        )
+
+    compatibility_mode = _opt_bool(
+        compatibility_raw, "compatibility_mode", "role_workflow", default=False
+    )
+    states = _build_role_states(states_raw)
+    roles, nested_transitions = _build_roles(roles_raw)
+    transitions = _build_role_transitions(
+        transitions_raw,
+        nested_transitions=nested_transitions,
+    )
+    graph = RoleGraphConfig(
+        roles=roles,
+        states=states,
+        transitions=transitions,
+        compatibility_mode=compatibility_mode,
+    )
+    _validate_role_graph(graph)
+    return graph
+
+
+def _build_role_states(raw: dict[str, Any]) -> dict[str, RoleStateConfig]:
+    states: dict[str, RoleStateConfig] = {}
+    for name, item in raw.items():
+        location = f"states.{name}"
+        if not isinstance(name, str) or not name:
+            raise ConfigError("states", "state names must be non-empty strings")
+        if not isinstance(item, dict):
+            raise ConfigError(location, f"must be a mapping, got {type(item).__name__}")
+        labels = _opt_str_list(item, "labels", location)
+        if not labels:
+            raise ConfigError(f"{location}.labels", "must contain at least one label")
+        states[name] = RoleStateConfig(
+            name=name,
+            labels=labels,
+            terminal=_opt_bool(item, "terminal", location, default=False),
+            gate_owner=_opt_str(item, "gate_owner", location),
+        )
+    return states
+
+
+def _build_roles(
+    raw: dict[str, Any],
+) -> tuple[dict[str, RoleConfig], dict[tuple[str, str], dict[str, Any]]]:
+    roles: dict[str, RoleConfig] = {}
+    nested_transitions: dict[tuple[str, str], dict[str, Any]] = {}
+    for name, item in raw.items():
+        location = f"roles.{name}"
+        if not isinstance(name, str) or not name:
+            raise ConfigError("roles", "role names must be non-empty strings")
+        if not isinstance(item, dict):
+            raise ConfigError(location, f"must be a mapping, got {type(item).__name__}")
+        actor = _require_str(item, "actor", location)
+        if actor not in ALLOWED_ROLE_ACTORS:
+            raise ConfigError(
+                f"{location}.actor",
+                f"must be one of {sorted(ALLOWED_ROLE_ACTORS)} (got {actor!r})",
+            )
+        raw_nested = item.get("transitions") or {}
+        if not isinstance(raw_nested, dict):
+            raise ConfigError(
+                f"{location}.transitions",
+                f"must be a mapping, got {type(raw_nested).__name__}",
+            )
+        transition_names = tuple(str(key) for key in raw_nested)
+        for transition_name, transition_item in raw_nested.items():
+            if not isinstance(transition_name, str) or not transition_name:
+                raise ConfigError(
+                    f"{location}.transitions",
+                    "transition names must be non-empty strings",
+                )
+            if not isinstance(transition_item, dict):
+                raise ConfigError(
+                    f"{location}.transitions.{transition_name}",
+                    f"must be a mapping, got {type(transition_item).__name__}",
+                )
+            nested_transitions[(name, transition_name)] = transition_item
+        roles[name] = RoleConfig(
+            name=name,
+            actor=actor,
+            provider=_opt_str(item, "provider", location),
+            can_claim=_opt_str_list(item, "can_claim", location),
+            claim_state=_opt_str(item, "claim_state", location),
+            transitions=transition_names,
+        )
+    return roles, nested_transitions
+
+
+def _build_role_transitions(
+    raw: dict[str, Any],
+    *,
+    nested_transitions: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, RoleTransitionConfig]:
+    transitions: dict[str, RoleTransitionConfig] = {}
+    for (role_name, transition_name), item in nested_transitions.items():
+        transitions[transition_name] = _build_role_transition(
+            transition_name,
+            item,
+            role_name=role_name,
+            location=f"roles.{role_name}.transitions.{transition_name}",
+        )
+    for name, item in raw.items():
+        location = f"transitions.{name}"
+        if not isinstance(name, str) or not name:
+            raise ConfigError("transitions", "transition names must be non-empty strings")
+        if name in transitions:
+            raise ConfigError(location, f"duplicate transition name {name!r}")
+        if not isinstance(item, dict):
+            raise ConfigError(location, f"must be a mapping, got {type(item).__name__}")
+        role_name = _require_str(item, "role", location)
+        transitions[name] = _build_role_transition(
+            name,
+            item,
+            role_name=role_name,
+            location=location,
+        )
+    return transitions
+
+
+def _build_role_transition(
+    name: str,
+    item: dict[str, Any],
+    *,
+    role_name: str,
+    location: str,
+) -> RoleTransitionConfig:
+    if "from" not in item:
+        raise ConfigError(f"{location}.from", "required field is missing")
+    if "to" not in item:
+        raise ConfigError(f"{location}.to", "required field is missing")
+    from_states = _str_or_str_list(item["from"], f"{location}.from")
+    to_state = _require_str(item, "to", location)
+    requires = _str_or_str_list(item.get("requires", []), f"{location}.requires")
+    for requirement in requires:
+        if requirement not in ALLOWED_TRANSITION_REQUIREMENTS:
+            raise ConfigError(
+                f"{location}.requires",
+                (
+                    f"must contain only {sorted(ALLOWED_TRANSITION_REQUIREMENTS)} "
+                    f"(got {requirement!r})"
+                ),
+            )
+    return RoleTransitionConfig(
+        name=name,
+        role=role_name,
+        from_states=from_states,
+        to_state=to_state,
+        requires=requires,
+    )
+
+
+def _validate_role_graph(graph: RoleGraphConfig) -> None:
+    if not graph.roles:
+        raise ConfigError("roles", "must define at least one role")
+    if not graph.states:
+        raise ConfigError("states", "must define at least one state")
+    _validate_state_labels(graph)
+    for state in graph.states.values():
+        if state.gate_owner and state.gate_owner not in graph.roles:
+            raise ConfigError(
+                f"states.{state.name}.gate_owner",
+                f"unknown role {state.gate_owner!r}",
+            )
+    for role in graph.roles.values():
+        for index, state_name in enumerate(role.can_claim):
+            if state_name not in graph.states:
+                raise ConfigError(
+                    f"roles.{role.name}.can_claim[{index}]",
+                    f"unknown state {state_name!r}",
+                )
+        if role.claim_state and role.claim_state not in graph.states:
+            raise ConfigError(
+                f"roles.{role.name}.claim_state",
+                f"unknown state {role.claim_state!r}",
+            )
+    for transition in graph.transitions.values():
+        if transition.role not in graph.roles:
+            raise ConfigError(
+                f"transitions.{transition.name}.role",
+                f"unknown role {transition.role!r}",
+            )
+        for index, state_name in enumerate(transition.from_states):
+            if state_name not in graph.states:
+                raise ConfigError(
+                    f"transitions.{transition.name}.from[{index}]",
+                    f"unknown state {state_name!r}",
+                )
+        if transition.to_state not in graph.states:
+            raise ConfigError(
+                f"transitions.{transition.name}.to",
+                f"unknown state {transition.to_state!r}",
+            )
+
+
+def _validate_state_labels(graph: RoleGraphConfig) -> None:
+    by_label: dict[str, str] = {}
+    for state in graph.states.values():
+        for label in state.labels:
+            normalized = label.strip().lower()
+            if not normalized:
+                raise ConfigError(f"states.{state.name}.labels", "labels must not be blank")
+            previous = by_label.get(normalized)
+            if previous and previous != state.name and not graph.compatibility_mode:
+                raise ConfigError(
+                    f"states.{state.name}.labels",
+                    f"label {label!r} is already used by state {previous!r}",
+                )
+            by_label[normalized] = state.name
+
+
 def _build_remote(raw: dict[str, Any]) -> RemoteConfig:
     """Build RemoteConfig from optional 'remote' section.
 
@@ -906,6 +1213,7 @@ def build_config(
         logging=_build_logging(raw, base_dir),
         remote=_build_remote(raw),
         lanes=_build_lanes(raw),
+        role_graph=_build_role_graph(raw),
         workflow_path=workflow_path.resolve(),
         warnings=tuple(warnings),
     )
