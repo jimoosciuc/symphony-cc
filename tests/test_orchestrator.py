@@ -21,6 +21,7 @@ from symphony.config import (
     AgentConfig,
     ClaudeConfig,
     GitHubConfig,
+    LaneConfig,
     LoggingConfig,
     PollingConfig,
     RetryConfig,
@@ -169,6 +170,17 @@ class OverlapTrackingProvider(FakeProvider):
             self.active_turns -= 1
 
 
+class RecordingProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: dict[str, str] = {}
+
+    async def send_input(self, session, message):  # noqa: ANN001
+        self.messages[session.issue_identifier] = message
+        async for event in super().send_input(session, message):
+            yield event
+
+
 # -- Acceptance: dispatch one eligible issue --------------------------------
 
 
@@ -243,6 +255,155 @@ async def test_workers_overlap_when_max_concurrency_gt_one(tmp_path: Path) -> No
     assert result.dispatched == ["acme/proj#1", "acme/proj#2"]
     assert set(result.finished) == {"acme/proj#1", "acme/proj#2"}
     assert provider.max_active_turns == 2
+
+
+async def test_lanes_select_distinct_label_sets_and_prompt_text(tmp_path: Path) -> None:
+    issues = [
+        _issue(number=1, labels=("symphony-ready", "status:ready-for-implementation")),
+        _issue(number=2, labels=("symphony-ready", "status:ready-for-review")),
+        _issue(number=3, labels=("symphony-ready", "status:blocked")),
+    ]
+    provider = RecordingProvider()
+    orch, _, _ = _make_orchestrator(
+        tmp_path,
+        issues=issues,
+        max_concurrency=3,
+        provider=provider,
+    )
+    implementer = LaneConfig(
+        name="implementer",
+        include_labels=("status:ready-for-implementation",),
+        max_concurrency=1,
+        prompt_prefix="You are the implementer.",
+        prompt_suffix="Open a PR when done.",
+    )
+    reviewer = LaneConfig(
+        name="reviewer",
+        include_labels=("status:ready-for-review",),
+        max_concurrency=1,
+        prompt_prefix="You are the reviewer.",
+    )
+    orch.config = replace(orch.config, lanes=(implementer, reviewer))
+
+    result = await orch.run_once()
+
+    assert result.dispatched == ["acme/proj#1", "acme/proj#2"]
+    assert set(result.finished) == {"acme/proj#1", "acme/proj#2"}
+    assert "You are the implementer." in provider.messages["acme/proj#1"]
+    assert "Open a PR when done." in provider.messages["acme/proj#1"]
+    assert "You are the reviewer." in provider.messages["acme/proj#2"]
+    request_files = sorted(Path(tmp_path / "artifacts").rglob("request.json"))
+    request_payloads = [json.loads(path.read_text()) for path in request_files]
+    assert {payload["lane"]["name"] for payload in request_payloads} == {
+        "implementer",
+        "reviewer",
+    }
+    snapshot = orch.status_snapshot()
+    assert {item["lane"] for item in snapshot["recent_finished"]} == {
+        "implementer",
+        "reviewer",
+    }
+
+
+async def test_lanes_do_not_claim_do_not_claim_or_leader_owned(tmp_path: Path) -> None:
+    issues = [
+        _issue(
+            number=1,
+            labels=("symphony-ready", "status:ready-for-implementation", "do-not-claim"),
+        ),
+        _issue(
+            number=2,
+            labels=("symphony-ready", "status:ready-for-implementation", "leader-owned"),
+        ),
+    ]
+    orch, tracker, _ = _make_orchestrator(tmp_path, issues=issues, max_concurrency=2)
+    orch.config = replace(
+        orch.config,
+        lanes=(
+            LaneConfig(
+                name="implementer",
+                include_labels=("status:ready-for-implementation",),
+            ),
+        ),
+    )
+
+    result = await orch.run_once()
+
+    assert result.dispatched == []
+    assert all(state.claimed_by is None for state in tracker.states.values())
+
+
+async def test_lane_specific_concurrency_limit_is_enforced(tmp_path: Path) -> None:
+    issues = [
+        _issue(number=1, labels=("symphony-ready", "status:ready-for-implementation")),
+        _issue(number=2, labels=("symphony-ready", "status:ready-for-implementation")),
+        _issue(number=3, labels=("symphony-ready", "status:ready-for-review")),
+    ]
+    provider = OverlapTrackingProvider()
+    orch, _, _ = _make_orchestrator(
+        tmp_path,
+        issues=issues,
+        max_concurrency=3,
+        provider=provider,
+    )
+    orch.config = replace(
+        orch.config,
+        lanes=(
+            LaneConfig(
+                name="implementer",
+                include_labels=("status:ready-for-implementation",),
+                max_concurrency=1,
+            ),
+            LaneConfig(
+                name="reviewer",
+                include_labels=("status:ready-for-review",),
+                max_concurrency=1,
+            ),
+        ),
+    )
+
+    result = await orch.run_once()
+
+    assert result.dispatched == ["acme/proj#1", "acme/proj#3"]
+    assert set(result.finished) == {"acme/proj#1", "acme/proj#3"}
+    assert provider.max_active_turns == 2
+
+
+async def test_lanes_still_respect_global_concurrency_limit(tmp_path: Path) -> None:
+    issues = [
+        _issue(number=1, labels=("symphony-ready", "status:ready-for-implementation")),
+        _issue(number=2, labels=("symphony-ready", "status:ready-for-review")),
+        _issue(number=3, labels=("symphony-ready", "status:ready-for-verification")),
+    ]
+    orch, _, _ = _make_orchestrator(
+        tmp_path,
+        issues=issues,
+        max_concurrency=2,
+    )
+    orch.config = replace(
+        orch.config,
+        lanes=(
+            LaneConfig(
+                name="implementer",
+                include_labels=("status:ready-for-implementation",),
+                max_concurrency=2,
+            ),
+            LaneConfig(
+                name="reviewer",
+                include_labels=("status:ready-for-review",),
+                max_concurrency=2,
+            ),
+            LaneConfig(
+                name="verifier",
+                include_labels=("status:ready-for-verification",),
+                max_concurrency=2,
+            ),
+        ),
+    )
+
+    result = await orch.run_once()
+
+    assert result.dispatched == ["acme/proj#1", "acme/proj#2"]
 
 
 # -- Acceptance: multi-turn continuation on the same fake session -----------

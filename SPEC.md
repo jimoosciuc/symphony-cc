@@ -324,6 +324,38 @@ agent:
 
 `max_turns` limits back-to-back continuation turns inside one worker lifetime.
 
+### 7.3.1 Runtime Lanes
+
+```yaml
+lanes:
+  - name: implementer
+    include_labels: ["status:ready-for-implementation"]
+    exclude_labels: ["do-not-claim", "leader-owned"]
+    max_concurrency: 2
+    prompt_prefix: "You are the implementer lane."
+    prompt_suffix: "Open a PR when implementation is complete."
+  - name: reviewer
+    include_labels: ["status:ready-for-review"]
+    exclude_labels: ["do-not-claim", "leader-owned"]
+    max_concurrency: 1
+    prompt_prefix: "You are the reviewer lane."
+```
+
+`lanes` is optional. A workflow with no lanes MUST behave like the single-lane
+runtime.
+
+When lanes are configured:
+
+- The orchestrator MUST dispatch an issue only to the first lane whose label
+  filters match.
+- A lane MUST NOT claim issues labeled `do-not-claim`.
+- A non-`leader` lane MUST NOT claim issues labeled `leader-owned`.
+- Lane-specific `max_concurrency` limits apply within the lane.
+- Lane prompt prefix/suffix text MUST be added through the existing provider
+  input boundary, not by exposing provider-specific event shapes.
+- Status snapshots and artifacts SHOULD include the lane name for active and
+  finished runs.
+
 ### 7.4 Workspace
 
 ```yaml

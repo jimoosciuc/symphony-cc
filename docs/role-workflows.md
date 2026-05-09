@@ -117,6 +117,35 @@ symphony run --workflow /tmp/symphony-roles/WORKFLOW.reviewer.md
 Use separate workspace/session/artifact roots for each role. This avoids
 artifact overlap and makes it clear which role produced a PR or comment.
 
+For smaller deployments, one daemon can also define runtime lanes in a single
+workflow file. Lanes keep the same GitHub-first label handoff model but let the
+orchestrator select a role profile per issue:
+
+```yaml
+lanes:
+  - name: implementer
+    include_labels: ["status:ready-for-implementation"]
+    exclude_labels: ["do-not-claim", "leader-owned"]
+    max_concurrency: 2
+    prompt_prefix: "You are the implementer. Make scoped code changes."
+    prompt_suffix: "When complete, open a PR linked to the issue."
+  - name: reviewer
+    include_labels: ["status:ready-for-review"]
+    exclude_labels: ["do-not-claim", "leader-owned"]
+    max_concurrency: 1
+    prompt_prefix: "You are the reviewer. Review the linked PR only."
+  - name: leader
+    include_labels: ["status:blocked"]
+    exclude_labels: ["do-not-claim"]
+    max_concurrency: 1
+    prompt_prefix: "You are the leader. Clarify, split, or unblock work."
+```
+
+Runtime lanes are optional. Existing single-role workflow files still work.
+Use lane-level prompts for role boundaries; use GitHub labels and comments for
+handoff. GitHub Projects remain optional metadata and must not be required for
+lane selection.
+
 ## Example Files
 
 The repository includes copyable workflow examples:
@@ -137,11 +166,11 @@ duplicate another role's work.
 
 This role model does not add:
 
-- a multi-profile daemon,
 - a database,
 - GitHub Projects as a requirement,
 - Linear support,
 - Codex support,
 - automatic merge authority for non-release roles.
 
-Those can be designed later if the simple multi-process model proves useful.
+Those can be designed later if the simple multi-process or runtime-lane model
+proves useful.

@@ -31,7 +31,7 @@ from typing import Any
 from symphony.artifact_retention import ArtifactRetentionExecutor
 from symphony.artifacts import ArtifactWriter, redact_text
 from symphony.cleanup import WorkspaceCleanupExecutor
-from symphony.config import WorkflowConfig
+from symphony.config import LaneConfig, WorkflowConfig
 from symphony.events import TERMINAL_TURN_EVENTS, AgentEvent
 from symphony.evidence import (
     OUTCOME_COMPLETED_NO_PR_DECLARED,
@@ -105,6 +105,7 @@ class WorkerState:
     error: str | None = None
     timeout_subtype: str | None = None
     usage: UsageTotals = field(default_factory=UsageTotals)
+    lane: LaneConfig | None = None
 
 
 @dataclass(slots=True)
@@ -733,6 +734,12 @@ class Orchestrator:
         for issue in candidates:
             if slots_open == 0:
                 break
+            lane = self._select_lane(issue)
+            if lane is None and self.config.lanes:
+                continue
+            if self.config.lanes:
+                if not self._lane_has_capacity(lane):
+                    continue
             if issue.identifier in self.active:
                 continue
             retry = self.retry_states.get(issue.identifier)
@@ -760,7 +767,7 @@ class Orchestrator:
                 continue
 
             try:
-                worker = await self._start_worker(issue, retry=retry)
+                worker = await self._start_worker(issue, retry=retry, lane=lane)
             except ProviderRetryableError as exc:
                 # Restore-startup failure under resume_same_session, or any
                 # other startup-time retryable provider error. Schedule a
@@ -782,6 +789,27 @@ class Orchestrator:
 
         if local_runs:
             await asyncio.gather(*local_runs)
+
+    def _select_lane(self, issue: Issue) -> LaneConfig | None:
+        if not self.config.lanes:
+            return None
+        labels = set(issue.labels)
+        for lane in self.config.lanes:
+            if _issue_matches_lane(issue, lane):
+                return lane
+        _LOG.debug("no lane matched %s labels=%s", issue.identifier, sorted(labels))
+        return None
+
+    def _lane_has_capacity(self, lane: LaneConfig | None) -> bool:
+        if lane is None:
+            return False
+        limit = lane.max_concurrency or self.config.agent.max_concurrency
+        active = sum(
+            1
+            for worker in self.active.values()
+            if worker.lane is not None and worker.lane.name == lane.name
+        )
+        return active < limit
 
     async def _run_remote_dispatch(
         self,
@@ -916,6 +944,7 @@ class Orchestrator:
         issue: Issue,
         *,
         retry: RetryState | None,
+        lane: LaneConfig | None = None,
     ) -> WorkerState:
         workspace = self.workspaces.prepare(issue)
 
@@ -943,6 +972,7 @@ class Orchestrator:
                 "permission_mode": self.config.claude.permission_mode,
                 "security_profile": self.config.security.profile,
                 "run_id": self.run_id,
+                "lane": _lane_summary(lane),
             },
         )
 
@@ -1024,6 +1054,7 @@ class Orchestrator:
             session=session,
             artifacts=artifacts,
             config=self.config,
+            lane=lane,
         )
 
     async def _run_worker(
@@ -1399,6 +1430,7 @@ class Orchestrator:
                 "session_id": worker.session.session_id,
                 "provider_session_id": worker.session.provider_session_id,
                 "attempt": worker.session.attempt,
+                "lane": worker.lane.name if worker.lane else None,
                 "security_profile": _worker_config(worker, self.config).security.profile,
                 "terminal_state": (
                     worker.terminal_state.value if worker.terminal_state else None
@@ -1425,8 +1457,42 @@ def _default_continuation_policy(worker: WorkerState) -> str | None:
     Tests provide their own policies for multi-turn behavior.
     """
     if worker.turn_count == 0:
-        return f"first prompt for {worker.issue.identifier}"
+        prompt = f"first prompt for {worker.issue.identifier}"
+        if worker.lane is not None:
+            parts = [
+                part
+                for part in (worker.lane.prompt_prefix, prompt, worker.lane.prompt_suffix)
+                if part
+            ]
+            return "\n\n".join(parts)
+        return prompt
     return None
+
+
+def _issue_matches_lane(issue: Issue, lane: LaneConfig) -> bool:
+    labels = set(issue.labels)
+    if "do-not-claim" in labels:
+        return False
+    if "leader-owned" in labels and lane.name != "leader":
+        return False
+    if lane.include_labels and not all(label in labels for label in lane.include_labels):
+        return False
+    if any(label in labels for label in lane.exclude_labels):
+        return False
+    return True
+
+
+def _lane_summary(lane: LaneConfig | None) -> dict[str, Any] | None:
+    if lane is None:
+        return None
+    return {
+        "name": lane.name,
+        "include_labels": list(lane.include_labels),
+        "exclude_labels": list(lane.exclude_labels),
+        "max_concurrency": lane.max_concurrency,
+        "prompt_prefix": bool(lane.prompt_prefix),
+        "prompt_suffix": bool(lane.prompt_suffix),
+    }
 
 
 def _terminal_reason(worker: WorkerState) -> str:
