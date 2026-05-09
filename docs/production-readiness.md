@@ -28,6 +28,7 @@ Default required validation:
 ```bash
 make ci
 make failure-drills
+make security-audit
 ```
 
 Individual live targets:

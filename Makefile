@@ -1,9 +1,9 @@
-.PHONY: help setup lint test ci all failure-drills live-github live-graphql live-claude live-remote live-remote-claude live-e2e live-concurrency-e2e live-integration live-validation
+.PHONY: help setup lint test ci all failure-drills security-audit live-github live-graphql live-claude live-remote live-remote-claude live-e2e live-concurrency-e2e live-integration live-validation
 
 PYTHON ?= python
 
 help:
-	@echo "Targets: setup, lint, test, ci, all, failure-drills, live-github, live-graphql, live-claude, live-remote, live-remote-claude, live-e2e, live-concurrency-e2e, live-integration, live-validation"
+	@echo "Targets: setup, lint, test, ci, all, failure-drills, security-audit, live-github, live-graphql, live-claude, live-remote, live-remote-claude, live-e2e, live-concurrency-e2e, live-integration, live-validation"
 
 setup:
 	$(PYTHON) -m pip install --upgrade pip
@@ -21,6 +21,9 @@ all: ci
 
 failure-drills:
 	PYTHONPATH=src pytest -q tests/test_recovery.py tests/test_github_tracker.py tests/test_evidence.py tests/test_routing.py tests/test_timeouts.py tests/test_remote_ssh.py tests/test_remote_runner.py tests/test_orchestrator_remote.py tests/test_cleanup_executor.py tests/test_workflow_reload.py
+
+security-audit:
+	PYTHONPATH=src pytest -q tests/test_security_profiles.py tests/test_orchestrator.py tests/test_dashboard.py tests/test_dashboard_server.py tests/test_remote_plan.py tests/test_remote_materialize.py tests/test_remote_ssh.py tests/test_remote_artifacts_ssh.py tests/test_orchestrator_remote.py tests/test_github_graphql_tool.py tests/test_artifact_retention.py
 
 live-github:
 	SYMPHONY_RUN_GITHUB_INTEGRATION=1 PYTHONPATH=src pytest tests/test_github_tracker_live.py -q
