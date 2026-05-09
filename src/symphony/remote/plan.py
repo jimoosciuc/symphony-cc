@@ -60,6 +60,7 @@ def build_remote_dispatch_plan(
     issue: Issue,
     attempt: int,
     config: WorkflowConfig,
+    prompt: str | None = None,
 ) -> RemoteDispatchPlan:
     """Build a pure remote dispatch plan for an issue attempt."""
     if attempt < 1:
@@ -118,6 +119,7 @@ def build_remote_dispatch_plan(
         artifact_path=remote_artifact_path,
         branch=expected_branch_name(config.github, issue),
         base_branch=config.github.base_branch,
+        prompt_ref=prompt,
     )
 
     return RemoteDispatchPlan(

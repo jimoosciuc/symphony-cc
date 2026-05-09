@@ -28,6 +28,7 @@ class RemoteIssueDispatcher(Protocol):
         *,
         attempt: int,
         config: WorkflowConfig,
+        prompt: str | None = None,
     ) -> RemoteDispatchRunResult:
         """Dispatch issue to remote worker and return outcome."""
         ...
@@ -45,8 +46,14 @@ class RunnerRemoteIssueDispatcher:
         *,
         attempt: int,
         config: WorkflowConfig,
+        prompt: str | None = None,
     ) -> RemoteDispatchRunResult:
-        plan = build_remote_dispatch_plan(issue, attempt=attempt, config=config)
+        plan = build_remote_dispatch_plan(
+            issue,
+            attempt=attempt,
+            config=config,
+            prompt=prompt,
+        )
         return self._runner.run(plan, config)
 
 

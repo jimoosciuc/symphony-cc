@@ -89,12 +89,14 @@ class FakeRemoteDispatcher:
         *,
         attempt: int,
         config: WorkflowConfig,
+        prompt: str | None = None,
     ) -> RemoteDispatchRunResult:
         self.calls.append(
             {
                 "issue": issue.identifier,
                 "attempt": attempt,
                 "remote_enabled": config.remote.enabled,
+                "prompt": prompt,
             }
         )
         if isinstance(self.result, Exception):
@@ -160,7 +162,12 @@ async def test_remote_enabled_uses_remote_dispatcher_not_provider(tmp_path: Path
     assert result.finished == [issue.identifier]
     assert result.retries_scheduled == []
     assert remote.calls == [
-        {"issue": issue.identifier, "attempt": 1, "remote_enabled": True}
+        {
+            "issue": issue.identifier,
+            "attempt": 1,
+            "remote_enabled": True,
+            "prompt": f"Work on {issue.identifier}.",
+        }
     ]
     assert provider.calls == []
     history = [entry for _, entry in tracker.states[issue.identifier].claim_history]

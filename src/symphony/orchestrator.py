@@ -67,6 +67,7 @@ from symphony.remote.runner import RemoteDispatchRunResult
 from symphony.retry import RetryState, next_backoff_ms
 from symphony.status import build_status_snapshot
 from symphony.usage import UsageTotals
+from symphony.workflow import render_prompt
 from symphony.workflow_reload import WorkflowReloader
 from symphony.workspace import WorkspaceManager
 
@@ -148,13 +149,13 @@ class Orchestrator:
         self.tracker = tracker
         self.provider = provider
         self.workspaces = workspace_manager
-        self.continuation_policy = continuation_policy or _default_continuation_policy
         self.run_id = run_id or f"run-{uuid.uuid4().hex[:8]}"
         self._clock = clock or _now_utc
         self._workflow_reloader = workflow_reloader or WorkflowReloader.from_config(
             config,
             clock=self._clock,
         )
+        self.continuation_policy = continuation_policy or self._default_continuation_policy
         self.remote_dispatcher = remote_dispatcher
 
         # Mutable state.
@@ -291,6 +292,36 @@ class Orchestrator:
             )
         if hasattr(self.tracker, "claim_label"):
             self.tracker.claim_label = self.config.github.claim_label
+
+    def _default_continuation_policy(self, worker: WorkerState) -> str | None:
+        """Render the workflow prompt once, then stop."""
+        if worker.turn_count != 0:
+            return None
+        prompt = self._render_first_prompt(worker)
+        if worker.lane is not None:
+            parts = [
+                part
+                for part in (worker.lane.prompt_prefix, prompt, worker.lane.prompt_suffix)
+                if part
+            ]
+            return "\n\n".join(parts)
+        return prompt
+
+    def _render_first_prompt(self, worker: WorkerState) -> str:
+        return self._render_prompt_for_issue(
+            worker.issue,
+            workspace_path=str(worker.workspace.path),
+        )
+
+    def _render_prompt_for_issue(self, issue: Issue, *, workspace_path: str) -> str:
+        workflow = self._workflow_reloader.snapshot.workflow if self._workflow_reloader else None
+        if workflow is None:
+            return f"Work on {issue.identifier}."
+        return render_prompt(
+            workflow,
+            issue=issue,
+            extra={"workspace_path": workspace_path},
+        )
 
     # -- Restart recovery (#31) ---------------------------------------------
 
@@ -849,6 +880,7 @@ class Orchestrator:
                 issue,
                 attempt=attempt,
                 config=self.config,
+                prompt=self._render_prompt_for_issue(issue, workspace_path=""),
             )
             errors = _redact_error_texts(remote_result.errors, self.config)
             if remote_result.failed:
@@ -1466,24 +1498,6 @@ class Orchestrator:
 
 
 # -- Helpers ------------------------------------------------------------------
-
-
-def _default_continuation_policy(worker: WorkerState) -> str | None:
-    """Default: send one prompt, then stop.
-
-    Tests provide their own policies for multi-turn behavior.
-    """
-    if worker.turn_count == 0:
-        prompt = f"first prompt for {worker.issue.identifier}"
-        if worker.lane is not None:
-            parts = [
-                part
-                for part in (worker.lane.prompt_prefix, prompt, worker.lane.prompt_suffix)
-                if part
-            ]
-            return "\n\n".join(parts)
-        return prompt
-    return None
 
 
 def _issue_matches_lane(issue: Issue, lane: LaneConfig) -> bool:
