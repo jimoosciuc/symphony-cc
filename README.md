@@ -91,11 +91,15 @@ symphony run --workflow WORKFLOW.example.md --dashboard
 The dashboard serves:
 - `GET /` → HTML dashboard with auto-refresh (every 5 seconds)
 - `GET /status.json` → JSON status snapshot
+- `GET /runs/<issue>` → HTML detail page for one issue/run
+- `GET /runs/<issue>.json` → JSON detail for one issue/run
 - `GET /health` → Health check endpoint
 
 The dashboard is read-only and shows daemon state, active workers, retry queue,
-recently finished runs, usage/cost totals, workflow revision, and remote host
-identity when present. Use `--dashboard-port PORT` to change the default port.
+recently finished runs, usage/cost totals, workflow revision, remote host
+identity when present, and per-issue detail links for active, retrying,
+finished, and recovered work. Use `--dashboard-port PORT` to change the
+default port.
 
 Runtime status is available as a read-only in-memory Python API:
 `orchestrator.status_snapshot()` or `symphony.status.build_status_snapshot(...)`.

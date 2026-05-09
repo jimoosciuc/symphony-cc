@@ -13,9 +13,10 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from symphony.artifacts import redact
-from symphony.dashboard import render_dashboard_html
+from symphony.dashboard import render_dashboard_html, render_run_detail_html, run_detail
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,8 @@ class DashboardServer:
     Serves:
     - GET / → HTML dashboard with auto-refresh
     - GET /status.json → JSON status snapshot
+    - GET /runs/<issue> → HTML detail for one issue/run
+    - GET /runs/<issue>.json → JSON detail for one issue/run
     - GET /health → 200 OK (for monitoring)
 
     The server runs in a background thread and polls the status snapshot
@@ -121,12 +124,18 @@ class DashboardServer:
 
             def do_GET(self) -> None:
                 """Handle GET requests."""
-                if self.path == "/":
+                parsed = urlparse(self.path)
+                path = parsed.path
+                if path == "/":
                     self._serve_html()
-                elif self.path == "/status.json":
+                elif path == "/status.json":
                     self._serve_json()
-                elif self.path == "/health":
+                elif path == "/health":
                     self._serve_health()
+                elif path.startswith("/runs/") and path.endswith(".json"):
+                    self._serve_run_json(path)
+                elif path.startswith("/runs/"):
+                    self._serve_run_html(path)
                 else:
                     self.send_error(404, "Not Found")
 
@@ -159,6 +168,51 @@ class DashboardServer:
                     self.wfile.write(json_data.encode("utf-8"))
                 except Exception:
                     logger.exception("Error serving JSON status")
+                    self.send_error(500, "Internal Server Error")
+
+            def _serve_run_html(self, path: str) -> None:
+                """Serve HTML detail for one issue/run."""
+                try:
+                    issue_identifier = unquote(path.removeprefix("/runs/"))
+                    current = snapshot()
+                    html = render_run_detail_html(current, issue_identifier)
+                    if html is None:
+                        self.send_error(404, "Run Not Found")
+                        return
+
+                    refresh_seconds = max(1, refresh_interval_ms // 1000)
+                    refresh_tag = f'<meta http-equiv="refresh" content="{refresh_seconds}">'
+                    html = html.replace("</head>", f"{refresh_tag}\n</head>")
+
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                    self.end_headers()
+                    self.wfile.write(html.encode("utf-8"))
+                except Exception:
+                    logger.exception("Error serving run detail HTML")
+                    self.send_error(500, "Internal Server Error")
+
+            def _serve_run_json(self, path: str) -> None:
+                """Serve JSON detail for one issue/run."""
+                try:
+                    issue_identifier = unquote(
+                        path.removeprefix("/runs/").removesuffix(".json")
+                    )
+                    detail = run_detail(snapshot(), issue_identifier)
+                    if detail is None:
+                        self.send_error(404, "Run Not Found")
+                        return
+
+                    json_data = json.dumps(detail, indent=2)
+
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                    self.end_headers()
+                    self.wfile.write(json_data.encode("utf-8"))
+                except Exception:
+                    logger.exception("Error serving run detail JSON")
                     self.send_error(500, "Internal Server Error")
 
             def _serve_health(self) -> None:

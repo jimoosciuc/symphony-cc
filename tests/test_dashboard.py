@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from symphony.dashboard import render_dashboard_html, write_dashboard_html
+from symphony.dashboard import (
+    render_dashboard_html,
+    render_run_detail_html,
+    run_detail,
+    write_dashboard_html,
+)
 
 
 def _snapshot() -> dict:
@@ -90,6 +95,8 @@ def test_dashboard_renders_core_operator_states() -> None:
     assert "completed_with_pr" in html
     assert "blocked_operator_required" in html
     assert "issue closed" in html
+    assert "/runs/acme%2Fproj%231" in html
+    assert "/runs/acme%2Fproj%233" in html
 
 
 def test_dashboard_escapes_snapshot_values() -> None:
@@ -112,3 +119,47 @@ def test_write_dashboard_html_creates_parent_directory(tmp_path: Path) -> None:
     assert written == target
     assert target.exists()
     assert "Symphony Runtime" in target.read_text(encoding="utf-8")
+
+
+def test_run_detail_collects_active_retry_finished_and_recovery_state() -> None:
+    snapshot = _snapshot()
+
+    active = run_detail(snapshot, "acme/proj#1")
+    retry = run_detail(snapshot, "acme/proj#2")
+    finished = run_detail(snapshot, "acme/proj#3")
+    recovered = run_detail(snapshot, "acme/proj#5")
+
+    assert active is not None
+    assert active["active_worker"]["provider_session_id"] == "provider-1"
+    assert retry is not None
+    assert retry["retry_state"]["last_error"] == "temporary failure"
+    assert finished is not None
+    assert finished["finished_run"]["task_outcome"] == "completed_with_pr"
+    assert recovered is not None
+    assert recovered["recovery_decisions"][0]["action"] == "released"
+    assert run_detail(snapshot, "acme/proj#999") is None
+
+
+def test_render_run_detail_html_shows_operator_debug_fields() -> None:
+    html = render_run_detail_html(_snapshot(), "acme/proj#1")
+
+    assert html is not None
+    assert "Run Summary" in html
+    assert "Runtime Signals" in html
+    assert "provider-1" in html
+    assert "/tmp/artifacts/acme_proj_1/1" in html
+    assert "permission_denials" in html
+    assert "Back to dashboard" in html
+
+
+def test_render_run_detail_html_escapes_payload_values() -> None:
+    snapshot = _snapshot()
+    snapshot["active_workers"][0]["last_event"]["payload"] = {
+        "message": "<script>alert(1)</script>"
+    }
+
+    html = render_run_detail_html(snapshot, "acme/proj#1")
+
+    assert html is not None
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
