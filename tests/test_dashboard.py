@@ -38,6 +38,18 @@ def _snapshot() -> dict:
                     "timestamp": "2026-05-08T00:00:01+00:00",
                     "payload": {"permission_denials": [{"tool": "Bash"}]},
                 },
+                "recent_events": [
+                    {
+                        "event": "message_delta",
+                        "timestamp": "2026-05-08T00:00:00+00:00",
+                        "payload": {"text": "Working on PR checks"},
+                    },
+                    {
+                        "event": "tool_started",
+                        "timestamp": "2026-05-08T00:00:01+00:00",
+                        "payload": {"tool_name": "Bash"},
+                    },
+                ],
             }
         ],
         "retry_queue": [
@@ -99,6 +111,8 @@ def test_dashboard_renders_core_operator_states() -> None:
     assert "acme/proj#1" in html
     assert "provider-1" in html
     assert "implementer" in html
+    assert "Working on PR checks" in html
+    assert "tool_started: Bash" in html
     assert "reviewer" in html
     assert "permission denials: 1" in html
     assert "temporary failure" in html
@@ -165,6 +179,8 @@ def test_render_run_detail_html_shows_operator_debug_fields() -> None:
     assert "provider-1" in html
     assert "/tmp/artifacts/acme_proj_1/1" in html
     assert "permission_denials" in html
+    assert "Recent Session Events" in html
+    assert "Working on PR checks" in html
     assert "Back to dashboard" in html
 
 

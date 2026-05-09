@@ -144,6 +144,22 @@ def test_status_snapshot_includes_active_worker_and_redacted_event_payload(
         attempt=1,
         payload={"token": "ghp_secret_token_value_1234567890", "text": "ok"},
     )
+    worker.recent_events = [
+        worker.last_event,
+        AgentEvent(
+            event="tool_started",
+            timestamp=datetime(2026, 5, 8, 0, 0, 1, tzinfo=timezone.utc),
+            session_id="sym-active",
+            provider="fake",
+            provider_session_id="provider-1",
+            issue_identifier=issue.identifier,
+            attempt=1,
+            payload={
+                "tool_name": "Bash",
+                "input": {"command": "echo ghp_123456789012345678901234"},
+            },
+        ),
+    ]
     orch.active[issue.identifier] = worker
 
     snapshot = orch.status_snapshot()
@@ -155,6 +171,9 @@ def test_status_snapshot_includes_active_worker_and_redacted_event_payload(
     assert active["security_profile"] == "restricted"
     assert active["last_event"]["payload"]["token"] == "<redacted>"
     assert active["last_event"]["payload"]["text"] == "ok"
+    assert len(active["recent_events"]) == 2
+    assert active["recent_events"][1]["event"] == "tool_started"
+    assert "<redacted>" in active["recent_events"][1]["payload"]["input"]["command"]
 
 
 def test_status_snapshot_includes_retry_queue(tmp_path: Path) -> None:

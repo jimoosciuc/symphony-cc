@@ -103,6 +103,7 @@ class WorkerState:
     turn_count: int = 0
     terminal_state: Terminal | None = None
     last_event: AgentEvent | None = None
+    recent_events: list[AgentEvent] = field(default_factory=list)
     error: str | None = None
     timeout_subtype: str | None = None
     usage: UsageTotals = field(default_factory=UsageTotals)
@@ -1455,6 +1456,8 @@ class Orchestrator:
 
     def _record_event(self, worker: WorkerState, event: AgentEvent) -> None:
         worker.last_event = event
+        worker.recent_events.append(event)
+        del worker.recent_events[:-20]
         worker.session.last_event_at = event.timestamp
         worker.artifacts.append_event(event)
         if worker.usage.apply_event(event):
