@@ -44,6 +44,7 @@ _DEFAULT_MODEL = "claude-opus-4-7"
 _REQUIRE_PR_ENV = "SYMPHONY_REMOTE_CLAUDE_REQUIRE_PR"
 _PR_DETECT_ATTEMPTS_ENV = "SYMPHONY_REMOTE_CLAUDE_PR_DETECT_ATTEMPTS"
 _PR_DETECT_INTERVAL_ENV = "SYMPHONY_REMOTE_CLAUDE_PR_DETECT_INTERVAL_SECONDS"
+_WORKER_ATTEMPTS_ENV = "SYMPHONY_REMOTE_CLAUDE_WORKER_ATTEMPTS"
 
 
 def _gate() -> dict[str, str]:
@@ -254,6 +255,16 @@ def test_remote_pr_required_assertion_fails_without_linked_pr() -> None:
         )
 
 
+def test_remote_worker_retry_classifier_only_retries_before_session() -> None:
+    assert _should_retry_worker_events(["worker_started", "worker_failed"]) is True
+    assert (
+        _should_retry_worker_events(
+            ["worker_started", "workspace_ready", "session_started", "worker_failed"]
+        )
+        is False
+    )
+
+
 def test_live_remote_claude_worker_over_ssh(tmp_path: Path) -> None:
     remote_env = _gate()
     config = _config(tmp_path, remote_env)
@@ -308,23 +319,14 @@ def test_live_remote_claude_worker_over_ssh(tmp_path: Path) -> None:
                 config=config,
             )
 
-        worker = _run(
-            [
-                "ssh",
-                host,
-                "symphony-worker",
-                "--snapshot-path",
-                plan.remote_snapshot_path,
-                "--dispatch-path",
-                plan.remote_dispatch_path,
-            ],
-            timeout=config.remote.worker_timeout_ms / 1000.0 + 30.0,
+        worker, events, event_names, worker_invocations = _run_worker_with_setup_retry(
+            host,
+            plan,
+            config=config,
         )
         assert config.remote.git_token not in worker.stdout
         assert config.remote.git_token not in worker.stderr
 
-        events = [parse_worker_event(line) for line in worker.stdout.splitlines() if line]
-        event_names = [event.event for event in events]
         assert "worker_started" in event_names
         assert "workspace_ready" in event_names
         assert "session_started" in event_names
@@ -353,6 +355,7 @@ def test_live_remote_claude_worker_over_ssh(tmp_path: Path) -> None:
             "events": event_names,
             "terminal": terminal,
             "provider_session_id": _provider_session_id(events),
+            "worker_invocations": worker_invocations,
             "require_completed_with_pr": _require_completed_with_pr(),
             "pr_detect_attempts": pr_summary["attempts"],
             "pr_detect_wait_seconds": pr_summary["wait_seconds"],
@@ -382,6 +385,65 @@ def test_live_remote_claude_worker_over_ssh(tmp_path: Path) -> None:
             ],
             timeout=30.0,
         )
+
+
+def _run_worker_with_setup_retry(host: str, plan, *, config):
+    max_attempts = _env_int(_WORKER_ATTEMPTS_ENV, 2)
+    worker = None
+    events = []
+    event_names: list[str] = []
+    for attempt in range(1, max_attempts + 1):
+        worker = _run(
+            [
+                "ssh",
+                host,
+                "symphony-worker",
+                "--snapshot-path",
+                plan.remote_snapshot_path,
+                "--dispatch-path",
+                plan.remote_dispatch_path,
+            ],
+            timeout=config.remote.worker_timeout_ms / 1000.0 + 30.0,
+        )
+        events = [parse_worker_event(line) for line in worker.stdout.splitlines() if line]
+        event_names = [event.event for event in events]
+        if not _should_retry_worker_events(event_names) or attempt == max_attempts:
+            return worker, events, event_names, attempt
+        _clean_remote_worker_paths(host, plan)
+    raise AssertionError("unreachable remote worker retry loop")
+
+
+def _should_retry_worker_events(event_names: list[str]) -> bool:
+    return (
+        "worker_failed" in event_names
+        and "workspace_ready" not in event_names
+        and "session_started" not in event_names
+    )
+
+
+def _clean_remote_worker_paths(host: str, plan) -> None:
+    _run(
+        [
+            "ssh",
+            host,
+            "rm",
+            "-rf",
+            plan.remote_workspace_path,
+            plan.remote_artifact_path,
+        ],
+        timeout=30.0,
+    )
+    _run(
+        [
+            "ssh",
+            host,
+            "mkdir",
+            "-p",
+            plan.remote_artifact_path,
+            plan.dispatch_request.workspace_path,
+        ],
+        timeout=30.0,
+    )
 
 
 def _lookup_pr_summary_with_optional_retry(
