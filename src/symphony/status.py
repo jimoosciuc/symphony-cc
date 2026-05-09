@@ -86,6 +86,7 @@ def _worker_status(worker: Any) -> dict[str, Any]:
         ),
         "retry_state": "active",
         "last_event": _event_summary(event),
+        "recent_events": [_event_summary(item) for item in worker.recent_events],
         "error": worker.error,
         "timeout_subtype": worker.timeout_subtype,
         "usage": worker.usage.to_json() if worker.usage.has_usage else None,

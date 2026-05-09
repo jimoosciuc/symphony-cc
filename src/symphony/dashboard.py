@@ -308,6 +308,7 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
             f"<td>{_code(worker.get('artifact_dir'))}</td>"
             f"<td>{_usage_cell(worker.get('usage'))}</td>"
             f"<td>{_event_cell(last)}{warning}</td>"
+            f"<td>{_session_signal_cell(worker)}</td>"
             "</tr>"
         )
     return _table(
@@ -321,6 +322,7 @@ def _active_workers(workers: list[dict[str, Any]]) -> str:
             "Artifacts",
             "Usage",
             "Last Event",
+            "Session Signal",
         ),
         rows,
     )
@@ -440,6 +442,49 @@ def _event_cell(event: dict[str, Any]) -> str:
         f"<div>{escape(_text(event.get('event')))}</div>"
         f"<div class=\"muted\">{escape(_text(event.get('timestamp')))}</div>"
     )
+
+
+def _session_signal_cell(worker: dict[str, Any]) -> str:
+    events = worker.get("recent_events")
+    if not isinstance(events, list) or not events:
+        return '<span class="muted">None</span>'
+    snippets: list[str] = []
+    for event in events[-4:]:
+        if not isinstance(event, dict):
+            continue
+        rendered = _session_event_summary(event)
+        if rendered:
+            snippets.append(f"<div>{escape(rendered)}</div>")
+    return "".join(snippets) if snippets else '<span class="muted">None</span>'
+
+
+def _session_event_summary(event: dict[str, Any]) -> str:
+    name = _text(event.get("event"))
+    payload = event.get("payload") or {}
+    if isinstance(payload, dict):
+        if name == "message_delta":
+            text = payload.get("text")
+            if text:
+                return f"message: {_truncate(_text(text), 140)}"
+        tool_name = payload.get("tool_name")
+        if name == "tool_started" and tool_name:
+            return f"tool_started: {tool_name}"
+        if name == "tool_completed":
+            result = payload.get("content") or payload.get("tool_use_result")
+            return f"tool_completed: {_truncate(_text(result), 140)}"
+        if name == "heartbeat":
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            description = data.get("description") if isinstance(data, dict) else None
+            task_id = data.get("task_id") if isinstance(data, dict) else None
+            if description or task_id:
+                return f"heartbeat: {_text(description)} {_text(task_id)}".strip()
+    return name
+
+
+def _truncate(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
 
 
 def _usage_cell(usage: Any) -> str:
@@ -613,12 +658,32 @@ def _detail_events(detail: dict[str, Any]) -> str:
             "<h2>Last Event Payload</h2>"
             f"<pre>{escape(json.dumps(payload, indent=2, sort_keys=True))}</pre>"
         )
+    recent_events = active.get("recent_events")
+    recent_html = ""
+    if isinstance(recent_events, list) and recent_events:
+        rows = []
+        for item in recent_events[-20:]:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                "<tr>"
+                f"<td>{escape(_text(item.get('timestamp')))}</td>"
+                f"<td>{escape(_text(item.get('event')))}</td>"
+                f"<td>{escape(_session_event_summary(item))}</td>"
+                "</tr>"
+            )
+        recent_html = _table(
+            "Recent Session Events",
+            ("Timestamp", "Event", "Summary"),
+            rows,
+        )
     return f"""
 <section>
   <h2>Runtime Signals</h2>
   <table><tbody>{"".join(html_rows)}</tbody></table>
   {payload_html}
 </section>
+{recent_html}
 """
 
 
