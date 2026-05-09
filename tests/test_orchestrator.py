@@ -176,6 +176,14 @@ def _role_graph() -> RoleGraphConfig:
                 name="reviewing",
                 labels=("symphony-reviewing",),
             ),
+            "changes_requested": RoleStateConfig(
+                name="changes_requested",
+                labels=("symphony-changes-requested",),
+            ),
+            "approved": RoleStateConfig(
+                name="approved",
+                labels=("symphony-approved",),
+            ),
             "needs_design": RoleStateConfig(
                 name="needs_design",
                 labels=("symphony-needs-design",),
@@ -198,6 +206,34 @@ def _role_graph() -> RoleGraphConfig:
                 from_states=("implementing",),
                 to_state="ready_review",
                 requires=("pr_link",),
+            ),
+            "design_needed": RoleTransitionConfig(
+                name="design_needed",
+                role="implementer",
+                from_states=("implementing",),
+                to_state="needs_design",
+                requires=("issue_comment",),
+            ),
+            "approved": RoleTransitionConfig(
+                name="approved",
+                role="reviewer",
+                from_states=("reviewing",),
+                to_state="approved",
+                requires=("pr_approval",),
+            ),
+            "changes_requested": RoleTransitionConfig(
+                name="changes_requested",
+                role="reviewer",
+                from_states=("reviewing",),
+                to_state="changes_requested",
+                requires=("review_comment",),
+            ),
+            "decision_to_impl": RoleTransitionConfig(
+                name="decision_to_impl",
+                role="leader",
+                from_states=("leader_reviewing",),
+                to_state="ready_impl",
+                requires=("decision_comment",),
             ),
         },
     )
@@ -320,9 +356,80 @@ async def test_role_graph_exposes_role_context_to_prompt(tmp_path: Path) -> None
 
     await orch.run_once()
 
-    assert provider.messages[issue.identifier] == (
-        "role=implementer state=implementing actor=agent issue=acme/proj#1"
+    message = provider.messages[issue.identifier]
+    assert "Symphony role contract:" in message
+    assert "- Role: implementer" in message
+    assert "- Current state: implementing" in message
+    assert "pr_delivered: implementing -> ready_review" in message
+    assert "PR delivery is a handoff, not issue completion; do not mark done." in message
+    assert "User workflow prompt:" in message
+    assert "role=implementer state=implementing actor=agent issue=acme/proj#1" in message
+
+
+async def test_role_contract_for_agent_reviewer_lists_review_only_outcomes(
+    tmp_path: Path,
+) -> None:
+    issue = _issue(labels=("symphony-ready-review",))
+    graph = _role_graph()
+    graph.roles["reviewer"] = replace(graph.roles["reviewer"], actor="agent")
+    cfg = replace(_config(tmp_path), role_graph=graph)
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("placeholder", encoding="utf-8")
+    workflow = WorkflowFile(
+        path=workflow_path,
+        config=cfg,
+        prompt_template="review {{ issue.identifier }}",
     )
+    tracker = FakeGitHubTracker(issues=[issue], ready_label="")
+    provider = RecordingProvider()
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=provider,
+        workspace_manager=WorkspaceManager(cfg.workspace),
+        workflow_reloader=WorkflowReloader.from_workflow(workflow),
+    )
+
+    await orch.run_once()
+
+    message = provider.messages[issue.identifier]
+    assert "- Role: reviewer" in message
+    assert "- Current state: reviewing" in message
+    assert "approved: reviewing -> approved" in message
+    assert "changes_requested: reviewing -> changes_requested" in message
+    assert "pr_delivered" not in message
+    assert "implementation" not in message.lower()
+
+
+async def test_role_contract_for_leader_lists_gate_audit_rules(tmp_path: Path) -> None:
+    issue = _issue(labels=("symphony-needs-design",))
+    cfg = replace(_config(tmp_path), role_graph=_role_graph())
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("placeholder", encoding="utf-8")
+    workflow = WorkflowFile(
+        path=workflow_path,
+        config=cfg,
+        prompt_template="decide {{ issue.identifier }}",
+    )
+    tracker = FakeGitHubTracker(issues=[issue], ready_label="")
+    provider = RecordingProvider()
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=provider,
+        workspace_manager=WorkspaceManager(cfg.workspace),
+        workflow_reloader=WorkflowReloader.from_workflow(workflow),
+    )
+
+    await orch.run_once()
+
+    message = provider.messages[issue.identifier]
+    assert "- Role: leader" in message
+    assert "- Actor: hybrid" in message
+    assert "- Current state: leader_reviewing" in message
+    assert "decision_to_impl: leader_reviewing -> ready_impl" in message
+    assert "requires: decision_comment" in message
+    assert "Gate decisions require a GitHub-visible audit comment before handoff." in message
 
 
 async def test_role_graph_skips_human_state_and_exposes_waiting_status(

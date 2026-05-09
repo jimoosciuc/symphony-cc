@@ -314,6 +314,15 @@ class Orchestrator:
         if worker.turn_count != 0:
             return None
         prompt = self._render_first_prompt(worker)
+        role_contract = _role_prompt_contract(worker, self.config)
+        if role_contract:
+            prompt = "\n\n".join(
+                [
+                    role_contract,
+                    "User workflow prompt:",
+                    prompt,
+                ]
+            )
         if worker.lane is not None:
             parts = [
                 part
@@ -1984,6 +1993,83 @@ def _issue_after_transition(issue: Issue, plan: TransitionPlan) -> Issue:
         if label not in labels:
             labels.append(label)
     return replace(issue, labels=tuple(labels))
+
+
+def _role_prompt_contract(worker: WorkerState, config: WorkflowConfig) -> str | None:
+    graph = config.role_graph
+    if graph is None or worker.role_name is None or worker.role_state is None:
+        return None
+    role = graph.roles.get(worker.role_name)
+    state = graph.states.get(worker.role_state)
+    if role is None or state is None:
+        return None
+
+    allowed = [
+        transition
+        for transition in graph.transitions.values()
+        if transition.role == role.name and state.name in transition.from_states
+    ]
+    lines = [
+        "Symphony role contract:",
+        f"- Role: {role.name}",
+        f"- Actor: {role.actor}",
+        f"- Current state: {state.name}",
+    ]
+    if state.gate_owner:
+        lines.append(f"- Gate owner: {state.gate_owner}")
+    lines.append("- Allowed schema outcomes:")
+    if allowed:
+        for transition in allowed:
+            destination = graph.states[transition.to_state]
+            requirement = ", ".join(transition.requires) if transition.requires else "none"
+            handoff = _handoff_text(graph, destination)
+            terminal = " terminal" if destination.terminal else ""
+            lines.append(
+                f"  - {transition.name}: {state.name} -> {destination.name}{terminal}; "
+                f"requires: {requirement}; next: {handoff}"
+            )
+            if transition.name == "pr_delivered" and not destination.terminal:
+                lines.append(
+                    "    PR delivery is a handoff, not issue completion; do not mark done."
+                )
+    else:
+        lines.append("  - none from this state; report why no schema transition is possible.")
+    forbidden = _forbidden_transition_names(graph, role.name, state.name)
+    if forbidden:
+        lines.append(f"- Forbidden from this state: {', '.join(forbidden)}")
+    lines.append("- Do not claim, apply, or describe transitions outside the allowed list.")
+    if role.actor in {"hybrid", "human"} or state.gate_owner:
+        lines.append("- Gate decisions require a GitHub-visible audit comment before handoff.")
+    lines.append(
+        "- If required evidence is missing, stop with a clear Symphony-No-PR reason or "
+        "produce the required GitHub evidence."
+    )
+    return "\n".join(lines)
+
+
+def _forbidden_transition_names(
+    graph: RoleGraphConfig,
+    role_name: str,
+    state_name: str,
+) -> list[str]:
+    return sorted(
+        transition.name
+        for transition in graph.transitions.values()
+        if transition.role == role_name and state_name not in transition.from_states
+    )
+
+
+def _handoff_text(graph: RoleGraphConfig, destination: Any) -> str:
+    if destination.terminal:
+        return "terminal"
+    if destination.gate_owner:
+        owner = graph.roles.get(destination.gate_owner)
+        actor = owner.actor if owner else "unknown"
+        return f"{destination.gate_owner}/{actor}"
+    for role in graph.roles.values():
+        if destination.name in role.can_claim:
+            return f"{role.name}/{role.actor}"
+    return "unclaimed"
 
 
 def _role_transition_for_outcome(
