@@ -145,6 +145,7 @@ def test_lanes_e2e_harness_contract(
 ) -> None:
     monkeypatch.delenv("SYMPHONY_CLAUDE_TEST_MODEL", raising=False)
     monkeypatch.delenv(_REQUIRE_PR_ENV, raising=False)
+    monkeypatch.delenv(_PERMISSION_MODE_ENV, raising=False)
     monkeypatch.setenv(_ISSUES_ENV, "301,302")
 
     config = _config(tmp_path)
