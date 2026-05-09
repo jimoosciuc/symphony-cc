@@ -171,6 +171,7 @@ python -c "from symphony.workflow import load_workflow; print(load_workflow('/et
 Then run the live targets required by the deployment topology:
 
 ```bash
+make failure-drills
 make live-github
 make live-claude
 make live-e2e
