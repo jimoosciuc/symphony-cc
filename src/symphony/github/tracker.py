@@ -12,7 +12,8 @@ Boundary methods correspond to ``SPEC.md`` §9.1:
 - ``fetch_candidate_issues`` — issues eligible to dispatch.
 - ``fetch_issues_by_numbers`` — refresh known issues for reconciliation.
 - ``claim_issue`` — atomic-enough claim with status report.
-- ``release_issue`` — drop the claim after success/failure.
+- ``release_issue`` — drop the claim after retryable/unknown outcomes.
+- ``mark_issue_done`` — terminal clean completion; remove it from the ready set.
 - ``mark_issue_blocked`` — non-retryable failure surface.
 - ``find_linked_pull_requests`` — for reconciliation when a linked PR merges.
 - ``create_or_update_progress_comment`` / ``create_or_update_pr_link_comment`` —
@@ -151,6 +152,8 @@ class TrackerProtocol(Protocol):
     def claim_issue(self, issue: Issue, run_metadata: dict[str, Any]) -> ClaimResult: ...
 
     def release_issue(self, issue: Issue, reason: str) -> ReleaseResult: ...
+
+    def mark_issue_done(self, issue: Issue, reason: str) -> ReleaseResult: ...
 
     def mark_issue_blocked(self, issue: Issue, reason: str) -> ReleaseResult: ...
 
@@ -303,6 +306,19 @@ class GitHubTracker:
             raise self._wrap(exc) from exc
         return ReleaseResult(ok=True, reason=reason)
 
+    def mark_issue_done(self, issue: Issue, reason: str) -> ReleaseResult:
+        try:
+            self._client.post(
+                f"/repos/{self._owner}/{self._repo}/issues/{issue.number}/labels",
+                json_body={"labels": [self.github.done_label]},
+            )
+        except GitHubError as exc:
+            raise self._wrap(exc) from exc
+
+        self._delete_label_best_effort(issue, self.github.claim_label, "mark_issue_done")
+        self._delete_label_best_effort(issue, self.github.ready_label, "mark_issue_done")
+        return ReleaseResult(ok=True, reason=reason)
+
     def mark_issue_blocked(self, issue: Issue, reason: str) -> ReleaseResult:
         try:
             self._client.post(
@@ -311,22 +327,30 @@ class GitHubTracker:
             )
         except GitHubError as exc:
             raise self._wrap(exc) from exc
-        # Best-effort: also drop the claim label so reconciliation doesn't
-        # treat the blocked issue as still owned by this run.
+        # Best-effort: also drop the claim and ready labels so reconciliation
+        # doesn't treat the blocked issue as still owned or claimable.
+        self._delete_label_best_effort(issue, self.github.claim_label, "mark_issue_blocked")
+        self._delete_label_best_effort(issue, self.github.ready_label, "mark_issue_blocked")
+        return ReleaseResult(ok=True, reason=reason)
+
+    def _delete_label_best_effort(self, issue: Issue, label: str, operation: str) -> None:
+        if not label:
+            return
         try:
             self._client.delete(
                 f"/repos/{self._owner}/{self._repo}/issues/{issue.number}"
-                f"/labels/{self.github.claim_label}"
+                f"/labels/{label}"
             )
         except GitHubNotFound:
             pass
         except GitHubError as exc:
             _LOG.warning(
-                "mark_issue_blocked: claim label removal failed for %s: %s",
+                "%s: label removal failed for %s label=%s: %s",
+                operation,
                 issue.identifier,
+                label,
                 exc,
             )
-        return ReleaseResult(ok=True, reason=reason)
 
     # -- Linked PRs / comments -------------------------------------------
 
@@ -476,10 +500,14 @@ class FakeGitHubTracker:
         *,
         ready_label: str = "symphony-ready",
         claim_label: str = "symphony-running",
+        blocked_label: str = "symphony-blocked",
+        done_label: str = "symphony-done",
     ) -> None:
         self._lock = threading.Lock()
         self.ready_label = ready_label
         self.claim_label = claim_label
+        self.blocked_label = blocked_label
+        self.done_label = done_label
         self.states: dict[str, _IssueState] = {
             i.identifier: _IssueState(issue=i) for i in (issues or [])
         }
@@ -562,6 +590,23 @@ class FakeGitHubTracker:
             st.issue = replace(st.issue, labels=tuple(existing))
             return ReleaseResult(ok=True)
 
+    def mark_issue_done(self, issue: Issue, reason: str) -> ReleaseResult:
+        with self._lock:
+            st = self.states.get(issue.identifier)
+            if st is None:
+                return ReleaseResult(ok=False, reason="unknown issue")
+            st.claimed_by = None
+            st.claim_history.append((_now_iso(), f"done:{reason}"))
+            existing = [
+                lbl
+                for lbl in st.issue.labels
+                if lbl not in {self.claim_label, self.ready_label}
+            ]
+            if self.done_label not in existing:
+                existing.append(self.done_label)
+            st.issue = replace(st.issue, labels=tuple(existing))
+            return ReleaseResult(ok=True)
+
     def mark_issue_blocked(self, issue: Issue, reason: str) -> ReleaseResult:
         with self._lock:
             st = self.states.get(issue.identifier)
@@ -573,6 +618,14 @@ class FakeGitHubTracker:
             # treats it as owned by this run.
             st.claimed_by = None
             st.claim_history.append((_now_iso(), f"blocked:{reason}"))
+            existing = [
+                lbl
+                for lbl in st.issue.labels
+                if lbl not in {self.claim_label, self.ready_label}
+            ]
+            if self.blocked_label not in existing:
+                existing.append(self.blocked_label)
+            st.issue = replace(st.issue, labels=tuple(existing))
             return ReleaseResult(ok=True)
 
     def find_linked_pull_requests(self, issue: Issue) -> list[PullRequest]:

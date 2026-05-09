@@ -340,7 +340,7 @@ tracker:
   repo: {repo}
   token: ${token_env}
   include_labels: ["symphony-ready"]
-  exclude_labels: ["symphony-running", "symphony-blocked"]
+  exclude_labels: ["symphony-running", "symphony-blocked", "symphony-done"]
 
 agent:
   provider: claude_code
