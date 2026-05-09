@@ -5,6 +5,9 @@ Passing default CI is necessary, but it is not enough to call Symphony
 production ready because the most important failure modes involve real GitHub,
 Claude Code, SSH, and long-running daemon behavior.
 
+Use `docs/production-operations-runbook.md` for host setup, supervisor
+configuration, stop/restart/recovery procedures, and pilot go/no-go operations.
+
 ## Readiness Levels
 
 | Level | Meaning | Required evidence |

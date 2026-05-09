@@ -49,7 +49,7 @@ Default CI is the required PR gate and is safe to run without external
 credentials. It does not prove production readiness by itself because the
 highest-risk paths require real GitHub, Claude Code, SSH, and long-running
 operator behavior. Use `docs/production-readiness.md` for the full validation
-matrix and go/no-go checklist.
+matrix and `docs/production-operations-runbook.md` for service operation.
 
 ## Development
 
