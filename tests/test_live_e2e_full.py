@@ -25,6 +25,7 @@ Requirements from issue #165:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -54,6 +55,8 @@ _GATE_ENV = "SYMPHONY_RUN_FULL_E2E"
 _DEFAULT_MODEL = "claude-opus-4-7"
 _PERMISSION_MODE_ENV = "SYMPHONY_E2E_PERMISSION_MODE"
 _REQUIRE_PR_ENV = "SYMPHONY_E2E_REQUIRE_PR"
+_PR_DETECT_ATTEMPTS_ENV = "SYMPHONY_E2E_PR_DETECT_ATTEMPTS"
+_PR_DETECT_INTERVAL_ENV = "SYMPHONY_E2E_PR_DETECT_INTERVAL_SECONDS"
 _REDACT_KEYS = ("token", "api_key", "secret", "password", "authorization")
 
 
@@ -113,6 +116,58 @@ def _build_claude_config(tmp_path: Path) -> ClaudeConfig:
 def _require_completed_with_pr() -> bool:
     """Return whether production-readiness mode requires GitHub PR evidence."""
     return os.environ.get(_REQUIRE_PR_ENV) == "1"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        pytest.fail(f"{name}={raw!r} is not a valid integer")
+    if value < 1:
+        pytest.fail(f"{name} must be >= 1")
+    return value
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        pytest.fail(f"{name}={raw!r} is not a valid number")
+    if value < 0:
+        pytest.fail(f"{name} must be >= 0")
+    return value
+
+
+async def _detect_with_optional_pr_retry(
+    detector: EvidenceDetector,
+    detect_kwargs: dict[str, Any],
+    *,
+    require_completed_with_pr: bool,
+    sleep: Any = asyncio.sleep,
+) -> tuple[DetectorResult, dict[str, Any]]:
+    """Run evidence detection, retrying briefly for GitHub PR indexing."""
+
+    attempts = _env_int(_PR_DETECT_ATTEMPTS_ENV, 12) if require_completed_with_pr else 1
+    interval_seconds = (
+        _env_float(_PR_DETECT_INTERVAL_ENV, 5.0) if require_completed_with_pr else 0.0
+    )
+    result: DetectorResult | None = None
+    for attempt in range(1, attempts + 1):
+        result = detector.detect(**detect_kwargs)
+        if result.task_outcome == "completed_with_pr" or attempt == attempts:
+            return result, {
+                "detector_attempts": attempt,
+                "detector_wait_seconds": interval_seconds * (attempt - 1),
+                "detector_pr_retry_enabled": require_completed_with_pr,
+            }
+        await sleep(interval_seconds)
+    raise AssertionError("unreachable detector retry loop")
 
 
 def _build_workspace_config(tmp_path: Path) -> WorkspaceConfig:
@@ -214,6 +269,8 @@ def test_harness_helpers_match_runtime_contracts(
     """
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_redacted")
     monkeypatch.delenv("SYMPHONY_CLAUDE_TEST_MODEL", raising=False)
+    monkeypatch.delenv(_PERMISSION_MODE_ENV, raising=False)
+    monkeypatch.delenv(_REQUIRE_PR_ENV, raising=False)
     tracker_cfg, github_cfg = _build_tracker_config()
     claude_cfg = _build_claude_config(tmp_path)
     workspace_cfg = _build_workspace_config(tmp_path)
@@ -423,21 +480,26 @@ async def test_live_e2e_full_github_to_pr(
             redact_keys=_REDACT_KEYS,
         )
         detector = EvidenceDetector(github_cfg, client=tracker.client)
-        detector_result = detector.detect(
-            issue=issue,
-            terminal_state=_terminal_state_for_event(terminal_event),
-            retryable=terminal_event != "turn_completed",
-            blocked=False,
-            permission_denials_count=permission_denials_count,
-            last_event=last_event,
-            recent_assistant_text=_recent_assistant_text(events),
-            workspace_path=workspace.path,
+        detector_result, detector_retry = await _detect_with_optional_pr_retry(
+            detector,
+            {
+                "issue": issue,
+                "terminal_state": _terminal_state_for_event(terminal_event),
+                "retryable": terminal_event != "turn_completed",
+                "blocked": False,
+                "permission_denials_count": permission_denials_count,
+                "last_event": last_event,
+                "recent_assistant_text": _recent_assistant_text(events),
+                "workspace_path": workspace.path,
+            },
+            require_completed_with_pr=_require_completed_with_pr(),
         )
         summary = _summarize_detector_result(
             detector_result,
             permission_denials_count=permission_denials_count,
         )
         evidence.update(summary)
+        evidence.update(detector_retry)
 
         # Write terminal.json
         terminal_path = _write_terminal_json(

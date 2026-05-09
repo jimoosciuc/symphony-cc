@@ -167,6 +167,9 @@ session → branch/commit/PR → evidence detector → terminal artifacts. This 
   trusted test issue so Claude can push a branch and open a PR.
 - Set `SYMPHONY_E2E_REQUIRE_PR=1` when the run must fail unless the detector
   observes `completed_with_pr`.
+- In require-PR mode, the harness retries PR evidence detection for GitHub
+  indexing delay. Tune with `SYMPHONY_E2E_PR_DETECT_ATTEMPTS` and
+  `SYMPHONY_E2E_PR_DETECT_INTERVAL_SECONDS`.
 - Records evidence to `evidence/e2e_evidence_issue_<N>.json` including:
   - `task_outcome` (completed_with_pr, completed_no_pr_declared, etc.)
   - `outcome_decided_by` (detector, timeout, error)
