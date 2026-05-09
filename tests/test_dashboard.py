@@ -62,7 +62,17 @@ def _snapshot() -> dict:
             {
                 "issue_identifier": "acme/proj#4",
                 "terminal_state": "failed",
-                "task_outcome": "blocked_operator_required",
+                "task_outcome": "incomplete_permission_denied",
+                "outcome_decided_by": "detector",
+                "permission_denials_count": 1,
+                "task_evidence": [
+                    {
+                        "type": "permission_denied",
+                        "denials_count": 1,
+                        "tool_names": ["AskUserQuestion"],
+                    }
+                ],
+                "no_pr_reason": "needs maintainer decision",
                 "provider_session_id": "provider-4",
                 "security_profile": "restricted",
                 "artifact_dir": "/tmp/artifacts/acme_proj_4/1",
@@ -93,7 +103,10 @@ def test_dashboard_renders_core_operator_states() -> None:
     assert "permission denials: 1" in html
     assert "temporary failure" in html
     assert "completed_with_pr" in html
-    assert "blocked_operator_required" in html
+    assert "incomplete_permission_denied" in html
+    assert "permission denials: 1" in html
+    assert "AskUserQuestion" in html
+    assert "needs maintainer decision" in html
     assert "issue closed" in html
     assert "/runs/acme%2Fproj%231" in html
     assert "/runs/acme%2Fproj%233" in html
@@ -135,6 +148,9 @@ def test_run_detail_collects_active_retry_finished_and_recovery_state() -> None:
     assert retry["retry_state"]["last_error"] == "temporary failure"
     assert finished is not None
     assert finished["finished_run"]["task_outcome"] == "completed_with_pr"
+    blocked = run_detail(snapshot, "acme/proj#4")
+    assert blocked is not None
+    assert blocked["finished_run"]["permission_denials_count"] == 1
     assert recovered is not None
     assert recovered["recovery_decisions"][0]["action"] == "released"
     assert run_detail(snapshot, "acme/proj#999") is None
@@ -150,6 +166,15 @@ def test_render_run_detail_html_shows_operator_debug_fields() -> None:
     assert "/tmp/artifacts/acme_proj_1/1" in html
     assert "permission_denials" in html
     assert "Back to dashboard" in html
+
+
+def test_render_run_detail_html_shows_finished_evidence() -> None:
+    html = render_run_detail_html(_snapshot(), "acme/proj#4")
+
+    assert html is not None
+    assert "incomplete_permission_denied" in html
+    assert "AskUserQuestion" in html
+    assert "permission_denials_count" in html
 
 
 def test_render_run_detail_html_escapes_payload_values() -> None:

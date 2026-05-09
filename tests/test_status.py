@@ -189,3 +189,7 @@ async def test_status_snapshot_includes_recent_finished_worker(tmp_path: Path) -
     assert snapshot["recent_finished"][0]["issue_identifier"] == issue.identifier
     assert snapshot["recent_finished"][0]["terminal_state"] == "completed"
     assert snapshot["recent_finished"][0]["security_profile"] == "restricted"
+    assert snapshot["recent_finished"][0]["permission_denials_count"] == 0
+    assert "task_evidence" in snapshot["recent_finished"][0]
+    assert "outcome_decided_by" in snapshot["recent_finished"][0]
+    assert "no_pr_reason" in snapshot["recent_finished"][0]
