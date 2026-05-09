@@ -225,8 +225,8 @@ async def test_block_comment_failure_does_not_prevent_blocking(tmp_path: Path) -
 # -- Release routing for clean / unverifiable outcomes (#62) ----------------
 
 
-async def test_completed_with_pr_marks_done_and_removes_ready(tmp_path: Path) -> None:
-    """`completed_with_pr` → terminal done; no future ready reclaims."""
+async def test_completed_with_pr_dequeues_without_marking_done(tmp_path: Path) -> None:
+    """PR delivery leaves ready queue but does not imply issue completion."""
     orch, tracker = _make_orch(tmp_path, OUTCOME_COMPLETED_WITH_PR)
     await orch.run_once()
 
@@ -235,9 +235,10 @@ async def test_completed_with_pr_marks_done_and_removes_ready(tmp_path: Path) ->
     assert state.claimed_by is None
     assert "symphony-ready" not in state.issue.labels
     assert "symphony-running" not in state.issue.labels
-    assert "symphony-done" in state.issue.labels
-    # Claim history records terminal completion, not a block.
-    assert any("done:" in entry[1] for entry in state.claim_history)
+    assert "symphony-done" not in state.issue.labels
+    # Claim history records queue removal, not issue completion.
+    assert any("dequeue:" in entry[1] for entry in state.claim_history)
+    assert all("done:" not in entry[1] for entry in state.claim_history)
     assert all("blocked:" not in entry[1] for entry in state.claim_history)
     assert state.progress_comments == []
 

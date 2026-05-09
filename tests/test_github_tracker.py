@@ -434,6 +434,29 @@ def test_mark_issue_done_adds_done_and_drops_claim_and_ready() -> None:
     ]
 
 
+def test_dequeue_issue_drops_claim_and_ready_without_done() -> None:
+    posts: list[dict] = []
+    deletes: list[str] = []
+
+    def h(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST":
+            posts.append(json.loads(req.content))
+            return httpx.Response(200, json=[])
+        if req.method == "DELETE":
+            deletes.append(req.url.path)
+            return httpx.Response(200, json=[])
+        return httpx.Response(500)
+
+    tracker = _make_tracker(h)
+    result = tracker.dequeue_issue(_issue(), reason="completed_with_pr")
+    assert result.ok is True
+    assert posts == []
+    assert deletes == [
+        "/repos/acme/proj/issues/42/labels/symphony-running",
+        "/repos/acme/proj/issues/42/labels/symphony-ready",
+    ]
+
+
 def test_release_issue_swallows_404_on_missing_label() -> None:
     def h(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"message": "Label does not exist"})
@@ -881,6 +904,7 @@ def test_github_tracker_is_a_tracker_protocol() -> None:
         "fetch_issues_by_numbers",
         "claim_issue",
         "release_issue",
+        "dequeue_issue",
         "mark_issue_done",
         "mark_issue_blocked",
         "find_linked_pull_requests",
