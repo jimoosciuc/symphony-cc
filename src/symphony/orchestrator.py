@@ -1187,6 +1187,13 @@ class Orchestrator:
                     worker.error
                     or f"task_outcome={detector_result.task_outcome}"
                 )
+                _comment_blocked_outcome(
+                    self.tracker,
+                    worker=worker,
+                    detector_result=detector_result,
+                    block_reason=block_reason,
+                    config=self.config,
+                )
                 try:
                     self.tracker.mark_issue_blocked(worker.issue, block_reason)
                 except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
@@ -1614,6 +1621,116 @@ def _maybe_log_task_outcome(worker: WorkerState, result: DetectorResult) -> None
         worker.issue.identifier,
         result.outcome_decided_by,
     )
+
+
+def _comment_blocked_outcome(
+    tracker: TrackerProtocol,
+    *,
+    worker: WorkerState,
+    detector_result: DetectorResult,
+    block_reason: str,
+    config: WorkflowConfig,
+) -> None:
+    """Surface blocked task outcomes on the issue, not just in artifacts.
+
+    The comment is best-effort: failing to write it must not prevent the
+    core state transition (`mark_issue_blocked`) from running.
+    """
+
+    body = _format_blocked_outcome_comment(
+        worker=worker,
+        detector_result=detector_result,
+        block_reason=block_reason,
+    )
+    body = redact_text(
+        body,
+        redact_keys=config.logging.redact_keys,
+        extra_secrets=(config.tracker.token,),
+    )
+    try:
+        tracker.create_or_update_progress_comment(worker.issue, body)
+    except Exception as exc:  # noqa: BLE001 - tracker failures must not mask outcome
+        _LOG.warning(
+            "blocked outcome comment failed for %s: %s",
+            worker.issue.identifier,
+            exc,
+        )
+
+
+def _format_blocked_outcome_comment(
+    *,
+    worker: WorkerState,
+    detector_result: DetectorResult,
+    block_reason: str,
+) -> str:
+    terminal_state = worker.terminal_state.value if worker.terminal_state else "ended"
+    lines = [
+        "<!-- symphony:blocked-outcome -->",
+        (
+            "Symphony blocked this issue after an unattended run did not produce "
+            "verifiable completion evidence."
+        ),
+        "",
+        f"- task_outcome: `{detector_result.task_outcome}`",
+        f"- terminal_state: `{terminal_state}`",
+        f"- reason: `{block_reason}`",
+        f"- attempt: `{worker.session.attempt}`",
+        f"- artifacts: `{worker.artifacts.root}`",
+    ]
+    evidence = _format_task_evidence(detector_result.task_evidence)
+    if evidence:
+        lines.extend(["", "Evidence:", *evidence])
+    if detector_result.no_pr_reason:
+        lines.extend(
+            [
+                "",
+                f"No-PR reason: {detector_result.no_pr_reason}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            (
+                "Required operator action: inspect the artifacts/logs, adjust "
+                "permissions or the issue instructions, then remove the blocked "
+                "label when it is safe to retry."
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _format_task_evidence(entries: list[dict[str, Any]]) -> list[str]:
+    rows: list[str] = []
+    for entry in entries:
+        kind = entry.get("type")
+        if kind == "permission_denied":
+            tool_names = entry.get("tool_names") or []
+            tools = ", ".join(str(name) for name in tool_names) if tool_names else "unknown"
+            rows.append(
+                "- permission_denied: "
+                f"denials_count={entry.get('denials_count', 0)}, tool_names={tools}"
+            )
+        elif kind == "no_pr_declared":
+            rows.append(f"- no_pr_declared: {entry.get('reason', '')}")
+        elif kind == "branch_pushed":
+            rows.append(
+                f"- branch_pushed: {entry.get('name', '')} @ {entry.get('head_sha', '')}"
+            )
+        elif kind == "diff_in_workspace":
+            rows.append(
+                "- diff_in_workspace: "
+                f"files_changed={entry.get('files_changed', 0)}, "
+                f"lines_added={entry.get('lines_added', 0)}, "
+                f"lines_removed={entry.get('lines_removed', 0)}"
+            )
+        elif kind == "pr_linked":
+            rows.append(
+                f"- pr_linked: #{entry.get('number', '')} {entry.get('url', '')}"
+            )
+        elif kind:
+            rows.append(f"- {kind}: {json.dumps(entry, sort_keys=True)}")
+    return rows
 
 
 def _now_utc() -> datetime:
