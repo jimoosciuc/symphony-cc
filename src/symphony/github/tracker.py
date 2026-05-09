@@ -13,6 +13,7 @@ Boundary methods correspond to ``SPEC.md`` §9.1:
 - ``fetch_issues_by_numbers`` — refresh known issues for reconciliation.
 - ``claim_issue`` — atomic-enough claim with status report.
 - ``release_issue`` — drop the claim after retryable/unknown outcomes.
+- ``dequeue_issue`` — remove from the ready queue without marking done.
 - ``mark_issue_done`` — terminal clean completion; remove it from the ready set.
 - ``mark_issue_blocked`` — non-retryable failure surface.
 - ``find_linked_pull_requests`` — for reconciliation when a linked PR merges.
@@ -152,6 +153,8 @@ class TrackerProtocol(Protocol):
     def claim_issue(self, issue: Issue, run_metadata: dict[str, Any]) -> ClaimResult: ...
 
     def release_issue(self, issue: Issue, reason: str) -> ReleaseResult: ...
+
+    def dequeue_issue(self, issue: Issue, reason: str) -> ReleaseResult: ...
 
     def mark_issue_done(self, issue: Issue, reason: str) -> ReleaseResult: ...
 
@@ -304,6 +307,11 @@ class GitHubTracker:
             pass
         except GitHubError as exc:
             raise self._wrap(exc) from exc
+        return ReleaseResult(ok=True, reason=reason)
+
+    def dequeue_issue(self, issue: Issue, reason: str) -> ReleaseResult:
+        self._delete_label_best_effort(issue, self.github.claim_label, "dequeue_issue")
+        self._delete_label_best_effort(issue, self.github.ready_label, "dequeue_issue")
         return ReleaseResult(ok=True, reason=reason)
 
     def mark_issue_done(self, issue: Issue, reason: str) -> ReleaseResult:
@@ -587,6 +595,21 @@ class FakeGitHubTracker:
             st.claimed_by = None
             st.claim_history.append((_now_iso(), f"release:{reason}"))
             existing = [lbl for lbl in st.issue.labels if lbl != self.claim_label]
+            st.issue = replace(st.issue, labels=tuple(existing))
+            return ReleaseResult(ok=True)
+
+    def dequeue_issue(self, issue: Issue, reason: str) -> ReleaseResult:
+        with self._lock:
+            st = self.states.get(issue.identifier)
+            if st is None:
+                return ReleaseResult(ok=False, reason="unknown issue")
+            st.claimed_by = None
+            st.claim_history.append((_now_iso(), f"dequeue:{reason}"))
+            existing = [
+                lbl
+                for lbl in st.issue.labels
+                if lbl not in {self.claim_label, self.ready_label}
+            ]
             st.issue = replace(st.issue, labels=tuple(existing))
             return ReleaseResult(ok=True)
 

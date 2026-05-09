@@ -1245,10 +1245,9 @@ class Orchestrator:
                     )
             else:
                 try:
-                    if detector_result.task_outcome in {
-                        OUTCOME_COMPLETED_WITH_PR,
-                        OUTCOME_COMPLETED_NO_PR_DECLARED,
-                    }:
+                    if detector_result.task_outcome == OUTCOME_COMPLETED_WITH_PR:
+                        self.tracker.dequeue_issue(worker.issue, outcome_reason)
+                    elif detector_result.task_outcome == OUTCOME_COMPLETED_NO_PR_DECLARED:
                         self.tracker.mark_issue_done(worker.issue, outcome_reason)
                     else:
                         self.tracker.release_issue(worker.issue, outcome_reason)
