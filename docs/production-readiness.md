@@ -39,6 +39,7 @@ make live-graphql
 make live-claude
 make live-remote
 make live-e2e
+make live-role-github-e2e
 make live-remote-claude
 make live-concurrency-e2e
 make live-lanes-e2e
@@ -65,6 +66,7 @@ The `live-integration` workflow can be triggered manually with these targets:
 | `claude` | Live Claude provider smoke tests. |
 | `remote` | Live remote transport smoke tests. |
 | `full-e2e` | Full GitHub issue to Claude PR E2E. |
+| `role-github-e2e` | Real GitHub label/comment role workflow E2E with fake provider. |
 | `remote-claude` | Real remote worker plus Claude E2E. |
 | `concurrency-e2e` | Multi-issue Claude concurrency E2E. |
 | `lanes-e2e` | Runtime lane routing plus Claude Code terminal evidence. |
@@ -88,6 +90,13 @@ Full E2E:
 - `SYMPHONY_E2E_PERMISSION_MODE=bypassPermissions`: recommended for production-readiness proof on trusted test issues.
 - `SYMPHONY_E2E_REQUIRE_PR=1`: fail the run unless GitHub-visible PR evidence is detected.
 - `SYMPHONY_E2E_PR_DETECT_ATTEMPTS` and `SYMPHONY_E2E_PR_DETECT_INTERVAL_SECONDS`: optional PR evidence retry tuning for GitHub indexing delay.
+
+Role GitHub E2E:
+
+- `SYMPHONY_RUN_ROLE_GITHUB_E2E=1`
+- `GITHUB_TOKEN` with issue read/write permissions.
+- The harness creates and closes a temporary issue, creates/updates role labels,
+  and verifies real GitHub label/comment transitions without invoking Claude.
 
 Concurrency E2E:
 
@@ -152,6 +161,7 @@ Go only when all are true:
 - `make ci` is green.
 - Required live targets for the intended deployment topology pass.
 - Full E2E produces GitHub-visible evidence, preferably `completed_with_pr`.
+- Role workflow GitHub E2E proves claim and handoff labels/comments against the target repo.
 - Remote E2E is run before using remote workers in production.
 - Concurrency E2E is run before setting `agent.max_concurrency > 1`.
 - Runtime lanes are exercised before using role-specific implementer/reviewer lanes.
