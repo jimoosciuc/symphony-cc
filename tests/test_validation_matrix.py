@@ -16,6 +16,7 @@ def test_makefile_exposes_full_live_validation_matrix() -> None:
         "live-claude:",
         "live-remote:",
         "live-e2e:",
+        "live-role-github-e2e:",
         "live-remote-claude:",
         "live-concurrency-e2e:",
         "live-lanes-e2e:",
@@ -33,6 +34,7 @@ def test_makefile_exposes_full_live_validation_matrix() -> None:
         "live-claude",
         "live-remote",
         "live-e2e",
+        "live-role-github-e2e",
         "live-remote-claude",
         "live-concurrency-e2e",
         "live-lanes-e2e",
@@ -55,6 +57,7 @@ def test_manual_live_workflow_exposes_all_validation_targets() -> None:
         "claude",
         "remote",
         "full-e2e",
+        "role-github-e2e",
         "remote-claude",
         "concurrency-e2e",
         "lanes-e2e",
@@ -72,6 +75,7 @@ def test_manual_live_workflow_exposes_all_validation_targets() -> None:
         "make live-claude",
         "make live-remote",
         "make live-e2e",
+        "make live-role-github-e2e",
         "make live-remote-claude",
         "make live-concurrency-e2e",
         "make live-lanes-e2e",
@@ -86,5 +90,6 @@ def test_production_readiness_doc_distinguishes_ci_from_production_ready() -> No
     assert "make live-validation" in doc
     assert "Do not claim production readiness before L4" in doc
     assert "SYMPHONY_RUN_REMOTE_CLAUDE_E2E=1" in doc
+    assert "SYMPHONY_RUN_ROLE_GITHUB_E2E=1" in doc
     assert "SYMPHONY_RUN_CONCURRENCY_E2E=1" in doc
     assert "SYMPHONY_RUN_LANES_E2E=1" in doc

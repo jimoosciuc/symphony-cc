@@ -1,6 +1,8 @@
 name: live-integration
 
 on:
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       target:
@@ -15,6 +17,7 @@ on:
           - claude
           - remote
           - full-e2e
+          - role-github-e2e
           - remote-claude
           - concurrency-e2e
           - lanes-e2e
@@ -79,6 +82,14 @@ jobs:
           SYMPHONY_E2E_TEST_ISSUE: ${{ vars.SYMPHONY_E2E_TEST_ISSUE }}
           SYMPHONY_CLAUDE_TEST_MODEL: ${{ vars.SYMPHONY_CLAUDE_TEST_MODEL }}
         run: make live-e2e
+
+      - name: Run role workflow GitHub E2E
+        if: ${{ github.event_name == 'schedule' || inputs.target == 'all' || inputs.target == 'validation-matrix' || inputs.target == 'role-github-e2e' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.SYMPHONY_GITHUB_TOKEN || github.token }}
+          SYMPHONY_GITHUB_TEST_OWNER: ${{ vars.SYMPHONY_GITHUB_TEST_OWNER }}
+          SYMPHONY_GITHUB_TEST_REPO: ${{ vars.SYMPHONY_GITHUB_TEST_REPO }}
+        run: make live-role-github-e2e
 
       - name: Run remote Claude E2E
         if: ${{ inputs.target == 'all' || inputs.target == 'validation-matrix' || inputs.target == 'remote-claude' }}

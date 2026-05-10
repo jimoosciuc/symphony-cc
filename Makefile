@@ -1,9 +1,9 @@
-.PHONY: help setup lint test ci all failure-drills security-audit live-github live-graphql live-claude live-remote live-remote-claude live-e2e live-concurrency-e2e live-lanes-e2e live-integration live-validation
+.PHONY: help setup lint test role-e2e ci all failure-drills security-audit live-github live-graphql live-claude live-remote live-remote-claude live-e2e live-role-github-e2e live-concurrency-e2e live-lanes-e2e live-integration live-validation
 
 PYTHON ?= python
 
 help:
-	@echo "Targets: setup, lint, test, ci, all, failure-drills, security-audit, live-github, live-graphql, live-claude, live-remote, live-remote-claude, live-e2e, live-concurrency-e2e, live-lanes-e2e, live-integration, live-validation"
+	@echo "Targets: setup, lint, test, role-e2e, ci, all, failure-drills, security-audit, live-github, live-graphql, live-claude, live-remote, live-remote-claude, live-e2e, live-role-github-e2e, live-concurrency-e2e, live-lanes-e2e, live-integration, live-validation"
 
 setup:
 	$(PYTHON) -m pip install --upgrade pip
@@ -14,6 +14,9 @@ lint:
 
 test:
 	PYTHONPATH=src pytest -q
+
+role-e2e:
+	PYTHONPATH=src pytest -q tests/test_role_workflow_e2e.py tests/test_routing.py tests/test_dashboard.py tests/test_status.py
 
 ci: lint test
 
@@ -43,6 +46,9 @@ live-remote-claude:
 live-e2e:
 	SYMPHONY_RUN_FULL_E2E=1 PYTHONPATH=src pytest tests/test_live_e2e_full.py -v -s
 
+live-role-github-e2e:
+	SYMPHONY_RUN_ROLE_GITHUB_E2E=1 PYTHONPATH=src pytest tests/test_live_role_workflow_github.py -v -s
+
 live-concurrency-e2e:
 	SYMPHONY_RUN_CONCURRENCY_E2E=1 PYTHONPATH=src pytest tests/test_live_e2e_concurrency.py -v -s
 
@@ -51,4 +57,4 @@ live-lanes-e2e:
 
 live-integration: live-github live-graphql live-claude live-remote
 
-live-validation: live-github live-graphql live-claude live-remote live-e2e live-remote-claude live-concurrency-e2e live-lanes-e2e
+live-validation: live-github live-graphql live-claude live-remote live-e2e live-role-github-e2e live-remote-claude live-concurrency-e2e live-lanes-e2e
