@@ -397,6 +397,8 @@ async def test_role_contract_for_agent_reviewer_lists_review_only_outcomes(
     assert "- Current state: reviewing" in message
     assert "approved: reviewing -> approved" in message
     assert "changes_requested: reviewing -> changes_requested" in message
+    assert "Symphony-Role-Outcome: <allowed_transition_name>" in message
+    assert "apply labels" in message
     assert "pr_delivered" not in message
     assert "implementation" not in message.lower()
 

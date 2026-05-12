@@ -40,6 +40,7 @@ from symphony.config import (
 from symphony.evidence import (
     DECIDED_BY_DETECTOR,
     OUTCOME_COMPLETED_NO_PR_DECLARED,
+    OUTCOME_COMPLETED_ROLE_OUTCOME,
     OUTCOME_COMPLETED_WITH_PR,
     OUTCOME_INCOMPLETE_NO_EVIDENCE,
     OUTCOME_INCOMPLETE_PERMISSION_DENIED,
@@ -72,6 +73,10 @@ def _issue(*, number: int = 1) -> Issue:
 
 def _role_issue(*, number: int = 1) -> Issue:
     return replace(_issue(number=number), labels=("symphony-ready-impl",))
+
+
+def _review_issue(*, number: int = 1) -> Issue:
+    return replace(_issue(number=number), labels=("symphony-ready-review",))
 
 
 def _config(tmp_path: Path) -> WorkflowConfig:
@@ -123,6 +128,27 @@ def _role_graph(*, include_done: bool = True) -> RoleGraphConfig:
             to_state="blocked_operator",
             requires=("issue_comment",),
         ),
+        "approved": RoleTransitionConfig(
+            name="approved",
+            role="reviewer",
+            from_states=("reviewing",),
+            to_state="approved",
+            requires=("pr_approval",),
+        ),
+        "changes_requested": RoleTransitionConfig(
+            name="changes_requested",
+            role="reviewer",
+            from_states=("reviewing",),
+            to_state="changes_requested",
+            requires=("review_comment",),
+        ),
+        "needs_leader": RoleTransitionConfig(
+            name="needs_leader",
+            role="reviewer",
+            from_states=("reviewing",),
+            to_state="needs_design",
+            requires=("issue_comment",),
+        ),
     }
     if include_done:
         transitions["no_work_needed"] = RoleTransitionConfig(
@@ -171,10 +197,18 @@ def _role_graph(*, include_done: bool = True) -> RoleGraphConfig:
                 name="reviewing",
                 labels=("symphony-reviewing",),
             ),
+            "changes_requested": RoleStateConfig(
+                name="changes_requested",
+                labels=("symphony-changes-requested",),
+            ),
             "needs_design": RoleStateConfig(
                 name="needs_design",
                 labels=("symphony-needs-design",),
                 gate_owner="leader",
+            ),
+            "approved": RoleStateConfig(
+                name="approved",
+                labels=("symphony-approved",),
             ),
             "blocked_operator": RoleStateConfig(
                 name="blocked_operator",
@@ -209,10 +243,12 @@ class _StubDetector:
         outcome: str,
         *,
         evidence: list | None = None,
+        role_outcome: str | None = None,
         no_pr_reason: str | None = None,
     ) -> None:
         self._outcome = outcome
         self._evidence = list(evidence or [])
+        self._role_outcome = role_outcome
         self._no_pr_reason = no_pr_reason
         self.calls: list[dict] = []
 
@@ -221,6 +257,7 @@ class _StubDetector:
         return DetectorResult(
             task_outcome=self._outcome,
             task_evidence=self._evidence,
+            role_outcome=self._role_outcome,
             no_pr_reason=self._no_pr_reason,
             outcome_decided_by=DECIDED_BY_DETECTOR,
         )
@@ -252,13 +289,23 @@ def _make_role_orch(
     outcome: str,
     *,
     evidence: list | None = None,
+    role_outcome: str | None = None,
     no_pr_reason: str | None = None,
     include_done: bool = True,
+    issue: Issue | None = None,
+    reviewer_actor: str = "human",
 ) -> tuple[Orchestrator, FakeGitHubTracker]:
-    cfg = replace(_config(tmp_path), role_graph=_role_graph(include_done=include_done))
-    tracker = FakeGitHubTracker(issues=[_role_issue()], ready_label="")
+    graph = _role_graph(include_done=include_done)
+    graph.roles["reviewer"] = replace(graph.roles["reviewer"], actor=reviewer_actor)
+    cfg = replace(_config(tmp_path), role_graph=graph)
+    tracker = FakeGitHubTracker(issues=[issue or _role_issue()], ready_label="")
     mgr = WorkspaceManager(cfg.workspace)
-    detector = _StubDetector(outcome, evidence=evidence, no_pr_reason=no_pr_reason)
+    detector = _StubDetector(
+        outcome,
+        evidence=evidence,
+        role_outcome=role_outcome,
+        no_pr_reason=no_pr_reason,
+    )
     orch = Orchestrator(
         cfg,
         tracker=tracker,
@@ -537,6 +584,95 @@ async def test_role_graph_missing_pr_evidence_does_not_move_to_review(
     terminal_files = list((tmp_path / "artifacts").rglob("terminal.json"))
     record = json.loads(terminal_files[0].read_text())
     assert record["role_transition"]["error"]["code"] == "missing_evidence"
+
+
+async def test_role_graph_reviewer_approval_outcome_transitions_to_approved(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "approved",
+                "marker_source": "assistant_message",
+            }
+        ],
+        role_outcome="approved",
+        issue=_review_issue(),
+        reviewer_actor="agent",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-approved" in state.issue.labels
+    assert "symphony-reviewing" not in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "approved"
+    assert transition["applied"] == "approved"
+    assert transition["to_state"] == "approved"
+
+
+async def test_role_graph_reviewer_changes_requested_outcome_routes_to_implementer(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "changes_requested",
+                "marker_source": "assistant_message",
+            }
+        ],
+        role_outcome="changes_requested",
+        issue=_review_issue(),
+        reviewer_actor="agent",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-changes-requested" in state.issue.labels
+    assert "symphony-reviewing" not in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "changes_requested"
+    assert transition["applied"] == "changes_requested"
+    assert transition["to_state"] == "changes_requested"
+
+
+async def test_role_graph_reviewer_cannot_request_foreign_role_outcome(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "pr_delivered",
+                "marker_source": "assistant_message",
+            }
+        ],
+        role_outcome="pr_delivered",
+        issue=_review_issue(),
+        reviewer_actor="agent",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-needs-design" in state.issue.labels
+    assert "symphony-reviewing" not in state.issue.labels
+    assert "symphony-approved" not in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "pr_delivered"
+    assert transition["error"]["code"] == "transition_role_mismatch"
+    assert transition["fallback"] == "needs_leader"
+    assert transition["applied"] == "needs_leader"
 
 
 async def test_role_graph_incomplete_permission_denied_routes_to_operator_gate(

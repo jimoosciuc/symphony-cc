@@ -12,17 +12,22 @@ Evidence sources (in priority order):
 1. **Linked PR** — via :func:`symphony.github.pr.find_linked_pull_requests`
    on the tracker's GitHubClient. A PR matching the expected branch
    name is sufficient evidence for ``completed_with_pr``.
-2. **No-PR sentinel** — a documented marker in the last assistant
+2. **Role outcome sentinel** — a documented marker in the last assistant
+   message text or terminal payload. Role workflows use
+   ``Symphony-Role-Outcome: <transition>`` to request one of the
+   current role's allowed graph transitions without letting the agent
+   mutate tracker labels directly.
+3. **No-PR sentinel** — a documented marker in the last assistant
    message text or a recent issue comment. SPEC §17.5 reserves the
    sentinel format ``Symphony-No-PR: <reason>``.
-3. **Permission denials** — from ``permission_denials_count`` already
+4. **Permission denials** — from ``permission_denials_count`` already
    on the worker. When non-zero AND no PR / no sentinel, promotes a
    COMPLETED run to ``incomplete_permission_denied``.
-4. **Pushed branch** — best-effort ``git ls-remote`` (skipped in tests
+5. **Pushed branch** — best-effort ``git ls-remote`` (skipped in tests
    that don't wire a real workspace) to surface a branch the agent
    pushed without opening a PR. Necessary-but-not-sufficient per
    SPEC §17.3.
-5. **Local diff in workspace** — ``git status --porcelain`` and
+6. **Local diff in workspace** — ``git status --porcelain`` and
    ``git log origin/<base>..HEAD`` to detect uncommitted edits or
    local commits that didn't reach GitHub. Informational only — does
    NOT promote ``incomplete_no_evidence`` to ``completed_*``.
@@ -63,6 +68,7 @@ _LOG = logging.getLogger("symphony.evidence")
 #    the orchestrator and tests don't reach into a private symbol table) ---
 
 OUTCOME_COMPLETED_WITH_PR = "completed_with_pr"
+OUTCOME_COMPLETED_ROLE_OUTCOME = "completed_role_outcome"
 OUTCOME_COMPLETED_NO_PR_DECLARED = "completed_no_pr_declared"
 OUTCOME_INCOMPLETE_NO_EVIDENCE = "incomplete_no_evidence"
 OUTCOME_INCOMPLETE_PERMISSION_DENIED = "incomplete_permission_denied"
@@ -73,6 +79,7 @@ OUTCOME_UNKNOWN = "unknown"
 ALL_OUTCOMES: frozenset[str] = frozenset(
     {
         OUTCOME_COMPLETED_WITH_PR,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
         OUTCOME_COMPLETED_NO_PR_DECLARED,
         OUTCOME_INCOMPLETE_NO_EVIDENCE,
         OUTCOME_INCOMPLETE_PERMISSION_DENIED,
@@ -90,6 +97,16 @@ DECIDED_BY_UNKNOWN = "unknown"
 # colon as the no-PR reason.
 NO_PR_SENTINEL = re.compile(
     r"Symphony-No-PR\s*:\s*(?P<reason>.+?)(?:\n|$)",
+    re.IGNORECASE,
+)
+
+# Role workflows reserve this marker for agent-owned role decisions.
+# The value is a role-graph transition name, for example
+# ``approved``, ``changes_requested``, or ``decision_to_impl``. The
+# orchestrator validates the transition against the active role/state;
+# agents must not apply labels themselves.
+ROLE_OUTCOME_SENTINEL = re.compile(
+    r"Symphony-Role-Outcome\s*:\s*(?P<transition>[A-Za-z0-9_-]+)(?:\n|$)",
     re.IGNORECASE,
 )
 
@@ -118,6 +135,7 @@ class DetectorResult:
 
     task_outcome: str
     task_evidence: list[dict[str, Any]] = field(default_factory=list)
+    role_outcome: str | None = None
     no_pr_reason: str | None = None
     outcome_decided_by: str = DECIDED_BY_DETECTOR
     task_outcome_recorded_at: datetime = field(
@@ -129,6 +147,7 @@ class DetectorResult:
         return {
             "task_outcome": self.task_outcome,
             "task_evidence": list(self.task_evidence),
+            "role_outcome": self.role_outcome,
             "no_pr_reason": self.no_pr_reason,
             "outcome_decided_by": self.outcome_decided_by,
             "task_outcome_recorded_at": self.task_outcome_recorded_at.isoformat(),
@@ -223,7 +242,18 @@ class EvidenceDetector:
                 }
             )
 
-        # 2. No-PR sentinel (assistant text + last event payload).
+        # 2. Role outcome sentinel (assistant text + last event payload).
+        role_outcome = self._detect_role_outcome_sentinel(last_event, recent_assistant_text)
+        if role_outcome is not None:
+            evidence.append(
+                {
+                    "type": "role_outcome",
+                    "transition": role_outcome,
+                    "marker_source": "assistant_message",
+                }
+            )
+
+        # 3. No-PR sentinel (assistant text + last event payload).
         sentinel_reason = self._detect_no_pr_sentinel(last_event, recent_assistant_text)
         if sentinel_reason is not None:
             evidence.append(
@@ -234,7 +264,7 @@ class EvidenceDetector:
                 }
             )
 
-        # 3. Permission denials — recorded for completeness even when a
+        # 4. Permission denials — recorded for completeness even when a
         #    PR was found (operator may want to know Claude was bounced
         #    on something during the run).
         if permission_denials_count > 0:
@@ -246,7 +276,7 @@ class EvidenceDetector:
                 }
             )
 
-        # 4. Pushed branch — best-effort. Skipped when no workspace path.
+        # 5. Pushed branch — best-effort. Skipped when no workspace path.
         branch = self._detect_pushed_branch(issue, workspace_path)
         if branch is not None:
             evidence.append(
@@ -257,7 +287,7 @@ class EvidenceDetector:
                 }
             )
 
-        # 5. Local diff — best-effort. Informational; not a promoter.
+        # 6. Local diff — best-effort. Informational; not a promoter.
         diff = self._detect_local_diff(workspace_path)
         if diff is not None:
             evidence.append(
@@ -269,7 +299,17 @@ class EvidenceDetector:
                 }
             )
 
-        # Decision tree: strongest evidence wins.
+        # Decision tree: role outcome wins for role workflows because a
+        # reviewer or leader may inspect an existing PR without creating
+        # a new one. The orchestrator still verifies the requested
+        # transition against the active role and required evidence.
+        if role_outcome is not None:
+            return DetectorResult(
+                task_outcome=OUTCOME_COMPLETED_ROLE_OUTCOME,
+                task_evidence=evidence,
+                role_outcome=role_outcome,
+                outcome_decided_by=DECIDED_BY_DETECTOR,
+            )
         if prs:
             return DetectorResult(
                 task_outcome=OUTCOME_COMPLETED_WITH_PR,
@@ -280,6 +320,7 @@ class EvidenceDetector:
             return DetectorResult(
                 task_outcome=OUTCOME_COMPLETED_NO_PR_DECLARED,
                 task_evidence=evidence,
+                role_outcome=role_outcome,
                 no_pr_reason=sentinel_reason,
                 outcome_decided_by=DECIDED_BY_DETECTOR,
             )
@@ -404,6 +445,27 @@ class EvidenceDetector:
             match = NO_PR_SENTINEL.search(text)
             if match:
                 return match.group("reason").strip()
+        return None
+
+    def _detect_role_outcome_sentinel(
+        self,
+        last_event: AgentEvent | None,
+        recent_assistant_text: str,
+    ) -> str | None:
+        """Find ``Symphony-Role-Outcome: <transition>`` in assistant text."""
+        haystacks: list[str] = []
+        if recent_assistant_text:
+            haystacks.append(recent_assistant_text[:_MAX_ASSISTANT_TEXT_SCAN_CHARS])
+        if last_event is not None:
+            payload = last_event.payload or {}
+            for key in ("result", "text"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    haystacks.append(value[:_MAX_ASSISTANT_TEXT_SCAN_CHARS])
+        for text in haystacks:
+            match = ROLE_OUTCOME_SENTINEL.search(text)
+            if match:
+                return match.group("transition").strip()
         return None
 
     def _detect_pushed_branch(
@@ -565,11 +627,13 @@ __all__ = [
     "EvidenceDetector",
     "NO_PR_SENTINEL",
     "OUTCOME_BLOCKED_OPERATOR_REQUIRED",
+    "OUTCOME_COMPLETED_ROLE_OUTCOME",
     "OUTCOME_COMPLETED_NO_PR_DECLARED",
     "OUTCOME_COMPLETED_WITH_PR",
     "OUTCOME_INCOMPLETE_NO_EVIDENCE",
     "OUTCOME_INCOMPLETE_PERMISSION_DENIED",
     "OUTCOME_RETRYABLE_FAILURE",
     "OUTCOME_UNKNOWN",
+    "ROLE_OUTCOME_SENTINEL",
     "collect_recent_assistant_text",
 ]

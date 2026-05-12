@@ -47,11 +47,18 @@ The agent is responsible for execution inside that boundary:
 2. make code or review changes allowed by the role;
 3. produce evidence such as a PR link, review summary, design proposal, or
    blocker explanation;
-4. report one of the role's allowed outcomes.
+4. report one of the role's allowed outcomes with
+   `Symphony-Role-Outcome: <transition_name>`.
 
 An agent should not be trusted to decide arbitrary tracker transitions. If an
 agent reports an outcome that is not permitted by the role graph, Symphony must
 leave the issue in a safe gate state and surface the mismatch.
+
+Agents must not apply Symphony state labels directly. A reviewer may approve a
+PR or leave requested-change comments; a leader may write a decision comment;
+an implementer may open or update a PR. Symphony owns the source/destination
+label changes after it validates that the reported outcome is allowed from the
+active role and state.
 
 ## Minimal Production Roles
 
@@ -153,6 +160,36 @@ Label updates should be performed together where the tracker API allows it.
 GitHub REST label operations are not fully atomic, so Symphony must tolerate
 intermediate states by excluding active and gate labels during candidate
 selection.
+
+## Agent Outcome Contract
+
+Agent-owned roles request transitions by emitting exactly one terminal marker
+after they have produced the required GitHub-visible evidence:
+
+```text
+Symphony-Role-Outcome: approved
+```
+
+The value must be one of the active role's allowed transition names. Symphony
+parses the marker into `task_outcome=completed_role_outcome`, records
+`role_outcome=<transition>`, validates the transition against the role graph,
+and applies the label handoff. If the marker names a transition owned by
+another role, Symphony routes the issue to the role's configured escalation
+transition such as `needs_leader`, or to the operator blocked label if no safe
+role transition exists.
+
+Examples:
+
+| Role | Evidence first | Terminal marker |
+| --- | --- | --- |
+| Reviewer approves | Leave a PR approval or review summary. | `Symphony-Role-Outcome: approved` |
+| Reviewer requests changes | Leave review comments describing required changes. | `Symphony-Role-Outcome: changes_requested` |
+| Reviewer escalates | Comment why design/scope needs leader input. | `Symphony-Role-Outcome: needs_leader` |
+| Leader unblocks | Comment the concrete decision. | `Symphony-Role-Outcome: decision_to_impl` |
+
+Humans participate by moving labels at gates where the actor is `human`.
+Human intervention should be reserved for states that actually require human
+judgment; routine review can be assigned to an agent reviewer.
 
 ## Actor Modes
 

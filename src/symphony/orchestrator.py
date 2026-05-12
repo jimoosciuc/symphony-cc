@@ -35,6 +35,7 @@ from symphony.config import LaneConfig, RoleGraphConfig, WorkflowConfig
 from symphony.events import TERMINAL_TURN_EVENTS, AgentEvent
 from symphony.evidence import (
     OUTCOME_COMPLETED_NO_PR_DECLARED,
+    OUTCOME_COMPLETED_ROLE_OUTCOME,
     OUTCOME_COMPLETED_WITH_PR,
     OUTCOME_INCOMPLETE_NO_EVIDENCE,
     OUTCOME_INCOMPLETE_PERMISSION_DENIED,
@@ -1169,7 +1170,11 @@ class Orchestrator:
         graph = self.config.role_graph
         if graph is None or worker.role_name is None or worker.role_state is None:
             return route
-        fallback_name = _first_role_transition(graph, worker.role_name, ("operator_blocked",))
+        fallback_name = _first_role_transition(
+            graph,
+            worker.role_name,
+            ("operator_blocked", "needs_leader"),
+        )
         if fallback_name is not None and fallback_name != route.get("requested"):
             planned = plan_transition(
                 graph,
@@ -2032,12 +2037,20 @@ def _role_prompt_contract(worker: WorkerState, config: WorkflowConfig) -> str | 
                 lines.append(
                     "    PR delivery is a handoff, not issue completion; do not mark done."
                 )
+        lines.append(
+            "- To request a transition, first produce the required GitHub-visible "
+            "evidence, then finish with exactly:"
+        )
+        lines.append("  `Symphony-Role-Outcome: <allowed_transition_name>`")
     else:
         lines.append("  - none from this state; report why no schema transition is possible.")
     forbidden = _forbidden_transition_names(graph, role.name, state.name)
     if forbidden:
         lines.append(f"- Forbidden from this state: {', '.join(forbidden)}")
-    lines.append("- Do not claim, apply, or describe transitions outside the allowed list.")
+    lines.append(
+        "- Do not claim, apply labels, edit tracker state, or describe transitions "
+        "outside the allowed list."
+    )
     if role.actor in {"hybrid", "human"} or state.gate_owner:
         lines.append("- Gate decisions require a GitHub-visible audit comment before handoff.")
     lines.append(
@@ -2081,6 +2094,11 @@ def _role_transition_for_outcome(
 ) -> str | None:
     if worker.role_name is None:
         return None
+    if (
+        detector_result.task_outcome == OUTCOME_COMPLETED_ROLE_OUTCOME
+        and detector_result.role_outcome
+    ):
+        return detector_result.role_outcome
     if detector_result.task_outcome == OUTCOME_COMPLETED_WITH_PR:
         return _first_role_transition(graph, worker.role_name, ("pr_delivered",))
     if detector_result.task_outcome == OUTCOME_COMPLETED_NO_PR_DECLARED:
@@ -2114,12 +2132,36 @@ def _transition_evidence_for_outcome(
     if _task_evidence_has(detector_result, "pr_linked"):
         evidence.append("pr_link")
     if (
+        detector_result.task_outcome == OUTCOME_COMPLETED_ROLE_OUTCOME
+        and detector_result.role_outcome == transition_name
+    ):
+        evidence.extend(_role_outcome_evidence_for_transition(transition_name))
+    if (
         transition_name in {"design_needed", "operator_blocked", "no_work_needed"}
         or detector_result.no_pr_reason
         or should_block
     ):
         evidence.append("issue_comment")
     return tuple(dict.fromkeys(evidence))
+
+
+def _role_outcome_evidence_for_transition(transition_name: str) -> tuple[str, ...]:
+    """Evidence attested by a role-outcome sentinel.
+
+    The agent must produce the GitHub-visible artifact described in the
+    role prompt before emitting ``Symphony-Role-Outcome``. Symphony still
+    validates the requested transition against the active role/state, but
+    not all audit artifacts are machine-verifiable yet.
+    """
+    if transition_name == "approved":
+        return ("pr_approval", "review_comment")
+    if transition_name == "changes_requested":
+        return ("review_comment",)
+    if transition_name in {"decision_to_impl", "verified", "verification_failed"}:
+        return ("decision_comment", "review_comment")
+    if transition_name in {"needs_leader", "design_needed", "operator_blocked", "no_work_needed"}:
+        return ("issue_comment",)
+    return ("issue_comment", "review_comment", "decision_comment")
 
 
 def _task_evidence_has(detector_result: DetectorResult, evidence_type: str) -> bool:
@@ -2138,6 +2180,8 @@ def _transition_evidence_summary(
     ]
     if detector_result.no_pr_reason:
         parts.append(f"no_pr_reason={detector_result.no_pr_reason}")
+    if detector_result.role_outcome:
+        parts.append(f"role_outcome={detector_result.role_outcome}")
     if block_reason:
         parts.append(f"block_reason={block_reason}")
     pr_urls = [
