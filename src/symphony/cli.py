@@ -135,14 +135,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument(
         "--model",
-        default="claude-opus-4-7",
-        help="Claude model for the generated workflow.",
+        default=None,
+        help=(
+            "Model for the generated workflow. Defaults to claude-opus-4-7 "
+            "for claude_code and gpt-5.3-codex for codex."
+        ),
+    )
+    init.add_argument(
+        "--provider",
+        default="claude_code",
+        choices=["claude_code", "codex"],
+        help="Agent provider for generated agent roles (default: claude_code).",
     )
     init.add_argument(
         "--permission-mode",
         default="bypassPermissions",
         choices=["default", "acceptEdits", "bypassPermissions"],
-        help="Claude permission mode for the generated workflow.",
+        help="Provider permission mode for the generated workflow.",
     )
     init.add_argument(
         "--security-profile",
@@ -182,20 +191,24 @@ def _cmd_init(args: argparse.Namespace) -> int:
         return 1
 
     if args.template == "github-implementer":
+        model = args.model or _default_model_for_provider(args.provider)
         workflow = _github_implementer_workflow(
             owner=owner,
             repo=repo,
-            model=args.model,
+            provider=args.provider,
+            model=model,
             permission_mode=args.permission_mode,
             security_profile=args.security_profile,
             token_env=args.token_env,
         )
         ready_label = STANDARD_LABELS["symphony-ready"]["name"]
     else:
+        model = args.model or _default_model_for_provider(args.provider)
         workflow = _github_role_workflow(
             owner=owner,
             repo=repo,
-            model=args.model,
+            provider=args.provider,
+            model=model,
             permission_mode=args.permission_mode,
             security_profile=args.security_profile,
             token_env=args.token_env,
@@ -417,15 +430,45 @@ def _parse_repo(value: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
+def _default_model_for_provider(provider: str) -> str:
+    if provider == "codex":
+        return "gpt-5.3-codex"
+    return "claude-opus-4-7"
+
+
+def _provider_runtime_section(
+    *,
+    provider: str,
+    model: str,
+    permission_mode: str,
+) -> str:
+    section = "codex" if provider == "codex" else "claude"
+    return f"""{section}:
+  model: {model}
+  permission_mode: {permission_mode}
+  session_store: .symphony/sessions
+  transcript_store: .symphony/transcripts
+  artifact_store: .symphony/runs
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
+  retry_resume_policy: resume_same_session"""
+
+
 def _github_implementer_workflow(
     *,
     owner: str,
     repo: str,
+    provider: str,
     model: str,
     permission_mode: str,
     security_profile: str,
     token_env: str,
 ) -> str:
+    runtime_section = _provider_runtime_section(
+        provider=provider,
+        model=model,
+        permission_mode=permission_mode,
+    )
     return f"""---
 tracker:
   kind: github
@@ -436,7 +479,7 @@ tracker:
   exclude_labels: ["symphony-running", "symphony-blocked", "symphony-done"]
 
 agent:
-  provider: claude_code
+  provider: {provider}
   max_concurrency: 1
   max_turns: 3
 
@@ -459,15 +502,7 @@ github:
 security:
   profile: {security_profile}
 
-claude:
-  model: {model}
-  permission_mode: {permission_mode}
-  session_store: .symphony/sessions
-  transcript_store: .symphony/transcripts
-  artifact_store: .symphony/runs
-  turn_timeout_ms: 3600000
-  stall_timeout_ms: 300000
-  retry_resume_policy: resume_same_session
+{runtime_section}
 
 polling:
   interval_ms: 60000
@@ -508,7 +543,7 @@ Rules:
 - Run the relevant tests/checks for the changed area when feasible.
 - In the PR body, include a concise summary and the tests/checks you ran.
 - Respond to review comments by updating the same PR.
-- Do not add Linear or Codex assumptions.
+- Do not add Linear assumptions.
 - Do not finish as successful unless you opened/updated a PR or explicitly
   reply with `Symphony-No-PR: <reason>`.
 """
@@ -518,12 +553,18 @@ def _github_role_workflow(
     *,
     owner: str,
     repo: str,
+    provider: str,
     model: str,
     permission_mode: str,
     security_profile: str,
     token_env: str,
     production_line: bool,
 ) -> str:
+    runtime_section = _provider_runtime_section(
+        provider=provider,
+        model=model,
+        permission_mode=permission_mode,
+    )
     production_roles = ""
     production_states = ""
     production_transitions = ""
@@ -581,7 +622,7 @@ tracker:
   exclude_labels: [symphony-done]
 
 agent:
-  provider: claude_code
+  provider: {provider}
   max_concurrency: 1
   max_turns: 3
 
@@ -604,7 +645,7 @@ github:
 roles:
   implementer:
     actor: agent
-    provider: claude_code
+    provider: {provider}
     can_claim: [ready_impl, changes_requested]
     claim_state: implementing
     transitions:
@@ -645,7 +686,7 @@ roles:
 
   leader:
     actor: hybrid
-    provider: claude_code
+    provider: {provider}
     can_claim: [needs_design, needs_leader, blocked_operator]
     claim_state: leader_reviewing
     transitions:
@@ -686,15 +727,7 @@ states:
 security:
   profile: {security_profile}
 
-claude:
-  model: {model}
-  permission_mode: {permission_mode}
-  session_store: .symphony/sessions
-  transcript_store: .symphony/transcripts
-  artifact_store: .symphony/runs
-  turn_timeout_ms: 3600000
-  stall_timeout_ms: 300000
-  retry_resume_policy: resume_same_session
+{runtime_section}
 
 polling:
   interval_ms: 60000
@@ -727,7 +760,7 @@ Rules:
   `Closes {{{{ issue.identifier }}}}` in the PR body.
 - Use GitHub issue or PR comments for review responses, clarification, and audit trails.
 - Run relevant tests/checks when feasible and summarize them in the PR.
-- Do not add Linear or Codex assumptions.
+- Do not add Linear assumptions.
 - Do not finish as successful unless you produced the evidence required by the
   role contract or explicitly reply with `Symphony-No-PR: <reason>`.
 """
