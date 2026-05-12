@@ -329,7 +329,7 @@ def _build_codex_command(
         cmd.extend(["-a", "never", "--sandbox", "workspace-write"])
     cmd.extend(["-m", config.model, "-C", str(workspace), "exec"])
     if provider_session_id:
-        cmd.extend(["resume", provider_session_id])
+        cmd.extend(["resume", "--skip-git-repo-check", provider_session_id])
     else:
         cmd.append("--skip-git-repo-check")
     cmd.extend(["--json", "--output-last-message", str(last_message_path), "-"])

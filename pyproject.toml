@@ -46,6 +46,9 @@ packages = ["src/symphony"]
 testpaths = ["tests"]
 addopts = "-ra"
 asyncio_mode = "auto"
+markers = [
+    "codex_live: opt-in live Codex CLI integration tests",
+]
 
 [tool.ruff]
 line-length = 100
