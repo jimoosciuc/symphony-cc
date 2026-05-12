@@ -184,7 +184,30 @@ async def test_codex_provider_nonzero_exit_yields_turn_failed(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_codex_provider_malformed_jsonl_is_reported(tmp_path: Path) -> None:
+async def test_codex_provider_nonzero_exit_overrides_turn_completed(tmp_path: Path) -> None:
+    async def runner(session, message, config, provider_session_id):
+        return CodexRunResult(
+            returncode=9,
+            events=[
+                {"type": "thread.started", "thread_id": "thread-1"},
+                {"type": "turn.completed", "usage": {}},
+            ],
+            stderr="process failed",
+            last_message="partial",
+        )
+
+    provider = CodexProvider(runner=runner)
+    record = await provider.start_session(_issue(), tmp_path / "ws", _config(tmp_path))
+
+    events = await _drain(provider.send_input(record, "go"))
+
+    assert events[-1].event == "turn_failed"
+    assert events[-1].payload["subtype"] == "codex_exit_nonzero"
+    assert events[-1].payload["returncode"] == 9
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_malformed_jsonl_fails_turn(tmp_path: Path) -> None:
     async def runner(session, message, config, provider_session_id):
         return CodexRunResult(
             returncode=0,
@@ -202,7 +225,61 @@ async def test_codex_provider_malformed_jsonl_is_reported(tmp_path: Path) -> Non
 
     assert events[0].event == "malformed"
     assert events[0].payload["line"] == "not-json"
-    assert events[-1].event == "turn_completed"
+    assert events[-1].event == "turn_failed"
+    assert events[-1].payload["subtype"] == "malformed_jsonl"
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_missing_thread_started_fails_turn(tmp_path: Path) -> None:
+    async def runner(session, message, config, provider_session_id):
+        return CodexRunResult(
+            returncode=0,
+            events=[{"type": "turn.completed", "usage": {}}],
+        )
+
+    provider = CodexProvider(runner=runner)
+    record = await provider.start_session(_issue(), tmp_path / "ws", _config(tmp_path))
+
+    events = await _drain(provider.send_input(record, "go"))
+
+    assert [event.event for event in events] == ["malformed", "turn_failed"]
+    assert events[-1].payload["subtype"] == "missing_thread_started"
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_action_denial_surfaces_permission_denials(
+    tmp_path: Path,
+) -> None:
+    denial = (
+        "I couldn't create `denied.txt`; the workspace is read-only and the write "
+        "was blocked: operation not permitted."
+    )
+
+    async def runner(session, message, config, provider_session_id):
+        return CodexRunResult(
+            returncode=0,
+            events=[
+                {"type": "thread.started", "thread_id": "thread-1"},
+                {
+                    "type": "item.completed",
+                    "item": {"id": "item_0", "type": "agent_message", "text": denial},
+                },
+                {"type": "turn.completed", "usage": {}},
+            ],
+            last_message=denial,
+        )
+
+    provider = CodexProvider(runner=runner)
+    record = await provider.start_session(_issue(), tmp_path / "ws", _config(tmp_path))
+
+    events = await _drain(provider.send_input(record, "go"))
+
+    terminal = events[-1]
+    assert terminal.event == "turn_completed"
+    assert len(terminal.payload["permission_denials"]) == 1
+    assert terminal.payload["permission_denials"][0]["provider"] == "codex"
+    assert "read-only" in terminal.payload["permission_denials"][0]["matched_patterns"]
+    assert terminal.payload["codex_warnings"]["action_denial_count"] == 1
 
 
 @pytest.mark.asyncio
