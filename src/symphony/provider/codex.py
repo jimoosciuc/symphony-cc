@@ -24,6 +24,7 @@ from symphony.models import Issue
 from symphony.provider.base import ProviderError, ProviderRestoreError, SessionRecord, Terminal
 
 _LOG = logging.getLogger("symphony.provider.codex")
+_CODEX_STDIO_LIMIT = 16 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -244,6 +245,7 @@ class CodexProvider:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=_CODEX_STDIO_LIMIT,
         )
         assert proc.stdin is not None
         assert proc.stdout is not None

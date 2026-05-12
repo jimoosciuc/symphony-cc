@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import symphony.provider.codex as codex_module
 from symphony.config import ClaudeConfig
 from symphony.events import AgentEvent
 from symphony.models import Issue
@@ -309,3 +312,54 @@ def test_codex_command_uses_top_level_cd_and_resume(tmp_path: Path) -> None:
     assert "-C" in cmd
     assert "--cd" not in cmd
     assert cmd[-1] == "-"
+
+
+@pytest.mark.asyncio
+async def test_run_codex_uses_large_stdio_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeStdin:
+        def write(self, data: bytes) -> None:
+            captured["stdin"] = data
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    class _FakeStdout:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise StopAsyncIteration
+
+    class _FakeStderr:
+        async def read(self) -> bytes:
+            return b""
+
+    class _FakeProc:
+        stdin = _FakeStdin()
+        stdout = _FakeStdout()
+        stderr = _FakeStderr()
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_create_subprocess_exec(*cmd: str, **kwargs: Any) -> _FakeProc:
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    provider = CodexProvider()
+    record = await provider.start_session(_issue(), tmp_path / "ws", _config(tmp_path))
+
+    await provider._run_codex(record, "hello", _config(tmp_path), None)
+
+    assert captured["kwargs"]["limit"] == codex_module._CODEX_STDIO_LIMIT
+    assert captured["stdin"] == b"hello"
