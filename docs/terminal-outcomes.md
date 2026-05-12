@@ -142,6 +142,7 @@ MVP. The detector's job in #60 is to find one of these per run:
 | target outcome | required evidence |
 |---|---|
 | `completed_with_pr` | One `pr_linked` entry whose `number` matches a PR linked back to the issue (PR body contains `Closes #N`, or the orchestrator's claim/PR-link comment was posted, or the PR was opened against the issue's `expected_branch_name`). |
+| `completed_role_outcome` | One `role_outcome` entry sourced from `Symphony-Role-Outcome: <transition>`. Role graph routing validates the transition against the active role/state before labels are changed. |
 | `completed_no_pr_declared` | A `no_pr_declared` entry — sourced from a sentinel marker on the issue (e.g. `Symphony-No-PR: typo already fixed in #41`), Claude's final assistant message containing a documented marker, or a workflow-specific terminal marker. `no_pr_reason` MUST be populated. |
 | `blocked_operator_required` | An `issue_handoff` entry whose `label_added` matches the configured `blocked_label`. |
 
@@ -212,6 +213,7 @@ Recommended triage in priority order:
 | `task_outcome` | What it means | Operator action |
 |---|---|---|
 | `completed_with_pr` | PR linked to the issue. Run did its job. | None — the orchestrator released the claim; the linked PR carries the work. Inspect the PR on GitHub. |
+| `completed_role_outcome` | An agent-owned role reported an allowed transition marker, such as `approved` or `changes_requested`. | Inspect `role_outcome` and `role_transition` in `terminal.json`. If `role_transition.applied` is populated, Symphony already moved the issue to the next role-state label. If it fell back, read the audit comment and correct the role prompt or workflow graph. |
 | `completed_no_pr_declared` | Claude explicitly said no change is needed via `Symphony-No-PR: <reason>`. | Verify `no_pr_reason` is reasonable. If acceptable, close the issue manually (or let the next dispatch see no `symphony-ready` label). If Claude was wrong, re-open or re-prompt with stronger context. |
 | `incomplete_no_evidence` | Provider completed cleanly but Symphony verified no PR exists, no sentinel present. The misleading-success class. The issue is now **`symphony-blocked`**. | Open `events.jsonl` to see what Claude actually did. Common causes: prompt too vague, Claude wrote a draft answer instead of editing files, Claude couldn't push (check repo permissions for `tracker.token`). Fix the root cause, remove `symphony-blocked`, and re-dispatch. |
 | `incomplete_permission_denied` | Provider completed but `permission_denials_count > 0` and no PR/sentinel. The issue is **`symphony-blocked`**. | Inspect `task_evidence[].permission_denied.tool_names`. If the run needs Bash/git/gh/AskUserQuestion to make a PR (the typical case), switch the workflow to `claude.permission_mode: bypassPermissions` (only on trusted hosts), remove `symphony-blocked`, and re-dispatch. |

@@ -941,6 +941,7 @@ no PR — is NOT silently labelled successful.
 | `task_outcome` | enum | One of the values in §17.2 |
 | `task_evidence` | array | Zero or more evidence objects (§17.3); empty when no detector ran |
 | `outcome_decided_by` | enum | `detector` (M5.2 evidence detector ran) / `derivation` (mapped from provider fields per §17.4) / `unknown` |
+| `role_outcome` | string \| null | Role graph transition requested by `Symphony-Role-Outcome: <transition>`; null outside role-workflow decisions |
 | `no_pr_reason` | string \| null | Required when `task_outcome == "completed_no_pr_declared"`; otherwise null |
 | `task_outcome_recorded_at` | timestamp | When the orchestrator wrote `task_outcome` (UTC ISO 8601) |
 
@@ -949,6 +950,7 @@ no PR — is NOT silently labelled successful.
 | value | meaning |
 |---|---|
 | `completed_with_pr` | A linked pull request was created or updated for this issue. Evidence: at least one `pr_linked` entry. |
+| `completed_role_outcome` | An agent-owned role reported a role graph transition with `Symphony-Role-Outcome: <transition>`. Evidence: `role_outcome` entry; `role_outcome` populated. The orchestrator must still validate the transition against the active role/state before applying labels. |
 | `completed_no_pr_declared` | Claude explicitly declared no change is needed (e.g. via a sentinel marker on the issue) and the orchestrator detected the declaration. Evidence: `no_pr_declared` entry; `no_pr_reason` populated. |
 | `incomplete_no_evidence` | Provider turn completed but no PR / no branch / no declaration was detected. Default for COMPLETED runs whose detector found nothing — this is the misleading-success case (#42 / #45). |
 | `incomplete_permission_denied` | Provider turn completed AND `permission_denials_count > 0` AND no other completion evidence. The run was bounced by `permission_mode` (typically `acceptEdits` denying `Bash` / `AskUserQuestion`). |
@@ -967,6 +969,7 @@ unknown `type` values for forward compatibility.
 | `pr_linked` | `url` (string), `number` (int), `state` (`open` / `closed` / `merged`), `created` (bool — true when this run created the PR, false when it only updated it) | `completed_with_pr` |
 | `branch_pushed` | `name` (string), `head_sha` (string) | Necessary but NOT sufficient by itself — usually accompanied by `pr_linked`. Recorded for audit. |
 | `diff_in_workspace` | `files_changed` (int), `lines_added` (int), `lines_removed` (int) | Informational only. Does NOT promote `incomplete_no_evidence` to `completed_*` because uncommitted local edits don't reach GitHub. |
+| `role_outcome` | `transition` (string), `marker_source` (`assistant_message` / `terminal_marker`) | `completed_role_outcome` |
 | `no_pr_declared` | `reason` (string), `marker_source` (`issue_comment` / `assistant_message` / `terminal_marker`) | `completed_no_pr_declared` |
 | `issue_handoff` | `label_added` (string \| null), `comment_url` (string \| null) | `blocked_operator_required` (when label is the configured `blocked_label`) |
 | `permission_denied` | `denials_count` (int), `tool_names` (array of strings) | Companion to `permission_denials_count`; promotes COMPLETED to `incomplete_permission_denied` when no other evidence is present. |

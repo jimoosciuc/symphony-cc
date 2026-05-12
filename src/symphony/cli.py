@@ -569,8 +569,10 @@ def _github_role_workflow(
     production_states = ""
     production_transitions = ""
     reviewer_approved_to = "approved"
+    reviewer_actor = "human"
     if production_line:
         reviewer_approved_to = "ready_verify"
+        reviewer_actor = "agent"
         production_roles = """
   verifier:
     actor: human
@@ -667,7 +669,8 @@ roles:
         requires: issue_comment
 
   reviewer:
-    actor: human
+    actor: {reviewer_actor}
+    provider: {provider}
     can_claim: [ready_review]
     claim_state: reviewing
     transitions:
@@ -760,6 +763,11 @@ Rules:
   `Closes {{{{ issue.identifier }}}}` in the PR body.
 - Use GitHub issue or PR comments for review responses, clarification, and audit trails.
 - Run relevant tests/checks when feasible and summarize them in the PR.
+- Do not edit Symphony state labels yourself; Symphony applies role-state
+  transitions after validating your evidence.
+- For role transitions, finish with
+  `Symphony-Role-Outcome: <allowed_transition_name>` after producing the
+  required GitHub-visible evidence.
 - Do not add Linear assumptions.
 - Do not finish as successful unless you produced the evidence required by the
   role contract or explicitly reply with `Symphony-No-PR: <reason>`.

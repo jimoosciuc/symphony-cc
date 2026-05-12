@@ -218,6 +218,8 @@ def test_init_github_production_line_writes_extended_role_workflow(
     workflow = load_workflow(target)
     graph = workflow.config.role_graph
     assert graph is not None
+    assert graph.roles["reviewer"].actor == "agent"
+    assert graph.roles["reviewer"].provider == "claude_code"
     assert graph.roles["verifier"].actor == "human"
     assert graph.roles["release"].actor == "human"
     assert graph.transitions["approved"].to_state == "ready_verify"

@@ -44,11 +44,13 @@ from symphony.evidence import (
     NO_PR_SENTINEL,
     OUTCOME_BLOCKED_OPERATOR_REQUIRED,
     OUTCOME_COMPLETED_NO_PR_DECLARED,
+    OUTCOME_COMPLETED_ROLE_OUTCOME,
     OUTCOME_COMPLETED_WITH_PR,
     OUTCOME_INCOMPLETE_NO_EVIDENCE,
     OUTCOME_INCOMPLETE_PERMISSION_DENIED,
     OUTCOME_RETRYABLE_FAILURE,
     OUTCOME_UNKNOWN,
+    ROLE_OUTCOME_SENTINEL,
     DetectorResult,
     EvidenceDetector,
     collect_recent_assistant_text,
@@ -222,6 +224,46 @@ def test_sentinel_regex_is_case_insensitive_and_strips_reason() -> None:
     m = NO_PR_SENTINEL.search("symphony-no-pr:   already merged elsewhere   \n")
     assert m is not None
     assert m.group("reason").strip() == "already merged elsewhere"
+
+
+def test_role_outcome_sentinel_drives_completed_role_outcome(tmp_path: Path) -> None:
+    detector = EvidenceDetector(_github(), client=_client_returning([]))
+    event = _last_event(
+        {
+            "result": (
+                "Reviewed the PR and left an approval.\n"
+                "Symphony-Role-Outcome: approved\n"
+            )
+        }
+    )
+
+    result = detector.detect(
+        issue=_issue(),
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=event,
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    assert result.task_outcome == OUTCOME_COMPLETED_ROLE_OUTCOME
+    assert result.role_outcome == "approved"
+    entries = [e for e in result.task_evidence if e["type"] == "role_outcome"]
+    assert entries == [
+        {
+            "type": "role_outcome",
+            "transition": "approved",
+            "marker_source": "assistant_message",
+        }
+    ]
+
+
+def test_role_outcome_regex_is_case_insensitive() -> None:
+    m = ROLE_OUTCOME_SENTINEL.search("symphony-role-outcome: changes_requested\n")
+    assert m is not None
+    assert m.group("transition") == "changes_requested"
 
 
 # -- COMPLETED + permission denied -----------------------------------------
@@ -530,6 +572,7 @@ def test_detector_result_to_terminal_fields_shape() -> None:
     assert set(fields.keys()) == {
         "task_outcome",
         "task_evidence",
+        "role_outcome",
         "no_pr_reason",
         "outcome_decided_by",
         "task_outcome_recorded_at",
