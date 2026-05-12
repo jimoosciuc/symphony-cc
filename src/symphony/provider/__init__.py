@@ -14,11 +14,13 @@ from symphony.provider.base import (
     Terminal,
 )
 from symphony.provider.claude_code import ClaudeCodeProvider
+from symphony.provider.codex import CodexProvider
 from symphony.provider.fake import FakeProvider, FakeTurnScript
 
 __all__ = [
     "AgentProviderProtocol",
     "ClaudeCodeProvider",
+    "CodexProvider",
     "FakeProvider",
     "FakeTurnScript",
     "ProviderError",

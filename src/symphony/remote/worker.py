@@ -493,9 +493,13 @@ def _ensure_hook_ok(result) -> None:
 
 
 def _default_provider_factory(config: WorkflowConfig) -> AgentProviderProtocol:
-    from symphony.provider import ClaudeCodeProvider
+    from symphony.provider import ClaudeCodeProvider, CodexProvider
 
-    return ClaudeCodeProvider()
+    if config.agent.provider == "claude_code":
+        return ClaudeCodeProvider()
+    if config.agent.provider == "codex":
+        return CodexProvider()
+    raise ValueError(f"unsupported provider {config.agent.provider!r}")
 
 
 def _validated_workspace_path(
