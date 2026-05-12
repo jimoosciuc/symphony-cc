@@ -304,6 +304,7 @@ def test_codex_command_uses_top_level_cd_and_resume(tmp_path: Path) -> None:
 
     assert cmd[:2] == ["codex", "-a"]
     assert "resume" in cmd
+    assert "--skip-git-repo-check" in cmd
     assert "thread-1" in cmd
     assert "-C" in cmd
     assert "--cd" not in cmd

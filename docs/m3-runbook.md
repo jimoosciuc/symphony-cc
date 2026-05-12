@@ -454,3 +454,25 @@ symphony recovery decisions:
 
 The on-disk session record is stamped terminal after each decision so a
 second `recover()` call is a no-op.
+
+## Opt-in Codex Provider Smoke
+
+Codex live validation is skipped by default so CI and normal local test
+runs do not require a Codex login. To validate the real Codex subprocess
+path on a machine with an authenticated `codex` CLI:
+
+```bash
+SYMPHONY_RUN_CODEX_INTEGRATION=1 \
+PYTHONPATH=src \
+pytest -m codex_live tests/test_codex_provider_live.py -q
+```
+
+Optional overrides:
+
+- `SYMPHONY_CODEX_BIN=/path/to/codex`
+- `SYMPHONY_CODEX_TEST_MODEL=gpt-5.3-codex`
+- `SYMPHONY_CODEX_TEST_PERMISSION_MODE=acceptEdits`
+
+The live test uses a temporary workspace and verifies one reply turn,
+one file write turn, and reuse of the Codex `thread_id` through
+`codex exec resume`.
