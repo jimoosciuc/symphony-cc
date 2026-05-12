@@ -110,6 +110,37 @@ def test_init_github_implementer_writes_loadable_workflow(
     assert "opened/updated a PR or explicitly" in prompt
 
 
+def test_init_github_implementer_can_generate_codex_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token_value_1234567890")
+    target = tmp_path / "WORKFLOW.md"
+
+    rc = main(
+        [
+            "init",
+            "github-implementer",
+            "--provider",
+            "codex",
+            "--repo",
+            "acme/proj",
+            "--output",
+            str(target),
+        ]
+    )
+
+    assert rc == 0
+    text = target.read_text(encoding="utf-8")
+    assert "provider: codex" in text
+    assert "codex:\n  model: gpt-5.3-codex" in text
+    assert "claude:" not in text
+    assert "Do not add Linear assumptions." in text
+    workflow = load_workflow(target)
+    assert workflow.config.agent.provider == "codex"
+    assert workflow.config.claude.model == "gpt-5.3-codex"
+
+
 def test_init_github_human_review_writes_role_workflow(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -133,6 +164,36 @@ def test_init_github_human_review_writes_role_workflow(
     assert graph.transitions["pr_delivered"].to_state == "ready_review"
     assert graph.transitions["approved"].to_state == "approved"
     assert "symphony-ready-impl" in target.read_text(encoding="utf-8")
+
+
+def test_init_github_human_review_can_generate_codex_role_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_token_value_1234567890")
+    target = tmp_path / "WORKFLOW.md"
+
+    rc = main(
+        [
+            "init",
+            "github-human-review",
+            "--provider",
+            "codex",
+            "--repo",
+            "acme/proj",
+            "--output",
+            str(target),
+        ]
+    )
+
+    assert rc == 0
+    workflow = load_workflow(target)
+    graph = workflow.config.role_graph
+    assert graph is not None
+    assert workflow.config.agent.provider == "codex"
+    assert graph.roles["implementer"].provider == "codex"
+    assert graph.roles["leader"].provider == "codex"
+    assert workflow.config.claude.model == "gpt-5.3-codex"
 
 
 def test_init_github_production_line_writes_extended_role_workflow(
