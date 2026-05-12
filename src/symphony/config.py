@@ -60,7 +60,6 @@ REQUIRED_SECTIONS: tuple[str, ...] = (
     "tracker",
     "agent",
     "workspace",
-    "claude",
     "github",
 )
 
@@ -668,8 +667,58 @@ def _build_claude(
     *,
     warnings: list[ConfigWarning],
 ) -> ClaudeConfig:
-    section = _require_section(raw, "claude")
-    location = "claude"
+    return _build_provider_runtime(
+        raw,
+        base_dir,
+        section_name="claude",
+        warnings=warnings,
+    )
+
+
+def _build_codex(
+    raw: dict[str, Any],
+    base_dir: Path,
+    *,
+    warnings: list[ConfigWarning],
+) -> ClaudeConfig:
+    if "codex" in raw:
+        return _build_provider_runtime(
+            raw,
+            base_dir,
+            section_name="codex",
+            warnings=warnings,
+        )
+    if "claude" in raw:
+        warnings.append(
+            ConfigWarning(
+                location="agent.provider",
+                message=(
+                    "agent.provider='codex' is using legacy claude: runtime settings; "
+                    "prefer a codex: section for new workflows"
+                ),
+            )
+        )
+        return _build_provider_runtime(
+            raw,
+            base_dir,
+            section_name="claude",
+            warnings=warnings,
+        )
+    raise ConfigError(
+        "(root)",
+        "missing required provider runtime section for agent.provider='codex': codex",
+    )
+
+
+def _build_provider_runtime(
+    raw: dict[str, Any],
+    base_dir: Path,
+    *,
+    section_name: str,
+    warnings: list[ConfigWarning],
+) -> ClaudeConfig:
+    section = _require_section(raw, section_name)
+    location = section_name
     model = _require_str(section, "model", location)
     permission_mode = _require_str(section, "permission_mode", location)
     # plan mode is rejected outright (no human-in-the-loop). Other unknown
@@ -694,9 +743,9 @@ def _build_claude(
             ConfigWarning(
                 location=f"{location}.permission_mode",
                 message=(
-                    f"{permission_mode!r} disables Claude's interactive permission "
-                    f"prompts; only enable in trusted local environments and review "
-                    f"the workspace contents before granting it"
+                    f"{permission_mode!r} disables the provider's interactive "
+                    f"permission prompts; only enable in trusted local environments "
+                    f"and review the workspace contents before granting it"
                 ),
             )
         )
@@ -724,6 +773,28 @@ def _build_claude(
             location=f"{location}.artifact_retention",
         ),
     )
+
+
+def _build_runtime_for_agent(
+    raw: dict[str, Any],
+    base_dir: Path,
+    agent: AgentConfig,
+    *,
+    warnings: list[ConfigWarning],
+) -> ClaudeConfig:
+    if agent.provider == "claude_code":
+        if "claude" not in raw:
+            raise ConfigError(
+                "(root)",
+                (
+                    "missing required provider runtime section for "
+                    "agent.provider='claude_code': claude"
+                ),
+            )
+        return _build_claude(raw, base_dir, warnings=warnings)
+    if agent.provider == "codex":
+        return _build_codex(raw, base_dir, warnings=warnings)
+    raise ConfigError("agent.provider", f"unsupported provider {agent.provider!r}")
 
 
 def _build_github(raw: dict[str, Any]) -> GitHubConfig:
@@ -1206,11 +1277,12 @@ def build_config(
         raise ConfigError("(root)", f"missing required sections: {', '.join(missing)}")
 
     warnings: list[ConfigWarning] = []
+    agent = _build_agent(raw)
     config = WorkflowConfig(
         tracker=_build_tracker(raw, env),
-        agent=_build_agent(raw),
+        agent=agent,
         workspace=_build_workspace(raw, base_dir),
-        claude=_build_claude(raw, base_dir, warnings=warnings),
+        claude=_build_runtime_for_agent(raw, base_dir, agent, warnings=warnings),
         github=_build_github(raw),
         security=_build_security(raw),
         polling=_build_polling(raw),
