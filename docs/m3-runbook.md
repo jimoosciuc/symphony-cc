@@ -476,3 +476,20 @@ Optional overrides:
 The live test uses a temporary workspace and verifies one reply turn,
 one file write turn, and reuse of the Codex `thread_id` through
 `codex exec resume`.
+
+## Provider Runtime Sections
+
+Workflow provider selection is driven by `agent.provider`:
+
+- `agent.provider: claude_code` requires a top-level `claude:` runtime
+  section.
+- `agent.provider: codex` prefers a top-level `codex:` runtime section.
+- For compatibility with early Codex workflows, `agent.provider: codex`
+  can still read the legacy `claude:` runtime section when `codex:` is
+  absent, but Symphony emits a config warning. New workflows should use
+  `codex:`.
+
+Both runtime sections currently use the same field names: `model`,
+`permission_mode`, `session_store`, `transcript_store`, `artifact_store`,
+`turn_timeout_ms`, `stall_timeout_ms`, `read_timeout_ms`, and
+`retry_resume_policy`.

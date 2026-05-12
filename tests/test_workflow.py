@@ -123,9 +123,9 @@ def test_missing_required_sections_lists_all_at_once() -> None:
         load_workflow(FIXTURES / "missing_sections.md", env={"GITHUB_TOKEN": "x"})
     assert excinfo.value.location == "(root)"
     msg = str(excinfo.value)
-    # The fixture only provides `agent`; the other four required sections
+    # The fixture only provides `agent`; the other base required sections
     # should all be reported in a single message.
-    for section in ("tracker", "workspace", "claude", "github"):
+    for section in ("tracker", "workspace", "github"):
         assert section in msg
 
 
@@ -620,6 +620,58 @@ def test_agent_provider_allows_claude_code_and_codex() -> None:
     raw["agent"]["provider"] = "codex"
     cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
     assert cfg.agent.provider == "codex"
+
+
+def test_codex_provider_can_use_codex_runtime_section() -> None:
+    raw = _minimal_raw()
+    raw["agent"]["provider"] = "codex"
+    raw.pop("claude")
+    raw["codex"] = {
+        "model": "gpt-5.3-codex",
+        "permission_mode": "acceptEdits",
+        "session_store": "codex-sessions",
+        "transcript_store": "codex-transcripts",
+        "artifact_store": "codex-artifacts",
+    }
+
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert cfg.agent.provider == "codex"
+    assert cfg.claude.model == "gpt-5.3-codex"
+    assert cfg.claude.session_store == Path("/tmp/codex-sessions").resolve()
+
+
+def test_codex_provider_legacy_claude_runtime_section_warns() -> None:
+    raw = _minimal_raw()
+    raw["agent"]["provider"] = "codex"
+
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert cfg.claude.model == "claude-opus-4-7"
+    assert any("legacy claude" in warning.message for warning in cfg.warnings)
+
+
+def test_codex_provider_requires_runtime_section() -> None:
+    raw = _minimal_raw()
+    raw["agent"]["provider"] = "codex"
+    raw.pop("claude")
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "(root)"
+    assert "codex" in str(excinfo.value)
+
+
+def test_claude_provider_still_requires_claude_runtime_section() -> None:
+    raw = _minimal_raw()
+    raw.pop("claude")
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "(root)"
+    assert "claude" in str(excinfo.value)
 
 
 def test_agent_provider_rejects_unknown_provider() -> None:
