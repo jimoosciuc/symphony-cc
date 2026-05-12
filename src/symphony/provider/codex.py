@@ -115,6 +115,7 @@ class CodexProvider:
         runner = self._runner or self._run_codex
         result = await runner(session, message, state.config, session.provider_session_id)
         saw_terminal = False
+        state.action_denials.clear()
 
         for line in result.malformed_lines or []:
             yield _envelope(
@@ -122,6 +123,22 @@ class CodexProvider:
                 session=session,
                 payload={"reason": "invalid codex jsonl", "line": line},
             )
+        if result.malformed_lines:
+            yield _envelope(
+                event="turn_failed",
+                session=session,
+                payload={
+                    "subtype": "malformed_jsonl",
+                    "error": "codex emitted malformed JSONL",
+                    "stderr": _diagnostic_text(result.stderr),
+                    "last_message": result.last_message,
+                },
+            )
+            session.turn_count += 1
+            return
+
+        for denial in _detect_action_denials(result.last_message, source="last_message"):
+            state.add_action_denial(denial)
 
         for raw in result.events:
             for event in _normalize_raw_event(
@@ -130,10 +147,29 @@ class CodexProvider:
                 state=state,
                 stderr=result.stderr,
             ):
+                if result.returncode != 0 and event.event == "turn_completed":
+                    event = AgentEvent(
+                        event="turn_failed",
+                        timestamp=event.timestamp,
+                        session_id=event.session_id,
+                        provider=event.provider,
+                        issue_identifier=event.issue_identifier,
+                        attempt=event.attempt,
+                        payload={
+                            **event.payload,
+                            "subtype": "codex_exit_nonzero",
+                            "error": f"codex exited with {result.returncode}",
+                            "returncode": result.returncode,
+                            "stderr": _diagnostic_text(result.stderr),
+                            "last_message": result.last_message,
+                        },
+                        provider_session_id=event.provider_session_id,
+                    )
                 yield event
                 if event.event in {"turn_completed", "turn_failed", "turn_cancelled"}:
                     saw_terminal = True
                     session.turn_count += 1
+                    return
 
         if result.returncode != 0:
             if not saw_terminal:
@@ -142,7 +178,7 @@ class CodexProvider:
                     session=session,
                     payload={
                         "returncode": result.returncode,
-                        "stderr": result.stderr,
+                        "stderr": _diagnostic_text(result.stderr),
                         "last_message": result.last_message,
                     },
                 )
@@ -155,7 +191,7 @@ class CodexProvider:
                 session=session,
                 payload={
                     "reason": "codex process exited without terminal event",
-                    "stderr": result.stderr,
+                    "stderr": _diagnostic_text(result.stderr),
                     "last_message": result.last_message,
                 },
             )
@@ -260,13 +296,22 @@ class CodexProvider:
 
 
 class _CodexSessionState:
-    __slots__ = ("closed", "config", "mode", "saw_first_event")
+    __slots__ = ("action_denials", "closed", "config", "mode", "saw_first_event")
 
     def __init__(self, *, config: ClaudeConfig, mode: str = "start_session") -> None:
+        self.action_denials: list[dict[str, Any]] = []
         self.closed = False
         self.config = config
         self.mode = mode
         self.saw_first_event = False
+
+    def add_action_denial(self, denial: dict[str, Any]) -> None:
+        key = (denial.get("reason"), denial.get("excerpt"))
+        existing = {
+            (item.get("reason"), item.get("excerpt")) for item in self.action_denials
+        }
+        if key not in existing:
+            self.action_denials.append(denial)
 
 
 def _build_codex_command(
@@ -360,6 +405,8 @@ def _normalize_raw_event(
             ]
         if item_type == "agent_message" and event_type == "item.completed":
             text = str(item.get("text") or "")
+            for denial in _detect_action_denials(text, source="agent_message"):
+                state.add_action_denial(denial)
             return [
                 _envelope(event="message_delta", session=session, payload={"text": text}),
                 _envelope(event="message_completed", session=session, payload={"text": text}),
@@ -373,9 +420,32 @@ def _normalize_raw_event(
         ]
 
     if event_type == "turn.completed":
+        if not session.provider_session_id:
+            return [
+                _envelope(
+                    event="malformed",
+                    session=session,
+                    payload={"reason": "missing codex thread.started before terminal event"},
+                ),
+                _envelope(
+                    event="turn_failed",
+                    session=session,
+                    payload={
+                        "subtype": "missing_thread_started",
+                        "error": "codex completed without thread.started",
+                        "stderr": _diagnostic_text(stderr),
+                    },
+                ),
+            ]
         payload = {"usage": raw.get("usage")}
         if stderr:
-            payload["stderr"] = stderr
+            payload["stderr"] = _diagnostic_text(stderr)
+        if state.action_denials:
+            payload["permission_denials"] = list(state.action_denials)
+            payload["codex_warnings"] = {
+                "action_denial_count": len(state.action_denials),
+                "reason": "codex reported that a requested action was blocked or denied",
+            }
         out = []
         if raw.get("usage") is not None:
             out.append(
@@ -389,11 +459,58 @@ def _normalize_raw_event(
             _envelope(
                 event="turn_failed",
                 session=session,
-                payload={"raw": raw, "stderr": stderr},
+                payload={"raw": raw, "stderr": _diagnostic_text(stderr)},
             )
         ]
 
     return [_envelope(event="malformed", session=session, payload={"raw": raw})]
+
+
+_ACTION_DENIAL_PATTERNS: tuple[str, ...] = (
+    "operation not permitted",
+    "permission denied",
+    "read-only",
+    "read only",
+    "write was blocked",
+    "blocked by the sandbox",
+    "sandbox blocked",
+    "couldn't create",
+    "couldn’t create",
+    "could not create",
+    "couldn't write",
+    "couldn’t write",
+    "could not write",
+    "failed to write",
+    "not allowed to write",
+)
+
+
+def _detect_action_denials(text: str | None, *, source: str) -> list[dict[str, Any]]:
+    if not text:
+        return []
+    lowered = text.lower()
+    matched = [pattern for pattern in _ACTION_DENIAL_PATTERNS if pattern in lowered]
+    if not matched:
+        return []
+    excerpt = " ".join(text.split())
+    return [
+        {
+            "provider": "codex",
+            "source": source,
+            "reason": "action_denied",
+            "matched_patterns": matched,
+            "excerpt": excerpt[:500],
+        }
+    ]
+
+
+def _diagnostic_text(text: str | None, *, limit: int = 2_000) -> str:
+    if not text:
+        return ""
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit]}... [truncated; full stderr is in codex-stderr.txt]"
 
 
 def _envelope(*, event: str, session: SessionRecord, payload: dict[str, Any]) -> AgentEvent:
