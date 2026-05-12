@@ -615,9 +615,16 @@ def test_tracker_kind_must_be_github() -> None:
     assert excinfo.value.location == "tracker.kind"
 
 
-def test_agent_provider_must_be_claude_code() -> None:
+def test_agent_provider_allows_claude_code_and_codex() -> None:
     raw = _minimal_raw()
     raw["agent"]["provider"] = "codex"
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+    assert cfg.agent.provider == "codex"
+
+
+def test_agent_provider_rejects_unknown_provider() -> None:
+    raw = _minimal_raw()
+    raw["agent"]["provider"] = "unknown"
     with pytest.raises(ConfigError) as excinfo:
         build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
     assert excinfo.value.location == "agent.provider"

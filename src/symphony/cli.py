@@ -236,7 +236,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from symphony.dashboard_server import DashboardServer
     from symphony.github import GitHubTracker
     from symphony.orchestrator import Orchestrator
-    from symphony.provider import ClaudeCodeProvider
+    from symphony.provider import ClaudeCodeProvider, CodexProvider
     from symphony.remote.dispatcher import build_ssh_remote_issue_dispatcher
     from symphony.workflow import WorkflowError, load_workflow
     from symphony.workflow_reload import WorkflowReloader
@@ -264,7 +264,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
 
     tracker = GitHubTracker(config.tracker, config.github)
-    provider = ClaudeCodeProvider(tool_registry=_build_tool_registry(config, tracker))
+    if config.agent.provider == "claude_code":
+        provider = ClaudeCodeProvider(tool_registry=_build_tool_registry(config, tracker))
+    elif config.agent.provider == "codex":
+        provider = CodexProvider()
+    else:  # Defensive; config validation rejects this before runtime.
+        raise AssertionError(f"unsupported provider {config.agent.provider!r}")
     workspace_mgr = WorkspaceManager(
         config.workspace,
         populator=_build_workspace_populator(config),

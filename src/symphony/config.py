@@ -100,6 +100,8 @@ ALLOWED_TRANSITION_REQUIREMENTS: frozenset[str] = frozenset(
     }
 )
 
+ALLOWED_AGENT_PROVIDERS: frozenset[str] = frozenset({"claude_code", "codex"})
+
 
 # -- Section dataclasses -------------------------------------------------------
 
@@ -515,8 +517,11 @@ def _build_agent(raw: dict[str, Any]) -> AgentConfig:
     section = _require_section(raw, "agent")
     location = "agent"
     provider = _require_str(section, "provider", location)
-    if provider != "claude_code":
-        raise ConfigError(f"{location}.provider", f"must be 'claude_code' (got {provider!r})")
+    if provider not in ALLOWED_AGENT_PROVIDERS:
+        raise ConfigError(
+            f"{location}.provider",
+            f"must be one of {sorted(ALLOWED_AGENT_PROVIDERS)} (got {provider!r})",
+        )
     max_concurrency = _opt_int(section, "max_concurrency", location, default=1)
     if max_concurrency < 1:
         raise ConfigError(f"{location}.max_concurrency", "must be >= 1")
