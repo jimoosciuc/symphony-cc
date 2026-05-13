@@ -456,12 +456,21 @@ def _normalize_raw_event(
         out.append(_envelope(event="turn_completed", session=session, payload=payload))
         return out
 
-    if event_type in {"turn.failed", "error"}:
+    if event_type == "turn.failed":
         return [
             _envelope(
                 event="turn_failed",
                 session=session,
                 payload={"raw": raw, "stderr": _diagnostic_text(stderr)},
+            )
+        ]
+
+    if event_type == "error":
+        return [
+            _envelope(
+                event="heartbeat",
+                session=session,
+                payload={"kind": "error", "raw": raw, "stderr": _diagnostic_text(stderr)},
             )
         ]
 

@@ -141,6 +141,7 @@ def test_dashboard_renders_core_operator_states() -> None:
     assert "Working on PR checks" in html
     assert "tool_started: Bash" in html
     assert "session-row" in html
+    assert 'class="table-wrap"' in html
     assert "Session Signal" not in html
     assert 'colspan="9"' in html
     assert "Waiting Role Gates" in html
