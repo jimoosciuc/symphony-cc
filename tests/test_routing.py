@@ -245,12 +245,15 @@ class _StubDetector:
         evidence: list | None = None,
         role_outcome: str | None = None,
         no_pr_reason: str | None = None,
+        preflight: DetectorResult | None = None,
     ) -> None:
         self._outcome = outcome
         self._evidence = list(evidence or [])
         self._role_outcome = role_outcome
         self._no_pr_reason = no_pr_reason
+        self._preflight = preflight
         self.calls: list[dict] = []
+        self.preflight_calls: list[Issue] = []
 
     def detect(self, **kwargs) -> DetectorResult:
         self.calls.append(kwargs)
@@ -261,6 +264,10 @@ class _StubDetector:
             no_pr_reason=self._no_pr_reason,
             outcome_decided_by=DECIDED_BY_DETECTOR,
         )
+
+    def detect_preflight_approved_review(self, *, issue: Issue) -> DetectorResult | None:
+        self.preflight_calls.append(issue)
+        return self._preflight
 
 
 def _make_orch(
@@ -847,6 +854,90 @@ async def test_role_graph_reviewer_approval_requires_merged_pr(
     assert transition["error"]["code"] == "missing_evidence"
     assert transition["fallback"] == "needs_leader"
     assert transition["applied"] == "needs_leader"
+
+
+async def test_role_graph_preflight_approval_skips_reviewer_provider(
+    tmp_path: Path,
+) -> None:
+    graph = _role_graph()
+    graph.roles["reviewer"] = replace(graph.roles["reviewer"], actor="agent")
+    graph.transitions["approved"] = RoleTransitionConfig(
+        name="approved",
+        role="reviewer",
+        from_states=("reviewing",),
+        to_state="done",
+        requires=("pr_approval", "pr_merged"),
+    )
+    cfg = replace(_config(tmp_path), role_graph=graph)
+    tracker = FakeGitHubTracker(issues=[_review_issue()], ready_label="")
+    provider = FakeProvider()
+    detector = _StubDetector(
+        OUTCOME_UNKNOWN,
+        preflight=DetectorResult(
+            task_outcome=OUTCOME_COMPLETED_ROLE_OUTCOME,
+            task_evidence=[
+                {
+                    "type": "role_outcome",
+                    "transition": "approved",
+                    "marker_source": "preflight_evidence",
+                },
+                {
+                    "type": "pr_linked",
+                    "number": 7,
+                    "url": "https://github.com/acme/proj/pull/7",
+                },
+                {
+                    "type": "review_approval_comment",
+                    "number": 7,
+                    "url": "https://github.com/acme/proj/pull/7#approval",
+                },
+                {
+                    "type": "pr_review_threads",
+                    "number": 7,
+                    "unresolved_unaddressed_count": 0,
+                    "unresolved_current_count": 0,
+                },
+                {
+                    "type": "review_checklist",
+                    "number": 7,
+                    "passed": True,
+                    "has_spec_compliance": True,
+                    "has_issue_fit": True,
+                    "has_existing_design_fit": True,
+                    "has_tests": True,
+                    "has_review_threads": True,
+                },
+                {
+                    "type": "pr_merged",
+                    "number": 7,
+                    "url": "https://github.com/acme/proj/pull/7",
+                },
+            ],
+            role_outcome="approved",
+            outcome_decided_by=DECIDED_BY_DETECTOR,
+        ),
+    )
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=provider,
+        workspace_manager=WorkspaceManager(cfg.workspace),
+        evidence_detector=detector,
+    )
+
+    result = await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert result.finished == ["acme/proj#1"]
+    assert provider.calls == []
+    assert detector.calls == []
+    assert len(detector.preflight_calls) == 1
+    assert "symphony-done" in state.issue.labels
+    assert "symphony-reviewing" not in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["preflight"] is True
+    assert transition["requested"] == "approved"
+    assert transition["applied"] == "approved"
 
 
 async def test_role_graph_reviewer_approval_with_failing_checklist_requests_changes(

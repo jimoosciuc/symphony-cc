@@ -936,6 +936,14 @@ class Orchestrator:
                     continue
                 dispatch_issue = _issue_after_transition(issue, role_claim_plan)
                 claim = ClaimResult(ok=True, reason=transition_result.reason)
+                if self._try_preflight_role_transition(
+                    dispatch_issue,
+                    role_resolution=role_resolution,
+                    role_claim_plan=role_claim_plan,
+                    result=result,
+                ):
+                    slots_open -= 1
+                    continue
             else:
                 try:
                     claim = self.tracker.claim_issue(issue, run_metadata)
@@ -997,6 +1005,117 @@ class Orchestrator:
 
         if local_runs:
             await asyncio.gather(*local_runs)
+
+    def _try_preflight_role_transition(
+        self,
+        issue: Issue,
+        *,
+        role_resolution: StateResolution | None,
+        role_claim_plan: TransitionPlan,
+        result: TickResult,
+    ) -> bool:
+        graph = self.config.role_graph
+        role = role_resolution.dispatch_role if role_resolution is not None else None
+        if graph is None or role is None or role_claim_plan.to_state.name != "reviewing":
+            return False
+        transition = graph.transitions.get("approved")
+        if transition is None or transition.role != role.name:
+            return False
+
+        detector = getattr(self._evidence, "detect_preflight_approved_review", None)
+        if detector is None:
+            return False
+        detector_result = detector(issue=issue)
+        if detector_result is None:
+            return False
+        if not (
+            _task_evidence_has(detector_result, "pr_merged")
+            and _has_verified_pr_approval(detector_result)
+        ):
+            return False
+
+        evidence = _transition_evidence_for_outcome(
+            detector_result,
+            transition_name="approved",
+            should_block=False,
+        )
+        planned = plan_transition(
+            graph,
+            role_name=role.name,
+            transition_name="approved",
+            from_state_name=role_claim_plan.to_state.name,
+            evidence=evidence,
+        )
+        if isinstance(planned, TransitionError):
+            return False
+
+        route = {
+            "mode": "role_graph",
+            "role": role.name,
+            "from_state": role_claim_plan.to_state.name,
+            "task_outcome": detector_result.task_outcome,
+            "requested": "approved",
+            "applied": None,
+            "to_state": None,
+            "fallback": None,
+            "error": None,
+            "preflight": True,
+        }
+        try:
+            transition_result = self.tracker.apply_transition_plan(
+                issue,
+                planned,
+                evidence_summary=_transition_evidence_summary(
+                    detector_result,
+                    block_reason=None,
+                    outcome_reason="preflight_evidence",
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - preflight must not block normal review
+            _LOG.warning("preflight role transition failed for %s: %s", issue.identifier, exc)
+            return False
+        if not transition_result.ok:
+            return False
+
+        route["applied"] = planned.transition.name
+        route["to_state"] = planned.to_state.name
+        self.recent_finished.append(
+            {
+                "issue_identifier": issue.identifier,
+                "issue_url": issue.url,
+                "artifact_dir": None,
+                "session_id": None,
+                "provider_session_id": None,
+                "attempt": 0,
+                "lane": None,
+                "role": role.name,
+                "role_state": planned.to_state.name,
+                "role_actor": planned.next_actor,
+                "gate_owner": planned.gate_owner,
+                "role_transition": route,
+                "security_profile": self.config.security.profile,
+                "terminal_state": "completed",
+                "task_outcome": detector_result.task_outcome,
+                "outcome_decided_by": detector_result.outcome_decided_by,
+                "task_evidence": detector_result.task_evidence,
+                "no_pr_reason": detector_result.no_pr_reason,
+                "permission_denials_count": 0,
+                "last_event_at": None,
+                "last_event": None,
+                "recent_events": [],
+                "error": None,
+                "usage": None,
+            }
+        )
+        del self.recent_finished[:-50]
+        result.finished.append(issue.identifier)
+        _LOG.info(
+            "preflight role transition applied for %s: %s -> %s",
+            issue.identifier,
+            role_claim_plan.to_state.name,
+            planned.to_state.name,
+        )
+        return True
 
     def _role_enabled_for_agent(self, resolution: StateResolution) -> bool:
         enabled_roles = self.config.agent.roles
