@@ -2444,6 +2444,8 @@ def _role_outcome_evidence_for_transition(
         evidence = ["review_comment"]
         if _has_verified_pr_approval(detector_result):
             evidence.append("pr_approval")
+        if _task_evidence_has(detector_result, "pr_merged"):
+            evidence.append("pr_merged")
         return tuple(evidence)
     if transition_name == "changes_requested":
         return ("review_comment",)

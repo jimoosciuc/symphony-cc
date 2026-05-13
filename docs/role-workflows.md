@@ -242,7 +242,7 @@ roles:
       approved:
         from: reviewing
         to: approved
-        requires: pr_approval
+        requires: [pr_approval, pr_merged]
       needs_leader:
         from: reviewing
         to: needs_leader

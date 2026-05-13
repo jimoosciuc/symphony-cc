@@ -244,26 +244,43 @@ class EvidenceDetector:
         # final decision below can return ``unknown`` rather than block.
         pr_query_ran = prs is not None
         for pr in prs or []:
-            evidence.append(
-                {
-                    "type": "pr_linked",
-                    "url": pr.url,
-                    "number": pr.number,
-                    "state": pr.state,
-                    "head_ref": pr.head_ref,
-                    # We can't tell from a single read whether THIS run
-                    # created the PR vs. updated it; conservative
-                    # default is False (the run linked an existing PR).
-                    # M5.3 may tighten this by comparing against the
-                    # prior tick's PR snapshot.
-                    "created": False,
-                }
-            )
+            evidence.append(_pr_linked_evidence(pr))
         if prs:
             evidence.extend(self._detect_pull_request_review_gates(issue, prs))
 
         # 2. Role outcome sentinel (assistant text + last event payload).
         role_outcome = self._detect_role_outcome_sentinel(last_event, recent_assistant_text)
+        if role_outcome == "approved":
+            review_prs = self._detect_pull_requests(issue, state="all")
+            if review_prs:
+                existing_pr_numbers = {
+                    int(entry.get("number") or 0)
+                    for entry in evidence
+                    if entry.get("type") == "pr_linked"
+                }
+                for pr in review_prs:
+                    if pr.number not in existing_pr_numbers:
+                        evidence.append(_pr_linked_evidence(pr))
+                existing_gate_numbers = {
+                    int(entry.get("number") or 0)
+                    for entry in evidence
+                    if entry.get("type")
+                    in {
+                        "pr_review_state",
+                        "pr_review_threads",
+                        "review_approval_label",
+                        "review_approval_comment",
+                        "review_checklist",
+                    }
+                }
+                missing_gate_prs = [
+                    pr for pr in review_prs if pr.number not in existing_gate_numbers
+                ]
+                if missing_gate_prs:
+                    evidence.extend(
+                        self._detect_pull_request_review_gates(issue, missing_gate_prs)
+                    )
+                evidence.extend(_pr_merged_evidence(pr) for pr in review_prs if _pr_is_merged(pr))
         if role_outcome is not None:
             evidence.append(
                 {
@@ -414,7 +431,12 @@ class EvidenceDetector:
             outcome_decided_by=DECIDED_BY_DERIVATION,
         )
 
-    def _detect_pull_requests(self, issue: Issue) -> list[PullRequest] | None:
+    def _detect_pull_requests(
+        self,
+        issue: Issue,
+        *,
+        state: str = "open",
+    ) -> list[PullRequest] | None:
         """Read-side PR lookup.
 
         Returns:
@@ -441,7 +463,12 @@ class EvidenceDetector:
         if self._client is None:
             return None
         try:
-            return find_linked_pull_requests(self._client, issue, self._github)
+            return find_linked_pull_requests(
+                self._client,
+                issue,
+                self._github,
+                state=state,
+            )
         except GitHubError as exc:
             # Detector failures should NOT crash the worker finally
             # block AND must NOT be conflated with verified absence
@@ -998,6 +1025,35 @@ def _design_checklist_evidence_from_comments(
             )
             evidence.append(entry)
     return evidence
+
+
+def _pr_linked_evidence(pr: PullRequest) -> dict[str, Any]:
+    return {
+        "type": "pr_linked",
+        "url": pr.url,
+        "number": pr.number,
+        "state": pr.state,
+        "head_ref": pr.head_ref,
+        # We can't tell from a single read whether THIS run created the PR
+        # vs. updated it; conservative default is False.
+        "created": False,
+    }
+
+
+def _pr_merged_evidence(pr: PullRequest) -> dict[str, Any]:
+    raw = pr.raw if isinstance(pr.raw, dict) else {}
+    return {
+        "type": "pr_merged",
+        "url": pr.url,
+        "number": pr.number,
+        "merged_at": raw.get("merged_at"),
+        "head_ref": pr.head_ref,
+    }
+
+
+def _pr_is_merged(pr: PullRequest) -> bool:
+    raw = pr.raw if isinstance(pr.raw, dict) else {}
+    return bool(raw.get("merged_at"))
 
 
 def _comment_created_at_or_min(comment: dict[str, Any]) -> datetime:
