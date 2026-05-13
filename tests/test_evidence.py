@@ -30,6 +30,7 @@ table coverage):
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -80,7 +81,13 @@ def _github(base_branch: str = "main", branch_prefix: str = "symphony") -> GitHu
     return GitHubConfig(branch_prefix=branch_prefix, base_branch=base_branch)
 
 
-def _fake_pr_payload(*, number: int = 99, url: str | None = None, head_ref: str) -> dict[str, Any]:
+def _fake_pr_payload(
+    *,
+    number: int = 99,
+    url: str | None = None,
+    head_ref: str,
+    author: str = "symphony-bot",
+) -> dict[str, Any]:
     return {
         "node_id": f"PR_kgD{number}",
         "id": number,
@@ -88,6 +95,7 @@ def _fake_pr_payload(*, number: int = 99, url: str | None = None, head_ref: str)
         "title": "wip: fix from symphony",
         "html_url": url or f"https://github.com/acme/proj/pull/{number}",
         "state": "open",
+        "user": {"login": author},
         "head": {"ref": head_ref, "repo": {"owner": {"login": "acme"}, "name": "proj"}},
         "base": {"ref": "main", "repo": {"default_branch": "main"}},
         "draft": True,
@@ -123,6 +131,43 @@ def _client_head_empty_fallback_returning(prs: list[dict[str, Any]]) -> GitHubCl
             if request.url.params.get("head"):
                 return httpx.Response(200, json=[])
             return httpx.Response(200, json=prs)
+        return httpx.Response(404, json={"message": "not found"})
+
+    return GitHubClient("ghp_test_xxxx", transport=httpx.MockTransport(handler))
+
+
+def _client_with_review_gate(
+    *,
+    pr: dict[str, Any],
+    reviews: list[dict[str, Any]],
+    threads: list[dict[str, Any]],
+    issue_comments: list[dict[str, Any]] | None = None,
+    pr_comments: list[dict[str, Any]] | None = None,
+) -> GitHubClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/pulls"):
+            return httpx.Response(200, json=[pr])
+        if request.url.path.endswith(f"/pulls/{pr['number']}/reviews"):
+            return httpx.Response(200, json=reviews)
+        if request.url.path.endswith("/issues/1/comments"):
+            return httpx.Response(200, json=list(issue_comments or []))
+        if request.url.path.endswith(f"/issues/{pr['number']}/comments"):
+            return httpx.Response(200, json=list(pr_comments or []))
+        if request.url.path.endswith("/graphql"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": threads,
+                                }
+                            }
+                        }
+                    }
+                },
+            )
         return httpx.Response(404, json={"message": "not found"})
 
     return GitHubClient("ghp_test_xxxx", transport=httpx.MockTransport(handler))
@@ -172,6 +217,129 @@ def test_completed_with_pr(tmp_path: Path) -> None:
     # Conservative default: detector cannot tell created vs. updated
     # from a single read; M5.3 may tighten by snapshot diffing.
     assert pr_entries[0]["created"] is False
+
+
+def test_completed_with_pr_collects_review_gate_evidence(tmp_path: Path) -> None:
+    issue = _issue()
+    github = _github()
+    pr = _fake_pr_payload(
+        number=42,
+        head_ref="symphony/acme-proj-1",
+        author="symphony-bot",
+    )
+    client = _client_with_review_gate(
+        pr=pr,
+        reviews=[
+            {
+                "state": "APPROVED",
+                "submitted_at": "2026-05-13T09:00:00Z",
+                "user": {"login": "maintainer"},
+            },
+            {
+                "state": "COMMENTED",
+                "submitted_at": "2026-05-13T08:00:00Z",
+                "user": {"login": "symphony-bot"},
+            },
+        ],
+        threads=[
+            {
+                "isResolved": False,
+                "isOutdated": False,
+                "path": "pkg/a.go",
+                "line": 12,
+                "comments": {
+                    "nodes": [
+                        {
+                            "url": "https://github.com/acme/proj/pull/42#discussion_r1",
+                            "author": {"login": "gemini-code-assist"},
+                            "body": "please fix this",
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+    detector = EvidenceDetector(github, client=client)
+
+    result = detector.detect(
+        issue=issue,
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=_last_event({"result": "all done"}),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    review_state = [e for e in result.task_evidence if e["type"] == "pr_review_state"]
+    assert review_state == [
+        {
+            "type": "pr_review_state",
+            "number": 42,
+            "url": "https://github.com/acme/proj/pull/42",
+            "pr_author": "symphony-bot",
+            "approved_by": ["maintainer"],
+            "independent_approved_by": ["maintainer"],
+            "changes_requested_by": [],
+            "commented_by": ["symphony-bot"],
+            "has_independent_approval": True,
+        }
+    ]
+    review_threads = [e for e in result.task_evidence if e["type"] == "pr_review_threads"]
+    assert review_threads[0]["unresolved_current_count"] == 1
+    assert review_threads[0]["examples"][0]["url"].endswith("#discussion_r1")
+
+
+def test_completed_with_pr_collects_review_approval_override_evidence(
+    tmp_path: Path,
+) -> None:
+    issue = replace(_issue(), labels=("symphony-reviewing", "symphony-review-approved"))
+    github = _github()
+    pr = _fake_pr_payload(
+        number=42,
+        head_ref="symphony/acme-proj-1",
+        author="symphony-bot",
+    )
+    client = _client_with_review_gate(
+        pr=pr,
+        reviews=[],
+        threads=[],
+        pr_comments=[
+            {
+                "id": 1,
+                "html_url": "https://github.com/acme/proj/pull/42#issuecomment-1",
+                "body": "Symphony-Review-Approval: approved",
+                "user": {"login": "jimoosciuc"},
+            }
+        ],
+    )
+    detector = EvidenceDetector(github, client=client)
+
+    result = detector.detect(
+        issue=issue,
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=_last_event({"result": "all done"}),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    assert any(e["type"] == "review_approval_label" for e in result.task_evidence)
+    approval_comments = [
+        e for e in result.task_evidence if e["type"] == "review_approval_comment"
+    ]
+    assert approval_comments == [
+        {
+            "type": "review_approval_comment",
+            "number": 42,
+            "surface": "pull_request",
+            "url": "https://github.com/acme/proj/pull/42#issuecomment-1",
+            "author": "jimoosciuc",
+        }
+    ]
 
 
 # -- COMPLETED + no-PR sentinel ---------------------------------------------

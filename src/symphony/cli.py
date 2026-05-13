@@ -400,6 +400,11 @@ STANDARD_LABELS: dict[str, dict[str, str]] = {
         "color": "0e8a16",
         "description": "Review approved",
     },
+    "symphony-review-approved": {
+        "name": "symphony-review-approved",
+        "color": "0e8a16",
+        "description": "Non-state review approval evidence for same-account agents",
+    },
     "symphony-ready-verify": {
         "name": "symphony-ready-verify",
         "color": "1d76db",
@@ -767,6 +772,14 @@ Rules:
 - Open or update one pull request against `main` and include
   `Closes {{{{ issue.identifier }}}}` in the PR body.
 - Use GitHub issue or PR comments for review responses, clarification, and audit trails.
+- When addressing PR review feedback, reply in the relevant PR review thread
+  or otherwise leave a precise PR comment that names the addressed feedback.
+  A generic status comment is not enough.
+- Reviewer approval requires a real GitHub PR approval review and no unresolved
+  current PR review threads. If all roles share one GitHub identity and native
+  approval is impossible, use `Symphony-Review-Approval: approved` in a precise
+  issue/PR comment or the non-state `symphony-review-approved` label; unresolved
+  current PR review threads still block approval.
 - Run relevant tests/checks when feasible and summarize them in the PR.
 - Do not edit Symphony state labels yourself; Symphony applies role-state
   transitions after validating your evidence.
