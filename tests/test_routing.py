@@ -988,6 +988,55 @@ async def test_role_graph_reviewer_cannot_request_foreign_role_outcome(
     assert transition["applied"] == "needs_leader"
 
 
+async def test_role_graph_leader_decision_to_impl_requires_passing_design_checklist(
+    tmp_path: Path,
+) -> None:
+    graph = _role_graph()
+    graph.transitions["decision_to_impl"] = RoleTransitionConfig(
+        name="decision_to_impl",
+        role="leader",
+        from_states=("leader_reviewing",),
+        to_state="ready_impl",
+        requires=("design_checklist",),
+    )
+    graph.roles["leader"] = replace(graph.roles["leader"], actor="agent")
+    graph.roles["leader"] = replace(
+        graph.roles["leader"],
+        can_claim=("needs_design", "blocked_operator"),
+    )
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "decision_to_impl",
+                "marker_source": "assistant_message",
+            },
+            {
+                "type": "design_checklist",
+                "passed": False,
+                "has_problem_framing": True,
+                "has_existing_mechanism_fit": False,
+            },
+        ],
+        role_outcome="decision_to_impl",
+        issue=replace(_issue(), labels=("symphony-needs-design",)),
+        reviewer_actor="agent",
+    )
+    orch.config = replace(orch.config, role_graph=graph)
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-ready-impl" not in state.issue.labels
+    assert "symphony-needs-design" in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "decision_to_impl"
+    assert transition["error"]["code"] == "missing_evidence"
+    assert transition["fallback"] == "release:leader:design_gate_incomplete"
+
+
 async def test_role_graph_incomplete_permission_denied_routes_to_operator_gate(
     tmp_path: Path,
 ) -> None:

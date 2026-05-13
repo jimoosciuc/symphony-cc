@@ -42,7 +42,10 @@ def build_status_snapshot(orchestrator: Any) -> dict[str, Any]:
         "retry_queue": [
             _retry_status(retry) for retry in orchestrator.retry_states.values()
         ],
-        "recent_finished": list(getattr(orchestrator, "recent_finished", [])),
+        "recent_finished": [
+            _enrich_with_provider_timeline(dict(item))
+            for item in getattr(orchestrator, "recent_finished", [])
+        ],
         "recovery_decisions": [
             decision.to_json()
             for decision in getattr(orchestrator, "recovery_decisions", [])
@@ -74,7 +77,8 @@ def _workflow_status(orchestrator: Any) -> dict[str, Any]:
 def _worker_status(worker: Any) -> dict[str, Any]:
     event = worker.last_event
     session = worker.session
-    return {
+    return _enrich_with_provider_timeline(
+        {
         "issue_identifier": worker.issue.identifier,
         "issue_url": worker.issue.url,
         "issue_title": worker.issue.title,
@@ -99,7 +103,8 @@ def _worker_status(worker: Any) -> dict[str, Any]:
         "error": worker.error,
         "timeout_subtype": worker.timeout_subtype,
         "usage": worker.usage.to_json() if worker.usage.has_usage else None,
-    }
+        }
+    )
 
 
 def _retry_status(retry: Any) -> dict[str, Any]:
@@ -138,6 +143,28 @@ def _waiting_status(item: Any, *, config: Any) -> dict[str, Any]:
     if events:
         payload.setdefault("recent_events", events)
         payload.setdefault("last_event", events[-1])
+    return _enrich_with_provider_timeline(payload)
+
+
+def _enrich_with_provider_timeline(payload: dict[str, Any]) -> dict[str, Any]:
+    artifact_raw = payload.get("artifact_dir")
+    if not artifact_raw:
+        return payload
+    artifact = Path(str(artifact_raw))
+    codex_events = _read_recent_jsonl(artifact / "codex-events.jsonl", limit=60)
+    if codex_events:
+        timeline = []
+        for index, raw in enumerate(codex_events, 1):
+            item = _codex_timeline_event(raw, index=index)
+            if item:
+                timeline.append(item)
+        payload["provider_timeline"] = timeline[-20:]
+    last_message = _read_text(artifact / "codex-last-message.txt", limit=4_000)
+    if last_message:
+        payload["provider_last_message"] = last_message
+    stderr = _read_text(artifact / "codex-stderr.txt", limit=2_000)
+    if stderr:
+        payload["provider_stderr"] = stderr
     return payload
 
 
@@ -168,6 +195,10 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 
 
 def _read_recent_events(path: Path, *, limit: int) -> list[dict[str, Any]]:
+    return _read_recent_jsonl(path, limit=limit)
+
+
+def _read_recent_jsonl(path: Path, *, limit: int) -> list[dict[str, Any]]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -181,6 +212,88 @@ def _read_recent_events(path: Path, *, limit: int) -> list[dict[str, Any]]:
         if isinstance(data, dict):
             out.append(data)
     return out
+
+
+def _read_text(path: Path, *, limit: int) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _codex_timeline_event(raw: dict[str, Any], *, index: int) -> dict[str, Any] | None:
+    event_type = str(raw.get("type") or "")
+    item = raw.get("item") if isinstance(raw.get("item"), dict) else {}
+    item_type = str(item.get("type") or "")
+    if event_type == "thread.started":
+        return {
+            "index": index,
+            "event": "thread.started",
+            "kind": "session",
+            "summary": f"thread {str(raw.get('thread_id') or '')}",
+        }
+    if event_type == "turn.started":
+        return {
+            "index": index,
+            "event": "turn.started",
+            "kind": "session",
+            "summary": "turn started",
+        }
+    if item_type == "agent_message":
+        text = str(item.get("text") or "")
+        return {
+            "index": index,
+            "event": event_type,
+            "kind": "message",
+            "summary": _truncate_text(text, 500),
+        }
+    if item_type == "command_execution":
+        command = str(item.get("command") or "")
+        status = str(item.get("status") or "")
+        exit_code = item.get("exit_code")
+        output = str(item.get("aggregated_output") or "")
+        summary = f"{status or event_type}: {_truncate_text(command, 220)}"
+        if exit_code is not None:
+            summary += f" (exit {exit_code})"
+        if output:
+            summary += f" | {_truncate_text(output, 500)}"
+        return {
+            "index": index,
+            "event": event_type,
+            "kind": "command",
+            "summary": summary,
+            "status": status,
+            "exit_code": exit_code,
+        }
+    if event_type.startswith("turn."):
+        usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+        total = usage.get("total_tokens")
+        suffix = f" ({total} tokens)" if total is not None else ""
+        return {
+            "index": index,
+            "event": event_type,
+            "kind": "session",
+            "summary": f"{event_type}{suffix}",
+        }
+    return {
+        "index": index,
+        "event": event_type or "unknown",
+        "kind": "raw",
+        "summary": _truncate_text(json.dumps(raw, sort_keys=True), 500),
+    }
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    text = text.replace("\x00", "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
 
 
 def _security_profile(worker: Any) -> str | None:

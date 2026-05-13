@@ -266,25 +266,26 @@ class CodexProvider:
         events: list[dict[str, Any]] = []
         malformed: list[str] = []
         raw_lines: list[str] = []
-        async for raw_line in proc.stdout:
-            line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
-            raw_lines.append(line)
-            if not line.strip():
-                continue
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                malformed.append(line)
-                continue
-            if isinstance(item, dict):
-                events.append(item)
-            else:
-                malformed.append(line)
+        with raw_events_path.open("w", encoding="utf-8") as raw_events_file:
+            async for raw_line in proc.stdout:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                raw_lines.append(line)
+                raw_events_file.write(line + "\n")
+                raw_events_file.flush()
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    malformed.append(line)
+                    continue
+                if isinstance(item, dict):
+                    events.append(item)
+                else:
+                    malformed.append(line)
 
         returncode = await proc.wait()
         stderr = await stderr_task
-        raw_payload = "\n".join(raw_lines) + ("\n" if raw_lines else "")
-        raw_events_path.write_text(raw_payload, encoding="utf-8")
         if stderr:
             stderr_path.write_text(stderr, encoding="utf-8")
         try:

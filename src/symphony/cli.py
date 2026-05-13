@@ -706,7 +706,7 @@ roles:
       decision_to_impl:
         from: [leader_reviewing]
         to: ready_impl
-        requires: decision_comment
+        requires: design_checklist
       decision_to_review:
         from: [leader_reviewing]
         to: ready_review

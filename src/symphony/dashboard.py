@@ -121,6 +121,10 @@ def render_dashboard_html(snapshot: dict[str, Any]) -> str:
       color: var(--info);
       font-weight: 600;
     }}
+    .provider-command .session-event-name {{ color: var(--warn); }}
+    .provider-command-failed .session-event-name {{ color: var(--bad); }}
+    .provider-message .session-event-name {{ color: var(--ok); }}
+    .provider-session .session-event-name {{ color: var(--muted); }}
     code {{
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
@@ -257,6 +261,17 @@ def render_run_detail_html(snapshot: dict[str, Any], issue_identifier: str) -> s
     .bad {{ color: #b42318; }}
     .warn {{ color: #b45309; }}
     .ok {{ color: #137333; }}
+    .session-timeline {{ display: grid; gap: 6px; }}
+    .session-event {{
+      display: grid;
+      grid-template-columns: 70px 120px minmax(0, 1fr);
+      gap: 10px;
+    }}
+    .session-event-name {{ color: #175cd3; font-weight: 600; }}
+    .provider-command .session-event-name {{ color: #b45309; }}
+    .provider-command-failed .session-event-name {{ color: #b42318; }}
+    .provider-message .session-event-name {{ color: #137333; }}
+    .provider-session .session-event-name {{ color: #667085; }}
     .table-wrap {{ overflow-x: auto; }}
   </style>
 </head>
@@ -566,22 +581,44 @@ def _event_cell(event: dict[str, Any]) -> str:
 
 
 def _session_timeline(worker: dict[str, Any]) -> str:
-    events = worker.get("recent_events")
-    if not isinstance(events, list) or not events:
-        return '<span class="muted">None</span>'
     snippets: list[str] = []
-    for event in events[-6:]:
-        if not isinstance(event, dict):
-            continue
-        rendered = _session_event_summary(event)
-        if rendered:
+    provider_events = worker.get("provider_timeline")
+    if isinstance(provider_events, list) and provider_events:
+        for event in provider_events[-12:]:
+            if not isinstance(event, dict):
+                continue
+            css = _provider_event_class(event)
             snippets.append(
-                '<div class="session-event">'
-                f'<span class="muted">{escape(_short_time(event.get("timestamp")))}</span>'
-                f'<span class="session-event-name">{escape(_text(event.get("event")))}</span>'
-                f"<span>{escape(rendered)}</span>"
+                f'<div class="session-event {css}">'
+                f'<span class="muted">#{escape(_text(event.get("index")))}</span>'
+                f'<span class="session-event-name">{escape(_text(event.get("kind")))}</span>'
+                f'<span>{escape(_text(event.get("summary")))}</span>'
                 "</div>"
             )
+        last_message = worker.get("provider_last_message")
+        if last_message:
+            snippets.append(
+                '<div class="session-event provider-message">'
+                '<span class="muted">last</span>'
+                '<span class="session-event-name">final</span>'
+                f'<span>{escape(_truncate(_text(last_message), 500))}</span>'
+                "</div>"
+            )
+
+    events = worker.get("recent_events")
+    if isinstance(events, list) and events:
+        for event in events[-6:]:
+            if not isinstance(event, dict):
+                continue
+            rendered = _session_event_summary(event)
+            if rendered:
+                snippets.append(
+                    '<div class="session-event">'
+                    f'<span class="muted">{escape(_short_time(event.get("timestamp")))}</span>'
+                    f'<span class="session-event-name">{escape(_text(event.get("event")))}</span>'
+                    f"<span>{escape(rendered)}</span>"
+                    "</div>"
+                )
     if not snippets:
         return '<span class="muted">None</span>'
     return '<div class="session-timeline">' + "".join(snippets) + "</div>"
@@ -618,6 +655,19 @@ def _session_event_summary(event: dict[str, Any]) -> str:
             if description or task_id:
                 return f"heartbeat: {_text(description)} {_text(task_id)}".strip()
     return name
+
+
+def _provider_event_class(event: dict[str, Any]) -> str:
+    kind = _text(event.get("kind"))
+    status = _text(event.get("status"))
+    exit_code = event.get("exit_code")
+    if kind == "command" and (status == "failed" or exit_code not in (None, 0)):
+        return "provider-command-failed"
+    if kind == "command":
+        return "provider-command"
+    if kind == "message":
+        return "provider-message"
+    return "provider-session"
 
 
 def _truncate(value: str, limit: int) -> str:
