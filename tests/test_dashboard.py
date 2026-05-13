@@ -68,6 +68,27 @@ def _snapshot() -> dict:
                 "reason": "waiting_for_human",
                 "matched_labels": ["symphony-ready-review"],
                 "error": None,
+                "terminal_state": "completed",
+                "task_outcome": "incomplete_no_evidence",
+                "provider_session_id": "provider-6",
+                "artifact_dir": "/tmp/artifacts/acme_proj_6/2",
+                "last_event": {
+                    "event": "message_completed",
+                    "timestamp": "2026-05-08T00:03:00+00:00",
+                    "payload": {"text": "Symphony-No-PR: blocked"},
+                },
+                "recent_events": [
+                    {
+                        "event": "tool_completed",
+                        "timestamp": "2026-05-08T00:02:58+00:00",
+                        "payload": {"tool_name": "Bash", "aggregated_output": "gh failed"},
+                    },
+                    {
+                        "event": "message_completed",
+                        "timestamp": "2026-05-08T00:03:00+00:00",
+                        "payload": {"text": "Symphony-No-PR: blocked"},
+                    },
+                ],
             }
         ],
         "retry_queue": [
@@ -272,6 +293,10 @@ def test_render_run_detail_html_shows_waiting_role_gate() -> None:
     assert "Waiting Item" in html
     assert "ready_review" in html
     assert "waiting_for_human" in html
+    assert "provider-6" in html
+    assert "Recent Session Events" in html
+    assert "tool_completed: gh failed" in html
+    assert "Symphony-No-PR: blocked" in html
 
 
 def test_render_run_detail_html_escapes_payload_values() -> None:

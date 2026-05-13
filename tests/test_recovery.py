@@ -12,7 +12,9 @@ fake tracker / provider, asserting:
   - ``fail_closed`` marks the issue blocked without resuming;
 - ineligible issues (closed, blocked label, exclude label) are released
   without a resume attempt;
-- restore failures under ``resume_same_session`` flip to blocked;
+- restore failures under ``resume_same_session`` flip to blocked unless
+  the record never captured a provider session id, in which case recovery
+  releases for a fresh dispatch;
 - ``recovery.json`` artifact is written under each record's attempt dir;
 - the on-disk session record is stamped terminal so a second
   ``recover()`` call is a no-op.
@@ -33,6 +35,9 @@ from symphony.config import (
     LoggingConfig,
     PollingConfig,
     RetryConfig,
+    RoleConfig,
+    RoleGraphConfig,
+    RoleStateConfig,
     TrackerConfig,
     WorkflowConfig,
     WorkspaceConfig,
@@ -78,6 +83,8 @@ def _config(
     tmp_path: Path,
     *,
     policy: str = "resume_same_session",
+    role_graph: RoleGraphConfig | None = None,
+    agent_roles: tuple[str, ...] = (),
 ) -> WorkflowConfig:
     return WorkflowConfig(
         tracker=TrackerConfig(
@@ -88,7 +95,7 @@ def _config(
             include_labels=("symphony-ready",),
             exclude_labels=("symphony-blocked",),
         ),
-        agent=AgentConfig(max_concurrency=1, max_turns=1),
+        agent=AgentConfig(max_concurrency=1, max_turns=1, roles=agent_roles),
         workspace=WorkspaceConfig(root=tmp_path / "ws"),
         claude=ClaudeConfig(
             model="fake-model",
@@ -102,6 +109,7 @@ def _config(
         polling=PollingConfig(),
         retry=RetryConfig(initial_backoff_ms=100, max_backoff_ms=400, multiplier=2.0),
         logging=LoggingConfig(),
+        role_graph=role_graph,
         workflow_path=tmp_path / "WORKFLOW.md",
     )
 
@@ -112,14 +120,62 @@ def _make(
     provider: FakeProvider,
     issues: list[Issue] | None = None,
     policy: str = "resume_same_session",
+    role_graph: RoleGraphConfig | None = None,
+    agent_roles: tuple[str, ...] = (),
 ) -> tuple[Orchestrator, FakeGitHubTracker, WorkflowConfig]:
-    cfg = _config(tmp_path, policy=policy)
+    cfg = _config(
+        tmp_path,
+        policy=policy,
+        role_graph=role_graph,
+        agent_roles=agent_roles,
+    )
     if issues is None:
         issues = [_issue()]
     tracker = FakeGitHubTracker(issues=issues)
     mgr = WorkspaceManager(cfg.workspace)
     orch = Orchestrator(cfg, tracker=tracker, provider=provider, workspace_manager=mgr)
     return orch, tracker, cfg
+
+
+def _role_graph() -> RoleGraphConfig:
+    return RoleGraphConfig(
+        roles={
+            "implementer": RoleConfig(
+                name="implementer",
+                actor="agent",
+                can_claim=("ready_impl", "changes_requested"),
+                claim_state="implementing",
+            ),
+            "viewer": RoleConfig(
+                name="viewer",
+                actor="agent",
+                can_claim=("ready_review",),
+                claim_state="reviewing",
+            ),
+            "leader": RoleConfig(
+                name="leader",
+                actor="agent",
+                can_claim=("needs_leader",),
+                claim_state="leader_reviewing",
+            ),
+        },
+        states={
+            "ready_impl": RoleStateConfig("ready_impl", ("symphony-ready-impl",)),
+            "implementing": RoleStateConfig("implementing", ("symphony-implementing",)),
+            "ready_review": RoleStateConfig("ready_review", ("symphony-ready-review",)),
+            "reviewing": RoleStateConfig("reviewing", ("symphony-reviewing",)),
+            "changes_requested": RoleStateConfig(
+                "changes_requested",
+                ("symphony-changes-requested",),
+            ),
+            "needs_leader": RoleStateConfig("needs_leader", ("symphony-needs-leader",)),
+            "leader_reviewing": RoleStateConfig(
+                "leader_reviewing",
+                ("symphony-leader-reviewing",),
+            ),
+        },
+        transitions={},
+    )
 
 
 def _seed_record(
@@ -288,11 +344,11 @@ async def test_recover_resume_same_session_drives_worker_to_completion(
     )
 
 
-async def test_recover_resume_blocks_when_no_provider_session_id(
+async def test_recover_resume_releases_when_no_provider_session_id(
     tmp_path: Path,
 ) -> None:
     """A record with no provider_session_id under resume_same_session
-    cannot be restored — mark blocked rather than silently dropping."""
+    cannot be restored, so release it for a fresh dispatch."""
     issue = _issue()
     prov = FakeProvider()
     orch, tracker, cfg = _make(tmp_path, provider=prov, issues=[issue])
@@ -301,8 +357,9 @@ async def test_recover_resume_blocks_when_no_provider_session_id(
     _seed_record(cfg.claude.session_store, issue=issue, provider_session_id=None)
 
     decisions = await orch.recover()
-    assert decisions[0].action == ACTION_BLOCKED
-    assert tracker.states[issue.identifier].blocked is True
+    assert decisions[0].action == ACTION_RELEASED
+    assert tracker.states[issue.identifier].claimed_by is None
+    assert tracker.states[issue.identifier].blocked is False
     # Provider.restore must NOT have been called.
     assert all(m != "restore" for m, _ in prov.calls)
 
@@ -320,10 +377,90 @@ async def test_recover_resume_blocks_when_restore_fails(tmp_path: Path) -> None:
     decisions = await orch.recover()
     assert decisions[0].action == ACTION_BLOCKED
     assert tracker.states[issue.identifier].blocked is True
-
     rec = _read_recovery(record_path)
     assert rec["action"] == ACTION_BLOCKED
     assert "restore failed" in rec["reason"]
+
+
+async def test_recover_skips_claimed_role_disabled_for_daemon(tmp_path: Path) -> None:
+    issue = _issue(labels=("symphony-reviewing",))
+    prov = FakeProvider(provider_session_id="provider-old")
+    orch, tracker, cfg = _make(
+        tmp_path,
+        provider=prov,
+        issues=[issue],
+        role_graph=_role_graph(),
+        agent_roles=("implementer",),
+    )
+    tracker.claim_issue(issue, {"run_id": "old-daemon"})
+
+    _seed_record(cfg.claude.session_store, issue=issue, provider_session_id="provider-old")
+
+    decisions = await orch.recover()
+
+    assert decisions[0].action == ACTION_SKIPPED
+    assert "disabled for this daemon" in decisions[0].reason
+    assert all(m != "restore" for m, _ in prov.calls)
+    assert orch.active == {}
+
+
+async def test_recover_restored_worker_preserves_role_metadata(tmp_path: Path) -> None:
+    issue = _issue(labels=("symphony-implementing",))
+    prov = FakeProvider(provider_session_id="provider-old")
+    orch, _, cfg = _make(
+        tmp_path,
+        provider=prov,
+        issues=[issue],
+        role_graph=_role_graph(),
+        agent_roles=("implementer",),
+    )
+
+    _seed_record(cfg.claude.session_store, issue=issue, provider_session_id="provider-old")
+
+    decisions = await orch.recover()
+
+    assert decisions[0].action == ACTION_RESUMED
+    assert orch.recent_finished[0]["role"] == "implementer"
+    assert orch.recent_finished[0]["role_state"] == "implementing"
+    request = json.loads(
+        (
+            cfg.claude.artifact_store
+            / f"{issue.owner}_{issue.repo}_{issue.number}"
+            / "2"
+            / "request.json"
+        ).read_text()
+    )
+    assert request["role"] == {
+        "role": "implementer",
+        "state": "implementing",
+        "actor": "agent",
+        "gate_owner": None,
+    }
+
+
+async def test_recover_claimed_role_without_provider_id_starts_fresh_session(
+    tmp_path: Path,
+) -> None:
+    issue = _issue(labels=("symphony-reviewing",))
+    prov = FakeProvider()
+    orch, tracker, cfg = _make(
+        tmp_path,
+        provider=prov,
+        issues=[issue],
+        role_graph=_role_graph(),
+        agent_roles=("viewer",),
+    )
+
+    _seed_record(cfg.claude.session_store, issue=issue, provider_session_id=None)
+
+    decisions = await orch.recover()
+
+    assert decisions[0].action == ACTION_RESUMED
+    assert "started fresh session" in decisions[0].reason
+    assert ("restore", "sym-recovered-1") not in prov.calls
+    assert any(method == "start_session" for method, _ in prov.calls)
+    assert "symphony-reviewing" in tracker.states[issue.identifier].issue.labels
+    assert orch.recent_finished[0]["role"] == "viewer"
 
 
 # -- new_session_with_summary -----------------------------------------------

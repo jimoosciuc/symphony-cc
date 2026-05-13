@@ -53,10 +53,12 @@ class CodexProvider:
         runner: CodexRunner | None = None,
         session_id_factory: Callable[[], str] | None = None,
         codex_bin: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self._runner = runner
         self._session_id_factory = session_id_factory or _default_session_id_factory
         self._codex_bin = codex_bin or os.environ.get("SYMPHONY_CODEX_BIN", "codex")
+        self._extra_env = dict(extra_env or {})
         self._sessions: dict[str, _CodexSessionState] = {}
 
     async def start_session(
@@ -246,6 +248,7 @@ class CodexProvider:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=_CODEX_STDIO_LIMIT,
+            env=_subprocess_env(self._extra_env),
         )
         assert proc.stdin is not None
         assert proc.stdout is not None
@@ -336,6 +339,14 @@ def _build_codex_command(
         cmd.append("--skip-git-repo-check")
     cmd.extend(["--json", "--output-last-message", str(last_message_path), "-"])
     return cmd
+
+
+def _subprocess_env(extra_env: dict[str, str]) -> dict[str, str]:
+    env = dict(os.environ)
+    for key, value in extra_env.items():
+        if value:
+            env[key] = value
+    return env
 
 
 def _restored_config(session: SessionRecord) -> ClaudeConfig:

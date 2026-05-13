@@ -461,6 +461,16 @@ class Orchestrator:
                 policy=policy,
             )
 
+        recovery_role = self._resolve_recovery_role(issue)
+        if isinstance(recovery_role, str):
+            return self._record_recovery_decision(
+                record_path=path,
+                record=record,
+                action=ACTION_SKIPPED,
+                reason=recovery_role,
+                policy=policy,
+            )
+
         if policy == "fail_closed":
             self._best_effort_block(issue, "restart-recovery-fail-closed")
             return self._record_recovery_decision(
@@ -493,43 +503,58 @@ class Orchestrator:
             )
 
         # Default policy: resume_same_session.
-        if not record.provider_session_id:
-            # Nothing to resume against. Mark blocked rather than silently
-            # discarding — operator should know the daemon could not
-            # honor the configured policy.
-            self._best_effort_block(
+        if not record.provider_session_id and recovery_role is None:
+            # Nothing exists upstream to resume. Release the claim and stamp
+            # this local record terminal so legacy single-agent workflows can
+            # self-heal through normal fresh dispatch.
+            self._best_effort_release(
                 issue,
-                "restart-recovery-no-provider-session-id",
+                "restart-recovery-no-provider-session-id-new-session",
             )
             return self._record_recovery_decision(
                 record_path=path,
                 record=record,
-                action=ACTION_BLOCKED,
-                reason="resume_same_session requires provider_session_id; record has none",
-                policy=policy,
-            )
-        try:
-            session = await self.provider.restore(record)
-        except ProviderRestoreError as exc:
-            _LOG.warning(
-                "recovery: restore failed for %s (%s); marking blocked",
-                issue.identifier,
-                exc,
-            )
-            self._best_effort_block(issue, f"restart-recovery-restore-failed: {exc}")
-            return self._record_recovery_decision(
-                record_path=path,
-                record=record,
-                action=ACTION_BLOCKED,
-                reason=f"provider restore failed: {exc}",
+                action=ACTION_RELEASED,
+                reason=(
+                    "resume_same_session had no provider_session_id; "
+                    "fresh dispatch will start a new session"
+                ),
                 policy=policy,
             )
 
-        # Restore succeeded. Build a worker, drop into self.active so the
-        # next run_once() doesn't double-dispatch, then drive it inline so
-        # recovery is observable from the same call.
         workspace = self.workspaces.prepare(issue)
         self.workspaces.run_hook("before_run", workspace)
+
+        if not record.provider_session_id:
+            # Role workflows are already in a claimed state
+            # (implementing/reviewing/leader_reviewing). Releasing the claim
+            # can erase the current role label or race another daemon. Since
+            # no upstream provider conversation exists, keep the claim and
+            # start a fresh local provider session under the same role.
+            session = await self.provider.start_session(issue, workspace.path, self.config.claude)
+            session.attempt = record.attempt + 1
+            recovery_reason = (
+                "started fresh session during recovery because provider_session_id "
+                "was not captured"
+            )
+        else:
+            try:
+                session = await self.provider.restore(record)
+            except ProviderRestoreError as exc:
+                _LOG.warning(
+                    "recovery: restore failed for %s (%s); marking blocked",
+                    issue.identifier,
+                    exc,
+                )
+                self._best_effort_block(issue, f"restart-recovery-restore-failed: {exc}")
+                return self._record_recovery_decision(
+                    record_path=path,
+                    record=record,
+                    action=ACTION_BLOCKED,
+                    reason=f"provider restore failed: {exc}",
+                    policy=policy,
+                )
+            recovery_reason = "restored via provider.restore()"
 
         artifacts = ArtifactWriter.for_attempt(
             self.config.claude.artifact_store,
@@ -550,6 +575,7 @@ class Orchestrator:
                 "security_profile": self.config.security.profile,
                 "run_id": self.run_id,
                 "recovered_from_session": record.session_id,
+                "role": recovery_role,
             },
         )
         session.artifact_dir = artifacts.root
@@ -561,13 +587,17 @@ class Orchestrator:
             session=session,
             artifacts=artifacts,
             config=self.config,
+            role_name=recovery_role.get("role") if recovery_role else None,
+            role_state=recovery_role.get("state") if recovery_role else None,
+            role_actor=recovery_role.get("actor") if recovery_role else None,
+            gate_owner=recovery_role.get("gate_owner") if recovery_role else None,
         )
         self.active[issue.identifier] = worker
         decision = self._record_recovery_decision(
             record_path=path,
             record=record,
             action=ACTION_RESUMED,
-            reason="restored via provider.restore()",
+            reason=recovery_reason,
             policy=policy,
             restored_session_id=session.session_id,
             artifacts=artifacts,
@@ -593,6 +623,45 @@ class Orchestrator:
                 exc,
             )
         return decision
+
+    def _resolve_recovery_role(self, issue: Issue) -> dict[str, str | None] | str | None:
+        graph = self.config.role_graph
+        if graph is None:
+            return None
+
+        resolution = resolve_issue_state(graph, issue)
+        if resolution.state is None:
+            return f"role recovery skipped: {resolution.reason or 'no resolved state'}"
+
+        role = next(
+            (
+                candidate
+                for candidate in graph.roles.values()
+                if candidate.claim_state == resolution.state.name
+            ),
+            None,
+        )
+        if role is None:
+            return (
+                "role recovery skipped: current state "
+                f"{resolution.state.name!r} is not a claimed role state"
+            )
+        if role.actor not in {"agent", "hybrid"}:
+            return (
+                "role recovery skipped: current role "
+                f"{role.name!r} actor is {role.actor!r}"
+            )
+        if self.config.agent.roles and role.name not in self.config.agent.roles:
+            return (
+                "role recovery skipped: current role "
+                f"{role.name!r} is disabled for this daemon"
+            )
+        return {
+            "role": role.name,
+            "state": resolution.state.name,
+            "actor": role.actor,
+            "gate_owner": resolution.gate_owner,
+        }
 
     def _record_recovery_decision(
         self,
@@ -816,6 +885,13 @@ class Orchestrator:
             dispatch_issue = issue
             if role_graph is not None:
                 role_resolution = resolve_issue_state(role_graph, issue)
+                if not self._role_enabled_for_agent(role_resolution):
+                    role_resolution = replace(
+                        role_resolution,
+                        dispatchable=False,
+                        waiting=True,
+                        reason="role_disabled_for_daemon",
+                    )
                 if not role_resolution.dispatchable:
                     self._remember_role_waiting(issue, role_resolution)
                     continue
@@ -919,6 +995,11 @@ class Orchestrator:
 
         if local_runs:
             await asyncio.gather(*local_runs)
+
+    def _role_enabled_for_agent(self, resolution: StateResolution) -> bool:
+        enabled_roles = self.config.agent.roles
+        role = resolution.dispatch_role
+        return not enabled_roles or role is None or role.name in enabled_roles
 
     def _select_lane(self, issue: Issue) -> LaneConfig | None:
         if not self.config.lanes:
@@ -1471,14 +1552,25 @@ class Orchestrator:
                     exc,
                 )
                 if policy == "resume_same_session":
-                    # Caller routes ProviderRetryableError to RetryConfig.
-                    raise ProviderRetryableError(
-                        f"restore failed under resume_same_session: {exc}"
-                    ) from exc
-                if policy == "fail_closed":
+                    if _is_missing_provider_session_id_restore_error(exc):
+                        _LOG.warning(
+                            "restore impossible for %s because no provider_session_id "
+                            "was captured; starting fresh session",
+                            issue.identifier,
+                        )
+                        session = await self.provider.start_session(
+                            issue, workspace.path, self.config.claude
+                        )
+                        session.attempt = attempt
+                    else:
+                        # Caller routes ProviderRetryableError to RetryConfig.
+                        raise ProviderRetryableError(
+                            f"restore failed under resume_same_session: {exc}"
+                        ) from exc
+                elif policy == "fail_closed":
                     # Re-raise as a non-retryable provider error.
                     raise ProviderError(f"restore failed under fail_closed: {exc}") from exc
-                if policy == "new_session_with_summary":
+                elif policy == "new_session_with_summary":
                     # Only this policy may fall back to start_session.
                     # Preserve previous_provider_session_ids so #9's
                     # continuation prompt can carry summary handoff.
@@ -1633,9 +1725,7 @@ class Orchestrator:
                 blocked=non_retryable_failure,
                 permission_denials_count=permission_denials_count,
                 last_event=worker.last_event,
-                # M5.2 detector reads last_event payload directly;
-                # M5.4 may pass a longer assistant-text tail.
-                recent_assistant_text="",
+                recent_assistant_text=_assistant_text_tail(worker),
                 workspace_path=worker.workspace.path,
             )
             no_pr_operator_required = _no_pr_reason_requires_operator(
@@ -2253,6 +2343,11 @@ def _is_retryable(worker: WorkerState, retry: RetryState | None) -> bool:
     return retry.next_attempt_at is not None
 
 
+def _is_missing_provider_session_id_restore_error(exc: ProviderRestoreError) -> bool:
+    text = str(exc).lower()
+    return "provider_session_id" in text and ("no " in text or "missing" in text)
+
+
 def _session_snapshot(session: SessionRecord) -> dict[str, Any]:
     return {
         "session_id": session.session_id,
@@ -2307,6 +2402,27 @@ def _extract_permission_denials_count(worker: WorkerState) -> int:
             worker.issue.identifier,
         )
     return count
+
+
+def _assistant_text_tail(worker: WorkerState) -> str:
+    """Collect recent assistant text for outcome sentinels.
+
+    Some providers, notably Codex JSONL, emit the final assistant text as
+    ``message_delta`` / ``message_completed`` immediately before the terminal
+    ``turn_completed`` event. The terminal payload may contain only usage, so
+    detector sentinels must scan the recent message events too.
+    """
+
+    chunks: list[str] = []
+    for event in worker.recent_events:
+        if event.event not in {"message_delta", "message_completed"}:
+            continue
+        payload = event.payload or {}
+        for key in ("text", "result"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                chunks.append(value)
+    return "\n".join(chunks)
 
 
 def _maybe_log_task_outcome(worker: WorkerState, result: DetectorResult) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -212,3 +213,61 @@ async def test_status_snapshot_includes_recent_finished_worker(tmp_path: Path) -
     assert "task_evidence" in snapshot["recent_finished"][0]
     assert "outcome_decided_by" in snapshot["recent_finished"][0]
     assert "no_pr_reason" in snapshot["recent_finished"][0]
+
+
+def test_status_snapshot_enriches_waiting_item_from_latest_artifact(tmp_path: Path) -> None:
+    orch = _orchestrator(tmp_path)
+    issue = _issue(7)
+    artifact_dir = tmp_path / "artifacts" / "acme_proj_7" / "2"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "terminal.json").write_text(
+        json.dumps(
+            {
+                "terminal_state": "completed",
+                "task_outcome": "incomplete_permission_denied",
+                "provider_session_id": "provider-waiting",
+                "last_event_at": "2026-05-08T00:00:02+00:00",
+                "permission_denials_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "events.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event": "tool_completed",
+                        "timestamp": "2026-05-08T00:00:01+00:00",
+                        "payload": {"aggregated_output": "token ghp_123456789012345678901234"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "message_completed",
+                        "timestamp": "2026-05-08T00:00:02+00:00",
+                        "payload": {"text": "blocked"},
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    orch.role_waiting[issue.identifier] = {
+        "issue_identifier": issue.identifier,
+        "issue_url": issue.url,
+        "issue_title": issue.title,
+        "role": "leader",
+        "state": "blocked_operator",
+        "actor": "agent",
+    }
+
+    snapshot = orch.status_snapshot()
+
+    waiting = snapshot["waiting_items"][0]
+    assert waiting["artifact_dir"] == str(artifact_dir)
+    assert waiting["terminal_state"] == "completed"
+    assert waiting["task_outcome"] == "incomplete_permission_denied"
+    assert waiting["provider_session_id"] == "provider-waiting"
+    assert waiting["last_event"]["event"] == "message_completed"
+    assert waiting["recent_events"][0]["payload"]["aggregated_output"] == "token <redacted>"

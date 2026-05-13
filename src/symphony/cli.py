@@ -280,7 +280,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if config.agent.provider == "claude_code":
         provider = ClaudeCodeProvider(tool_registry=_build_tool_registry(config, tracker))
     elif config.agent.provider == "codex":
-        provider = CodexProvider()
+        provider = CodexProvider(
+            extra_env={
+                "GITHUB_TOKEN": config.tracker.token,
+                "GH_TOKEN": config.tracker.token,
+            }
+        )
     else:  # Defensive; config validation rejects this before runtime.
         raise AssertionError(f"unsupported provider {config.agent.provider!r}")
     workspace_mgr = WorkspaceManager(
