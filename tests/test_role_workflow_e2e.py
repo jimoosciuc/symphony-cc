@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from symphony.config import (
@@ -25,7 +26,7 @@ from symphony.evidence import (
 from symphony.github.tracker import FakeGitHubTracker
 from symphony.models import Issue
 from symphony.orchestrator import Orchestrator
-from symphony.provider.fake import FakeProvider
+from symphony.provider.fake import FakeProvider, FakeTurnScript
 from symphony.role_graph import TransitionPlan, plan_claim, plan_transition, resolve_issue_state
 from symphony.workspace import WorkspaceManager
 
@@ -68,7 +69,12 @@ def _issue() -> Issue:
     )
 
 
-def _config(tmp_path: Path, graph: RoleGraphConfig) -> WorkflowConfig:
+def _config(
+    tmp_path: Path,
+    graph: RoleGraphConfig,
+    *,
+    agent_roles: tuple[str, ...] = (),
+) -> WorkflowConfig:
     return WorkflowConfig(
         tracker=TrackerConfig(
             kind="github",
@@ -78,7 +84,7 @@ def _config(tmp_path: Path, graph: RoleGraphConfig) -> WorkflowConfig:
             include_labels=(),
             exclude_labels=("symphony-done",),
         ),
-        agent=AgentConfig(max_concurrency=1, max_turns=1),
+        agent=AgentConfig(max_concurrency=1, max_turns=1, roles=agent_roles),
         workspace=WorkspaceConfig(root=tmp_path / "ws"),
         claude=ClaudeConfig(
             model="fake-model",
@@ -188,8 +194,10 @@ def _orchestrator(
     tracker: FakeGitHubTracker,
     graph: RoleGraphConfig,
     detector: _StubDetector,
+    *,
+    agent_roles: tuple[str, ...] = (),
 ) -> Orchestrator:
-    cfg = _config(tmp_path, graph)
+    cfg = _config(tmp_path, graph, agent_roles=agent_roles)
     return Orchestrator(
         cfg,
         tracker=tracker,
@@ -295,3 +303,69 @@ async def test_fake_role_e2e_design_gate_returns_to_implementer(tmp_path: Path) 
         evidence=("decision_comment",),
     )
     assert tracker.states[issue.identifier].issue.labels == ("symphony-ready-impl",)
+
+
+async def test_agent_roles_filter_dispatch_without_changing_role_actor(
+    tmp_path: Path,
+) -> None:
+    graph = _graph()
+    issue = _issue()
+    tracker = FakeGitHubTracker(issues=[issue], ready_label="")
+    orch = _orchestrator(
+        tmp_path,
+        tracker,
+        graph,
+        _StubDetector(OUTCOME_COMPLETED_WITH_PR),
+        agent_roles=("leader",),
+    )
+
+    await orch.run_once()
+
+    assert tracker.states[issue.identifier].issue.labels == ("symphony-ready-impl",)
+    waiting = orch.status_snapshot()["waiting_items"][0]
+    assert waiting["role"] == "implementer"
+    assert waiting["actor"] == "agent"
+    assert waiting["reason"] == "role_disabled_for_daemon"
+
+
+async def test_role_outcome_from_recent_message_routes_leader_decision(
+    tmp_path: Path,
+) -> None:
+    graph = _graph()
+    graph = replace(
+        graph,
+        roles={
+            **graph.roles,
+            "leader": replace(graph.roles["leader"], actor="agent"),
+        },
+    )
+    issue = replace(_issue(), labels=("symphony-needs-design",))
+    tracker = FakeGitHubTracker(issues=[issue], ready_label="")
+    cfg = _config(tmp_path, graph)
+    provider = FakeProvider(
+        FakeTurnScript(
+            events=[
+                (
+                    "message_delta",
+                    {"text": "Decision posted.\nSymphony-Role-Outcome: decision_to_impl"},
+                ),
+                ("message_completed", {"text": "Symphony-Role-Outcome: decision_to_impl"}),
+                ("turn_completed", {"usage": {}}),
+            ],
+        )
+    )
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=provider,
+        workspace_manager=WorkspaceManager(cfg.workspace),
+    )
+
+    await orch.run_once()
+
+    state = tracker.states[issue.identifier].issue
+    assert state.labels == ("symphony-ready-impl",)
+    finished = orch.recent_finished[0]
+    assert finished["task_outcome"] == "completed_role_outcome"
+    assert finished["role_transition"]["requested"] == "decision_to_impl"
+    assert finished["role_transition"]["applied"] == "decision_to_impl"

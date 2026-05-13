@@ -599,7 +599,12 @@ def _session_event_summary(event: dict[str, Any]) -> str:
         if name == "tool_started" and tool_name:
             return f"tool_started: {tool_name}"
         if name == "tool_completed":
-            result = payload.get("content") or payload.get("tool_use_result")
+            result = (
+                payload.get("content")
+                or payload.get("tool_use_result")
+                or payload.get("aggregated_output")
+                or tool_name
+            )
             return f"tool_completed: {_truncate(_text(result), 140)}"
         if name == "heartbeat":
             kind = payload.get("kind")
@@ -746,12 +751,19 @@ def _detail_summary(detail: dict[str, Any]) -> str:
             or waiting.get("gate_owner")
             or finished.get("gate_owner")
         ),
-        "terminal_state": finished.get("terminal_state") or active.get("terminal_state"),
-        "task_outcome": finished.get("task_outcome"),
-        "role_transition": finished.get("role_transition"),
+        "terminal_state": (
+            finished.get("terminal_state")
+            or active.get("terminal_state")
+            or waiting.get("terminal_state")
+        ),
+        "task_outcome": finished.get("task_outcome") or waiting.get("task_outcome"),
+        "role_transition": finished.get("role_transition") or waiting.get("role_transition"),
         "provider_session_id": active.get("provider_session_id")
-        or finished.get("provider_session_id"),
-        "artifact_dir": active.get("artifact_dir") or finished.get("artifact_dir"),
+        or finished.get("provider_session_id")
+        or waiting.get("provider_session_id"),
+        "artifact_dir": active.get("artifact_dir")
+        or finished.get("artifact_dir")
+        or waiting.get("artifact_dir"),
         "last_error": retry.get("last_error") or active.get("error"),
     }
     rows = [
@@ -795,12 +807,23 @@ def _detail_value(key: str, value: Any) -> str:
 
 def _detail_events(detail: dict[str, Any]) -> str:
     active = detail.get("active_worker") or {}
+    waiting = detail.get("waiting_item") or {}
     finished = detail.get("finished_run") or {}
     retry = detail.get("retry_state") or {}
-    event = active.get("last_event") or finished.get("last_event") or {}
+    event = (
+        active.get("last_event")
+        or waiting.get("last_event")
+        or finished.get("last_event")
+        or {}
+    )
     rows = [
         ("Last Event", event.get("event")),
-        ("Last Event At", event.get("timestamp") or finished.get("last_event_at")),
+        (
+            "Last Event At",
+            event.get("timestamp")
+            or waiting.get("last_event_at")
+            or finished.get("last_event_at"),
+        ),
         ("Retry Attempts", retry.get("attempts")),
         ("Next Attempt", retry.get("next_attempt_at")),
     ]
@@ -819,7 +842,11 @@ def _detail_events(detail: dict[str, Any]) -> str:
             "<h2>Last Event Payload</h2>"
             f"<pre>{escape(json.dumps(payload, indent=2, sort_keys=True))}</pre>"
         )
-    recent_events = active.get("recent_events") or finished.get("recent_events")
+    recent_events = (
+        active.get("recent_events")
+        or waiting.get("recent_events")
+        or finished.get("recent_events")
+    )
     recent_html = ""
     if isinstance(recent_events, list) and recent_events:
         rows = []

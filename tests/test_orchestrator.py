@@ -1121,6 +1121,34 @@ async def test_restore_failure_resume_same_session_schedules_retry(tmp_path: Pat
     assert tracker.states[issue.identifier].claimed_by is None
 
 
+async def test_restore_missing_provider_session_id_starts_fresh_session(
+    tmp_path: Path,
+) -> None:
+    """If a retry has no provider_session_id, resume_same_session cannot be
+    honored. Start a fresh session instead of retrying restore forever."""
+
+    issue = _issue(number=1)
+    prov = FakeProvider()
+    orch, tracker, _ = _make_orchestrator(
+        tmp_path,
+        issues=[issue],
+        provider=prov,
+        retry_resume_policy="resume_same_session",
+    )
+    orch.retry_states[issue.identifier] = RetryState(issue_identifier=issue.identifier, attempts=1)
+
+    result = await orch.run_once()
+
+    assert result.dispatched == [issue.identifier]
+    assert result.finished == [issue.identifier]
+    assert result.retries_scheduled == []
+    methods = [m for m, _ in prov.calls]
+    assert methods.count("restore") == 1
+    assert "start_session" in methods
+    assert issue.identifier not in orch.retry_states
+    assert tracker.states[issue.identifier].claimed_by is None
+
+
 async def test_restore_failure_fail_closed_marks_non_retryable(tmp_path: Path) -> None:
     issue = _issue(number=1)
     prov = FakeProvider(restore_should_fail=True)

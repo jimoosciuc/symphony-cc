@@ -306,6 +306,37 @@ def test_role_graph_parses_default_production_shape() -> None:
     assert transition.requires == ("pr_link",)
 
 
+def test_agent_roles_parse_with_role_graph() -> None:
+    raw = _minimal_raw()
+    raw["agent"]["roles"] = ["implementer"]
+    raw.update(_role_graph_raw())
+
+    cfg = build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert cfg.agent.roles == ("implementer",)
+
+
+def test_agent_roles_require_role_graph() -> None:
+    raw = _minimal_raw()
+    raw["agent"]["roles"] = ["implementer"]
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "agent.roles"
+
+
+def test_agent_roles_reject_unknown_role() -> None:
+    raw = _minimal_raw()
+    raw["agent"]["roles"] = ["missing"]
+    raw.update(_role_graph_raw())
+
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(raw, workflow_path=Path("/tmp/W.md"), env={})
+
+    assert excinfo.value.location == "agent.roles"
+
+
 def test_role_graph_accepts_top_level_transitions() -> None:
     raw = _minimal_raw()
     graph_raw = _role_graph_raw()

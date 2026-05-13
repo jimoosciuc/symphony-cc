@@ -21,11 +21,14 @@ The flow runs once at startup, before the first poll tick:
 3. Otherwise, route by ``claude.retry_resume_policy`` (SPEC §11.2,
    docs/claude-provider.md §5.3):
 
-   - ``resume_same_session`` → call ``provider.restore(record)``. On
-     success the resumed worker is dropped into ``Orchestrator.active``
-     so the next ``run_once`` does not double-dispatch it; the worker
-     is then driven inline through ``_run_worker``. On
-     :class:`ProviderRestoreError` → mark blocked.
+   - ``resume_same_session`` → call ``provider.restore(record)`` when the
+     record has a provider session id. On success the resumed worker is
+     dropped into ``Orchestrator.active`` so the next ``run_once`` does
+     not double-dispatch it; the worker is then driven inline through
+     ``_run_worker``. If the record never captured a provider session id,
+     release the claim for a fresh dispatch because there is no upstream
+     conversation to resume. On other :class:`ProviderRestoreError` →
+     mark blocked.
    - ``new_session_with_summary`` → release the claim and stash the
      persisted ``provider_session_id`` so the next normal dispatch
      populates ``previous_provider_session_ids`` on the fresh session

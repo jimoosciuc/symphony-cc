@@ -147,6 +147,7 @@ class AgentConfig:
     provider: str = "claude_code"
     max_concurrency: int = 1
     max_turns: int = 3
+    roles: tuple[str, ...] = ()
     tools: AgentToolsConfig = field(default_factory=AgentToolsConfig)
 
 
@@ -532,6 +533,7 @@ def _build_agent(raw: dict[str, Any]) -> AgentConfig:
         provider=provider,
         max_concurrency=max_concurrency,
         max_turns=max_turns,
+        roles=_opt_str_list(section, "roles", location),
         tools=tools,
     )
 
@@ -1294,6 +1296,15 @@ def build_config(
         workflow_path=workflow_path.resolve(),
         warnings=tuple(warnings),
     )
+    if config.agent.roles and config.role_graph is None:
+        raise ConfigError("agent.roles", "requires a roles/states role graph")
+    if config.agent.roles and config.role_graph is not None:
+        unknown_roles = sorted(set(config.agent.roles) - set(config.role_graph.roles))
+        if unknown_roles:
+            raise ConfigError(
+                "agent.roles",
+                f"unknown role(s): {', '.join(unknown_roles)}",
+            )
 
     # M7.1 #100: Cross-field validation for security profile + permission_mode.
     _validate_security_profile(config, warnings)
