@@ -88,6 +88,8 @@ def _fake_pr_payload(
     url: str | None = None,
     head_ref: str,
     author: str = "symphony-bot",
+    state: str = "open",
+    merged_at: str | None = None,
 ) -> dict[str, Any]:
     return {
         "node_id": f"PR_kgD{number}",
@@ -95,12 +97,13 @@ def _fake_pr_payload(
         "number": number,
         "title": "wip: fix from symphony",
         "html_url": url or f"https://github.com/acme/proj/pull/{number}",
-        "state": "open",
+        "state": state,
         "user": {"login": author},
         "head": {"ref": head_ref, "repo": {"owner": {"login": "acme"}, "name": "proj"}},
         "base": {"ref": "main", "repo": {"default_branch": "main"}},
         "draft": True,
         "mergeable_state": "clean",
+        "merged_at": merged_at,
         "body": "Closes acme/proj#1",
     }
 
@@ -498,6 +501,62 @@ def test_completed_role_outcome_collects_github_design_checklist_comment(
     assert checklist[0]["surface"] == "issue"
     assert checklist[0]["url"] == "https://github.com/acme/proj/issues/1#new"
     assert checklist[0]["has_existing_mechanism_fit"] is True
+
+
+def test_approved_role_outcome_collects_merged_pr_evidence(tmp_path: Path) -> None:
+    issue = _issue()
+    pr = _fake_pr_payload(
+        number=42,
+        head_ref="symphony/acme-proj-1",
+        state="closed",
+        merged_at="2026-05-13T12:45:00Z",
+    )
+    client = _client_with_review_gate(
+        pr=pr,
+        reviews=[],
+        threads=[],
+        issue_comments=[],
+        pr_comments=[
+            {
+                "html_url": "https://github.com/acme/proj/pull/42#approval",
+                "body": "Symphony-Review-Approval: approved",
+                "user": {"login": "jimoosciuc"},
+            },
+            {
+                "html_url": "https://github.com/acme/proj/pull/42#checklist",
+                "body": "\n".join(
+                    [
+                        "Symphony-Review-Checklist: pass",
+                        "- [x] spec_compliance: matches issue intent",
+                        "- [x] issue_fit: solves requested behavior",
+                        "- [x] existing_design_fit: reuses current mechanism",
+                        "- [x] tests: relevant tests passed",
+                        "- [x] review_threads: no open unaddressed threads",
+                    ]
+                ),
+                "user": {"login": "jimoosciuc"},
+            },
+        ],
+    )
+    detector = EvidenceDetector(_github(), client=client)
+
+    result = detector.detect(
+        issue=issue,
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=_last_event({"result": "Symphony-Role-Outcome: approved"}),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    assert any(e["type"] == "pr_merged" for e in result.task_evidence)
+    assert any(e["type"] == "review_approval_comment" for e in result.task_evidence)
+    assert any(
+        e["type"] == "review_checklist" and e["passed"]
+        for e in result.task_evidence
+    )
 
 
 # -- COMPLETED + no-PR sentinel ---------------------------------------------

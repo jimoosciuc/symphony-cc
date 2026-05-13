@@ -781,6 +781,74 @@ async def test_role_graph_reviewer_approval_requires_review_checklist(
     assert transition["applied"] == "changes_requested"
 
 
+async def test_role_graph_reviewer_approval_requires_merged_pr(
+    tmp_path: Path,
+) -> None:
+    graph = _role_graph()
+    graph.roles["reviewer"] = replace(graph.roles["reviewer"], actor="agent")
+    graph.transitions["approved"] = RoleTransitionConfig(
+        name="approved",
+        role="reviewer",
+        from_states=("reviewing",),
+        to_state="approved",
+        requires=("pr_approval", "pr_merged"),
+    )
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "approved",
+                "marker_source": "assistant_message",
+            },
+            {
+                "type": "pr_linked",
+                "number": 7,
+                "url": "https://github.com/acme/proj/pull/7",
+            },
+            {
+                "type": "review_approval_comment",
+                "number": 7,
+                "url": "https://github.com/acme/proj/pull/7#approval",
+            },
+            {
+                "type": "pr_review_threads",
+                "number": 7,
+                "unresolved_unaddressed_count": 0,
+                "unresolved_current_count": 0,
+            },
+            {
+                "type": "review_checklist",
+                "number": 7,
+                "passed": True,
+                "has_spec_compliance": True,
+                "has_issue_fit": True,
+                "has_existing_design_fit": True,
+                "has_tests": True,
+                "has_review_threads": True,
+            },
+        ],
+        role_outcome="approved",
+        issue=_review_issue(),
+        reviewer_actor="agent",
+    )
+    orch.config = replace(orch.config, role_graph=graph)
+
+    await orch.run_once()
+    if not orch.recent_finished:
+        await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-approved" not in state.issue.labels
+    assert "symphony-needs-design" in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "approved"
+    assert transition["error"]["code"] == "missing_evidence"
+    assert transition["fallback"] == "needs_leader"
+    assert transition["applied"] == "needs_leader"
+
+
 async def test_role_graph_reviewer_approval_with_failing_checklist_requests_changes(
     tmp_path: Path,
 ) -> None:

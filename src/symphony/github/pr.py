@@ -40,6 +40,8 @@ def find_linked_pull_requests(
     client: GitHubClient,
     issue: Issue,
     config: GitHubConfig,
+    *,
+    state: str = "open",
 ) -> list[PullRequest]:
     """Return open PRs linked to ``issue``.
 
@@ -61,7 +63,7 @@ def find_linked_pull_requests(
     try:
         raw = client.get(
             f"/repos/{issue.owner}/{issue.repo}/pulls",
-            params={"head": head, "state": "open"},
+            params={"head": head, "state": state},
         )
     except GitHubNotFound:
         return []
@@ -71,7 +73,7 @@ def find_linked_pull_requests(
 
     raw = client.get(
         f"/repos/{issue.owner}/{issue.repo}/pulls",
-        params={"state": "open"},
+        params={"state": state},
     )
     return [
         pr

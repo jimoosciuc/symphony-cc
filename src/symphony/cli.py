@@ -687,7 +687,7 @@ roles:
       approved:
         from: reviewing
         to: {reviewer_approved_to}
-        requires: pr_approval
+        requires: [pr_approval, pr_merged]
       changes_requested:
         from: reviewing
         to: changes_requested
@@ -792,6 +792,10 @@ Rules:
   approval is impossible, use `Symphony-Review-Approval: approved` in a precise
   issue/PR comment or the non-state `symphony-review-approved` label; unresolved
   current PR review threads still block approval.
+- Reviewer completion requires the linked PR to be merged. After approval
+  evidence is present and checks are green, merge the PR before finishing with
+  `Symphony-Role-Outcome: approved`. If the PR cannot be merged, route to
+  `needs_leader` with the blocker.
 - Leader handoff to review requires a passing structured design checklist:
   `Symphony-Design-Checklist: pass` with checked items for `problem_framing`,
   `existing_mechanism_fit`, `minimal_surface_area`, `data_model_fit`,

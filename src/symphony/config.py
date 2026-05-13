@@ -96,6 +96,7 @@ ALLOWED_TRANSITION_REQUIREMENTS: frozenset[str] = frozenset(
         "none",
         "pr_approval",
         "pr_link",
+        "pr_merged",
         "review_checklist",
         "review_comment",
     }
