@@ -197,6 +197,40 @@ class EvidenceDetector:
         self._client = client
         self._git_probe_timeout = git_probe_timeout
 
+    def detect_preflight_approved_review(self, *, issue: Issue) -> DetectorResult | None:
+        """Detect an already-satisfied reviewer approval gate before agent launch.
+
+        This is intentionally narrow: it only returns a role-outcome result
+        when a linked PR is already merged and the review-gate evidence can be
+        read from GitHub. Missing or incomplete evidence returns ``None`` so
+        the normal reviewer agent still runs.
+        """
+        review_prs = self._detect_pull_requests(issue, state="all")
+        if not review_prs:
+            return None
+        merged_prs = [pr for pr in review_prs if _pr_is_merged(pr)]
+        if not merged_prs:
+            return None
+
+        evidence: list[dict[str, Any]] = []
+        for pr in merged_prs:
+            evidence.append(_pr_linked_evidence(pr))
+        evidence.extend(self._detect_pull_request_review_gates(issue, merged_prs))
+        evidence.extend(_pr_merged_evidence(pr) for pr in merged_prs)
+        evidence.append(
+            {
+                "type": "role_outcome",
+                "transition": "approved",
+                "marker_source": "preflight_evidence",
+            }
+        )
+        return DetectorResult(
+            task_outcome=OUTCOME_COMPLETED_ROLE_OUTCOME,
+            task_evidence=evidence,
+            role_outcome="approved",
+            outcome_decided_by=DECIDED_BY_DETECTOR,
+        )
+
     def detect(
         self,
         *,
