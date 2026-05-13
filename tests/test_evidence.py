@@ -503,6 +503,45 @@ def test_completed_role_outcome_collects_github_design_checklist_comment(
     assert checklist[0]["has_existing_mechanism_fit"] is True
 
 
+def test_design_checklist_accepts_checked_items_without_colons(tmp_path: Path) -> None:
+    detector = EvidenceDetector(_github(), client=_client_returning([]))
+
+    result = detector.detect(
+        issue=_issue(),
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=_last_event(
+            {
+                "result": "\n".join(
+                    [
+                        "Symphony-Design-Checklist: pass",
+                        "- [x] problem_framing",
+                        "- [x] existing_mechanism_fit",
+                        "- [x] minimal_surface_area",
+                        "- [x] data_model_fit",
+                        "- [x] test_strategy",
+                        "- [x] drift_assessment",
+                        "Symphony-Role-Outcome: decision_to_impl",
+                    ]
+                )
+            }
+        ),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    checklist = [e for e in result.task_evidence if e["type"] == "design_checklist"]
+    assert checklist[0]["passed"] is True
+    assert checklist[0]["has_problem_framing"] is True
+    assert checklist[0]["has_existing_mechanism_fit"] is True
+    assert checklist[0]["has_minimal_surface_area"] is True
+    assert checklist[0]["has_data_model_fit"] is True
+    assert checklist[0]["has_test_strategy"] is True
+    assert checklist[0]["has_drift_assessment"] is True
+
+
 def test_approved_role_outcome_collects_merged_pr_evidence(tmp_path: Path) -> None:
     issue = _issue()
     pr = _fake_pr_payload(

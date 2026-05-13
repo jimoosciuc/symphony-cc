@@ -1014,7 +1014,7 @@ def _review_checklist_evidence(
 
 def _has_checked_item(body: str, key: str) -> bool:
     pattern = re.compile(
-        rf"(?:^|\n)\s*-\s*\[[xX]\]\s*{re.escape(key)}\s*:",
+        rf"(?:^|\n)\s*-\s*\[[xX]\]\s*{re.escape(key)}(?:\s*:|[ \t]*(?=\r?\n|$))",
         re.IGNORECASE,
     )
     return bool(pattern.search(body))
