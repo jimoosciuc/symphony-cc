@@ -115,6 +115,16 @@ REVIEW_APPROVAL_SENTINEL = re.compile(
     re.IGNORECASE,
 )
 
+REVIEW_CHECKLIST_SENTINEL = re.compile(
+    r"Symphony-Review-Checklist\s*:\s*(?P<status>pass|passed|fail|failed)",
+    re.IGNORECASE,
+)
+
+DESIGN_CHECKLIST_SENTINEL = re.compile(
+    r"Symphony-Design-Checklist\s*:\s*(?P<status>pass|passed|fail|failed)",
+    re.IGNORECASE,
+)
+
 REVIEW_APPROVAL_LABEL = "symphony-review-approved"
 
 # Bound the assistant-text scan so a runaway transcript can't pin the
@@ -261,6 +271,10 @@ class EvidenceDetector:
                     "marker_source": "assistant_message",
                 }
             )
+        design_checklist = _design_checklist_evidence_from_texts(
+            self._sentinel_haystacks(last_event, recent_assistant_text)
+        )
+        evidence.extend(design_checklist)
 
         # 3. No-PR sentinel (assistant text + last event payload).
         sentinel_reason = self._detect_no_pr_sentinel(last_event, recent_assistant_text)
@@ -474,8 +488,10 @@ class EvidenceDetector:
 
         review_entry = _review_state_evidence(pr, reviews if isinstance(reviews, list) else [])
         threads_entry = _review_threads_evidence(pr.number, review_threads)
-        approval_entries = self._detect_review_approval_overrides(issue, pr)
-        return [review_entry, threads_entry, *approval_entries]
+        review_comments = self._query_issue_and_pr_comments(issue, pr)
+        approval_entries = self._detect_review_approval_overrides(issue, pr, review_comments)
+        checklist_entries = _review_checklist_evidence(pr.number, review_comments)
+        return [review_entry, threads_entry, *approval_entries, *checklist_entries]
 
     def _query_review_threads(self, issue: Issue, pr_number: int) -> list[dict[str, Any]]:
         query = """
@@ -488,7 +504,7 @@ class EvidenceDetector:
                   isOutdated
                   path
                   line
-                  comments(first:1) {
+                  comments(first:20) {
                     nodes {
                       url
                       author { login }
@@ -529,6 +545,7 @@ class EvidenceDetector:
         self,
         issue: Issue,
         pr: PullRequest,
+        comments: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         evidence: list[dict[str, Any]] = []
         labels = {label.strip().lower() for label in issue.labels}
@@ -540,15 +557,15 @@ class EvidenceDetector:
                     "number": pr.number,
                 }
             )
-        evidence.extend(self._detect_review_approval_comments(issue, pr))
+        evidence.extend(_review_approval_comment_evidence(pr.number, comments))
         return evidence
 
-    def _detect_review_approval_comments(
+    def _query_issue_and_pr_comments(
         self,
         issue: Issue,
         pr: PullRequest,
     ) -> list[dict[str, Any]]:
-        evidence: list[dict[str, Any]] = []
+        comments_out: list[dict[str, Any]] = []
         seen: set[str] = set()
         for number, surface in ((issue.number, "issue"), (pr.number, "pull_request")):
             try:
@@ -568,24 +585,16 @@ class EvidenceDetector:
             if not isinstance(comments, list):
                 continue
             for comment in comments:
-                body = str(comment.get("body") or "")
-                if not REVIEW_APPROVAL_SENTINEL.search(body):
-                    continue
                 url = str(comment.get("html_url") or comment.get("url") or "")
                 dedupe_key = url or f"{surface}:{comment.get('id')}"
                 if dedupe_key in seen:
                     continue
                 seen.add(dedupe_key)
-                evidence.append(
-                    {
-                        "type": "review_approval_comment",
-                        "number": pr.number,
-                        "surface": surface,
-                        "url": url or None,
-                        "author": ((comment.get("user") or {}).get("login")),
-                    }
-                )
-        return evidence
+                item = dict(comment)
+                item["_symphony_surface"] = surface
+                item["_symphony_url"] = url or None
+                comments_out.append(item)
+        return comments_out
 
     def _detect_no_pr_sentinel(
         self,
@@ -593,6 +602,17 @@ class EvidenceDetector:
         recent_assistant_text: str,
     ) -> str | None:
         """Find ``Symphony-No-PR: <reason>`` in assistant text or the last event payload."""
+        for text in self._sentinel_haystacks(last_event, recent_assistant_text):
+            match = NO_PR_SENTINEL.search(text)
+            if match:
+                return match.group("reason").strip()
+        return None
+
+    def _sentinel_haystacks(
+        self,
+        last_event: AgentEvent | None,
+        recent_assistant_text: str,
+    ) -> list[str]:
         haystacks: list[str] = []
         if recent_assistant_text:
             haystacks.append(recent_assistant_text[:_MAX_ASSISTANT_TEXT_SCAN_CHARS])
@@ -602,11 +622,7 @@ class EvidenceDetector:
                 value = payload.get(key)
                 if isinstance(value, str) and value:
                     haystacks.append(value[:_MAX_ASSISTANT_TEXT_SCAN_CHARS])
-        for text in haystacks:
-            match = NO_PR_SENTINEL.search(text)
-            if match:
-                return match.group("reason").strip()
-        return None
+        return haystacks
 
     def _detect_role_outcome_sentinel(
         self,
@@ -614,16 +630,7 @@ class EvidenceDetector:
         recent_assistant_text: str,
     ) -> str | None:
         """Find ``Symphony-Role-Outcome: <transition>`` in assistant text."""
-        haystacks: list[str] = []
-        if recent_assistant_text:
-            haystacks.append(recent_assistant_text[:_MAX_ASSISTANT_TEXT_SCAN_CHARS])
-        if last_event is not None:
-            payload = last_event.payload or {}
-            for key in ("result", "text"):
-                value = payload.get(key)
-                if isinstance(value, str) and value:
-                    haystacks.append(value[:_MAX_ASSISTANT_TEXT_SCAN_CHARS])
-        for text in haystacks:
+        for text in self._sentinel_haystacks(last_event, recent_assistant_text):
             match = ROLE_OUTCOME_SENTINEL.search(text)
             if match:
                 return match.group("transition").strip()
@@ -788,7 +795,8 @@ def _review_threads_evidence(
     pr_number: int,
     threads: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    unresolved_current: list[dict[str, Any]] = []
+    unresolved_unaddressed: list[dict[str, Any]] = []
+    unresolved_addressed = 0
     unresolved_outdated = 0
     for thread in threads:
         if bool(thread.get("isResolved")):
@@ -802,12 +810,20 @@ def _review_threads_evidence(
             else []
         )
         first = comments[0] if comments else {}
-        unresolved_current.append(
+        first_author = ((first.get("author") or {}).get("login") if first else None)
+        has_followup_reply = any(
+            ((comment.get("author") or {}).get("login")) != first_author
+            for comment in comments[1:]
+        )
+        if has_followup_reply:
+            unresolved_addressed += 1
+            continue
+        unresolved_unaddressed.append(
             {
                 "path": thread.get("path"),
                 "line": thread.get("line"),
                 "url": first.get("url"),
-                "author": ((first.get("author") or {}).get("login") if first else None),
+                "author": first_author,
                 "body": _truncate(str(first.get("body") or ""), 240) if first else "",
             }
         )
@@ -815,11 +831,101 @@ def _review_threads_evidence(
     return {
         "type": "pr_review_threads",
         "number": pr_number,
-        "unresolved_current_count": len(unresolved_current),
+        "unresolved_current_count": len(unresolved_unaddressed),
+        "unresolved_unaddressed_count": len(unresolved_unaddressed),
+        "unresolved_addressed_count": unresolved_addressed,
         "unresolved_outdated_count": unresolved_outdated,
-        "unresolved_count": len(unresolved_current) + unresolved_outdated,
-        "examples": unresolved_current[:3],
+        "unresolved_count": len(unresolved_unaddressed)
+        + unresolved_addressed
+        + unresolved_outdated,
+        "examples": unresolved_unaddressed[:3],
     }
+
+
+def _review_approval_comment_evidence(
+    pr_number: int,
+    comments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if not REVIEW_APPROVAL_SENTINEL.search(body):
+            continue
+        evidence.append(
+            {
+                "type": "review_approval_comment",
+                "number": pr_number,
+                "surface": comment.get("_symphony_surface"),
+                "url": comment.get("_symphony_url"),
+                "author": ((comment.get("user") or {}).get("login")),
+            }
+        )
+    return evidence
+
+
+def _review_checklist_evidence(
+    pr_number: int,
+    comments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        match = REVIEW_CHECKLIST_SENTINEL.search(body)
+        if not match:
+            continue
+        raw_status = match.group("status").lower()
+        status = "pass" if raw_status in {"pass", "passed"} else "fail"
+        evidence.append(
+            {
+                "type": "review_checklist",
+                "number": pr_number,
+                "status": status,
+                "passed": status == "pass",
+                "surface": comment.get("_symphony_surface"),
+                "url": comment.get("_symphony_url"),
+                "author": ((comment.get("user") or {}).get("login")),
+                "has_spec_compliance": _has_checked_item(body, "spec_compliance"),
+                "has_issue_fit": _has_checked_item(body, "issue_fit"),
+                "has_existing_design_fit": _has_checked_item(body, "existing_design_fit"),
+                "has_tests": _has_checked_item(body, "tests"),
+                "has_review_threads": _has_checked_item(body, "review_threads"),
+            }
+        )
+    return evidence
+
+
+def _has_checked_item(body: str, key: str) -> bool:
+    pattern = re.compile(
+        rf"(?:^|\n)\s*-\s*\[[xX]\]\s*{re.escape(key)}\s*:",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(body))
+
+
+def _design_checklist_evidence_from_texts(texts: list[str]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for text in texts:
+        match = DESIGN_CHECKLIST_SENTINEL.search(text)
+        if not match:
+            continue
+        raw_status = match.group("status").lower()
+        status = "pass" if raw_status in {"pass", "passed"} else "fail"
+        evidence.append(
+            {
+                "type": "design_checklist",
+                "status": status,
+                "passed": status == "pass",
+                "has_problem_framing": _has_checked_item(text, "problem_framing"),
+                "has_existing_mechanism_fit": _has_checked_item(
+                    text, "existing_mechanism_fit"
+                ),
+                "has_minimal_surface_area": _has_checked_item(text, "minimal_surface_area"),
+                "has_data_model_fit": _has_checked_item(text, "data_model_fit"),
+                "has_test_strategy": _has_checked_item(text, "test_strategy"),
+                "has_drift_assessment": _has_checked_item(text, "drift_assessment"),
+            }
+        )
+    return evidence
 
 
 def _pr_author(pr: PullRequest) -> str:

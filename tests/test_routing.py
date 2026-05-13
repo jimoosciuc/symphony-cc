@@ -613,7 +613,17 @@ async def test_role_graph_reviewer_approval_outcome_transitions_to_approved(
                 "type": "review_approval_label",
                 "number": 7,
                 "label": "symphony-review-approved",
-            }
+            },
+            {
+                "type": "review_checklist",
+                "number": 7,
+                "passed": True,
+                "has_spec_compliance": True,
+                "has_issue_fit": True,
+                "has_existing_design_fit": True,
+                "has_tests": True,
+                "has_review_threads": True,
+            },
         ],
         role_outcome="approved",
         issue=_review_issue(),
@@ -658,6 +668,16 @@ async def test_role_graph_reviewer_approval_allows_symphony_approval_label(
                 "type": "review_approval_label",
                 "number": 7,
                 "label": "symphony-review-approved",
+            },
+            {
+                "type": "review_checklist",
+                "number": 7,
+                "passed": True,
+                "has_spec_compliance": True,
+                "has_issue_fit": True,
+                "has_existing_design_fit": True,
+                "has_tests": True,
+                "has_review_threads": True,
             },
         ],
         role_outcome="approved",
@@ -712,13 +732,98 @@ async def test_role_graph_reviewer_approval_requires_machine_review_gate(
 
     state = tracker.states["acme/proj#1"]
     assert "symphony-approved" not in state.issue.labels
-    assert "symphony-ready-review" in state.issue.labels
+    assert "symphony-changes-requested" in state.issue.labels
     transition = orch.recent_finished[0]["role_transition"]
     assert transition["requested"] == "approved"
     assert transition["error"]["code"] == "missing_evidence"
-    assert transition["fallback"] == "release:reviewer:review_gate_incomplete"
-    assert transition["applied"] == "release:reviewer:review_gate_incomplete"
-    assert transition["to_state"] == "ready_review"
+    assert transition["fallback"] == "changes_requested"
+    assert transition["applied"] == "changes_requested"
+    assert transition["to_state"] == "changes_requested"
+
+
+async def test_role_graph_reviewer_approval_requires_review_checklist(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "approved",
+                "marker_source": "assistant_message",
+            },
+            {
+                "type": "pr_review_state",
+                "number": 7,
+                "has_independent_approval": True,
+                "independent_approved_by": ["maintainer"],
+            },
+            {
+                "type": "pr_review_threads",
+                "number": 7,
+                "unresolved_unaddressed_count": 0,
+                "unresolved_current_count": 0,
+            },
+        ],
+        role_outcome="approved",
+        issue=_review_issue(),
+        reviewer_actor="agent",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-changes-requested" in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "approved"
+    assert transition["fallback"] == "changes_requested"
+    assert transition["applied"] == "changes_requested"
+
+
+async def test_role_graph_reviewer_approval_with_failing_checklist_requests_changes(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "approved",
+                "marker_source": "assistant_message",
+            },
+            {
+                "type": "pr_review_state",
+                "number": 7,
+                "has_independent_approval": True,
+                "independent_approved_by": ["maintainer"],
+            },
+            {
+                "type": "pr_review_threads",
+                "number": 7,
+                "unresolved_unaddressed_count": 0,
+                "unresolved_current_count": 0,
+            },
+            {
+                "type": "review_checklist",
+                "number": 7,
+                "passed": False,
+            },
+        ],
+        role_outcome="approved",
+        issue=_review_issue(),
+        reviewer_actor="agent",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-changes-requested" in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "approved"
+    assert transition["fallback"] == "changes_requested"
+    assert transition["applied"] == "changes_requested"
 
 
 async def test_role_graph_reviewer_changes_requested_outcome_routes_to_implementer(
@@ -748,6 +853,108 @@ async def test_role_graph_reviewer_changes_requested_outcome_routes_to_implement
     assert transition["requested"] == "changes_requested"
     assert transition["applied"] == "changes_requested"
     assert transition["to_state"] == "changes_requested"
+
+
+async def test_role_graph_reviewer_needs_leader_with_open_threads_routes_changes_requested(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "needs_leader",
+                "marker_source": "assistant_message",
+            },
+            {
+                "type": "pr_linked",
+                "url": "https://github.com/acme/proj/pull/7",
+                "number": 7,
+            },
+            {
+                "type": "pr_review_state",
+                "number": 7,
+                "has_independent_approval": False,
+            },
+            {
+                "type": "pr_review_threads",
+                "number": 7,
+                "unresolved_unaddressed_count": 1,
+                "unresolved_current_count": 1,
+            },
+        ],
+        role_outcome="needs_leader",
+        issue=_review_issue(),
+        reviewer_actor="agent",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-changes-requested" in state.issue.labels
+    assert "symphony-needs-design" not in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "needs_leader"
+    assert transition["override_reason"] == "review_gate_unaddressed_threads"
+    assert transition["fallback"] == "changes_requested"
+    assert transition["applied"] == "changes_requested"
+
+
+async def test_role_graph_reviewer_needs_leader_for_missing_approval_requeues_review(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "needs_leader",
+                "marker_source": "assistant_message",
+            },
+            {
+                "type": "pr_linked",
+                "url": "https://github.com/acme/proj/pull/7",
+                "number": 7,
+            },
+            {
+                "type": "pr_review_state",
+                "number": 7,
+                "has_independent_approval": False,
+            },
+            {
+                "type": "pr_review_threads",
+                "number": 7,
+                "unresolved_unaddressed_count": 0,
+                "unresolved_current_count": 0,
+            },
+            {
+                "type": "review_checklist",
+                "number": 7,
+                "passed": True,
+                "has_spec_compliance": True,
+                "has_issue_fit": True,
+                "has_existing_design_fit": True,
+                "has_tests": True,
+                "has_review_threads": True,
+            },
+        ],
+        role_outcome="needs_leader",
+        issue=_review_issue(),
+        reviewer_actor="agent",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-ready-review" in state.issue.labels
+    assert "symphony-needs-design" not in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "needs_leader"
+    assert transition["override_reason"] == "review_gate_missing_approval"
+    assert transition["fallback"] == "release:reviewer:review_gate_missing_approval"
+    assert transition["applied"] == "release:reviewer:review_gate_missing_approval"
 
 
 async def test_role_graph_reviewer_cannot_request_foreign_role_outcome(
