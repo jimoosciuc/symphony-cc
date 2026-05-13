@@ -110,6 +110,13 @@ ROLE_OUTCOME_SENTINEL = re.compile(
     re.IGNORECASE,
 )
 
+REVIEW_APPROVAL_SENTINEL = re.compile(
+    r"Symphony-Review-Approval\s*:\s*(?P<decision>approved|approve|yes)(?:\n|$)",
+    re.IGNORECASE,
+)
+
+REVIEW_APPROVAL_LABEL = "symphony-review-approved"
+
 # Bound the assistant-text scan so a runaway transcript can't pin the
 # detector reading megabytes of history.
 _MAX_ASSISTANT_TEXT_SCAN_CHARS = 64_000
@@ -241,6 +248,8 @@ class EvidenceDetector:
                     "created": False,
                 }
             )
+        if prs:
+            evidence.extend(self._detect_pull_request_review_gates(issue, prs))
 
         # 2. Role outcome sentinel (assistant text + last event payload).
         role_outcome = self._detect_role_outcome_sentinel(last_event, recent_assistant_text)
@@ -426,6 +435,158 @@ class EvidenceDetector:
             )
             return None
 
+    def _detect_pull_request_review_gates(
+        self,
+        issue: Issue,
+        prs: list[PullRequest],
+    ) -> list[dict[str, Any]]:
+        if self._client is None:
+            return []
+        evidence: list[dict[str, Any]] = []
+        for pr in prs:
+            evidence.extend(self._detect_one_pull_request_review_gate(issue, pr))
+        return evidence
+
+    def _detect_one_pull_request_review_gate(
+        self,
+        issue: Issue,
+        pr: PullRequest,
+    ) -> list[dict[str, Any]]:
+        try:
+            reviews = self._client.get(
+                f"/repos/{issue.owner}/{issue.repo}/pulls/{pr.number}/reviews"
+            )
+            review_threads = self._query_review_threads(issue, pr.number)
+        except GitHubError as exc:
+            _LOG.warning(
+                "evidence detector: review gate lookup failed for %s PR #%s: %s",
+                issue.identifier,
+                pr.number,
+                exc,
+            )
+            return [
+                {
+                    "type": "pr_review_gate_query_failed",
+                    "number": pr.number,
+                    "error": str(exc),
+                }
+            ]
+
+        review_entry = _review_state_evidence(pr, reviews if isinstance(reviews, list) else [])
+        threads_entry = _review_threads_evidence(pr.number, review_threads)
+        approval_entries = self._detect_review_approval_overrides(issue, pr)
+        return [review_entry, threads_entry, *approval_entries]
+
+    def _query_review_threads(self, issue: Issue, pr_number: int) -> list[dict[str, Any]]:
+        query = """
+        query($owner:String!, $repo:String!, $number:Int!) {
+          repository(owner:$owner, name:$repo) {
+            pullRequest(number:$number) {
+              reviewThreads(first:100) {
+                nodes {
+                  isResolved
+                  isOutdated
+                  path
+                  line
+                  comments(first:1) {
+                    nodes {
+                      url
+                      author { login }
+                      body
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        raw = self._client.post(
+            "/graphql",
+            json_body={
+                "query": query,
+                "variables": {
+                    "owner": issue.owner,
+                    "repo": issue.repo,
+                    "number": pr_number,
+                },
+            },
+        )
+        if not isinstance(raw, dict):
+            return []
+        if raw.get("errors"):
+            raise GitHubError(f"GraphQL reviewThreads returned errors: {raw['errors']!r}")
+        nodes = (
+            raw.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
+        return nodes if isinstance(nodes, list) else []
+
+    def _detect_review_approval_overrides(
+        self,
+        issue: Issue,
+        pr: PullRequest,
+    ) -> list[dict[str, Any]]:
+        evidence: list[dict[str, Any]] = []
+        labels = {label.strip().lower() for label in issue.labels}
+        if REVIEW_APPROVAL_LABEL in labels:
+            evidence.append(
+                {
+                    "type": "review_approval_label",
+                    "label": REVIEW_APPROVAL_LABEL,
+                    "number": pr.number,
+                }
+            )
+        evidence.extend(self._detect_review_approval_comments(issue, pr))
+        return evidence
+
+    def _detect_review_approval_comments(
+        self,
+        issue: Issue,
+        pr: PullRequest,
+    ) -> list[dict[str, Any]]:
+        evidence: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for number, surface in ((issue.number, "issue"), (pr.number, "pull_request")):
+            try:
+                comments = self._client.get(
+                    f"/repos/{issue.owner}/{issue.repo}/issues/{number}/comments"
+                )
+            except GitHubError as exc:
+                _LOG.warning(
+                    "evidence detector: review approval comment lookup failed for "
+                    "%s %s #%s: %s",
+                    issue.identifier,
+                    surface,
+                    number,
+                    exc,
+                )
+                continue
+            if not isinstance(comments, list):
+                continue
+            for comment in comments:
+                body = str(comment.get("body") or "")
+                if not REVIEW_APPROVAL_SENTINEL.search(body):
+                    continue
+                url = str(comment.get("html_url") or comment.get("url") or "")
+                dedupe_key = url or f"{surface}:{comment.get('id')}"
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                evidence.append(
+                    {
+                        "type": "review_approval_comment",
+                        "number": pr.number,
+                        "surface": surface,
+                        "url": url or None,
+                        "author": ((comment.get("user") or {}).get("login")),
+                    }
+                )
+        return evidence
+
     def _detect_no_pr_sentinel(
         self,
         last_event: AgentEvent | None,
@@ -583,6 +744,95 @@ def _safe_int(value: str) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _review_state_evidence(pr: PullRequest, reviews: list[dict[str, Any]]) -> dict[str, Any]:
+    pr_author = _pr_author(pr)
+    latest_by_author: dict[str, dict[str, Any]] = {}
+    for review in reviews:
+        author = ((review.get("user") or {}).get("login") or "").strip()
+        if not author:
+            continue
+        submitted_at = str(review.get("submitted_at") or "")
+        previous = latest_by_author.get(author)
+        if previous is None or submitted_at >= str(previous.get("submitted_at") or ""):
+            latest_by_author[author] = review
+
+    approved_by: list[str] = []
+    changes_requested_by: list[str] = []
+    commented_by: list[str] = []
+    for author, review in latest_by_author.items():
+        state = str(review.get("state") or "").upper()
+        if state == "APPROVED":
+            approved_by.append(author)
+        elif state == "CHANGES_REQUESTED":
+            changes_requested_by.append(author)
+        elif state == "COMMENTED":
+            commented_by.append(author)
+
+    independent_approved_by = sorted(author for author in approved_by if author != pr_author)
+    return {
+        "type": "pr_review_state",
+        "number": pr.number,
+        "url": pr.url,
+        "pr_author": pr_author,
+        "approved_by": sorted(approved_by),
+        "independent_approved_by": independent_approved_by,
+        "changes_requested_by": sorted(changes_requested_by),
+        "commented_by": sorted(commented_by),
+        "has_independent_approval": bool(independent_approved_by),
+    }
+
+
+def _review_threads_evidence(
+    pr_number: int,
+    threads: list[dict[str, Any]],
+) -> dict[str, Any]:
+    unresolved_current: list[dict[str, Any]] = []
+    unresolved_outdated = 0
+    for thread in threads:
+        if bool(thread.get("isResolved")):
+            continue
+        if bool(thread.get("isOutdated")):
+            unresolved_outdated += 1
+            continue
+        comments = (
+            ((thread.get("comments") or {}).get("nodes") or [])
+            if isinstance(thread.get("comments"), dict)
+            else []
+        )
+        first = comments[0] if comments else {}
+        unresolved_current.append(
+            {
+                "path": thread.get("path"),
+                "line": thread.get("line"),
+                "url": first.get("url"),
+                "author": ((first.get("author") or {}).get("login") if first else None),
+                "body": _truncate(str(first.get("body") or ""), 240) if first else "",
+            }
+        )
+
+    return {
+        "type": "pr_review_threads",
+        "number": pr_number,
+        "unresolved_current_count": len(unresolved_current),
+        "unresolved_outdated_count": unresolved_outdated,
+        "unresolved_count": len(unresolved_current) + unresolved_outdated,
+        "examples": unresolved_current[:3],
+    }
+
+
+def _pr_author(pr: PullRequest) -> str:
+    raw = pr.raw if isinstance(pr.raw, dict) else {}
+    user = raw.get("user") or {}
+    login = user.get("login") if isinstance(user, dict) else None
+    return str(login or "").strip()
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
 
 
 def collect_recent_assistant_text(events: Iterable[AgentEvent], *, limit: int = 16) -> str:

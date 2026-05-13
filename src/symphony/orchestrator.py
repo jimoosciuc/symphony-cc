@@ -122,6 +122,7 @@ class WorkerState:
     role_state: str | None = None
     role_actor: str | None = None
     gate_owner: str | None = None
+    role_claim: TransitionPlan | None = None
     role_transition: dict[str, Any] | None = None
 
 
@@ -965,6 +966,7 @@ class Orchestrator:
                     retry=retry,
                     lane=lane,
                     role_info=role_info,
+                    role_claim=role_claim,
                 )
             except ProviderRetryableError as exc:
                 # Restore-startup failure under resume_same_session, or any
@@ -1194,6 +1196,7 @@ class Orchestrator:
             return self._route_role_fallback(
                 worker,
                 route,
+                detector_result=detector_result,
                 block_reason=block_reason,
                 outcome_reason=outcome_reason,
             )
@@ -1218,6 +1221,7 @@ class Orchestrator:
             return self._route_role_fallback(
                 worker,
                 route,
+                detector_result=detector_result,
                 block_reason=block_reason,
                 outcome_reason=outcome_reason,
             )
@@ -1236,6 +1240,7 @@ class Orchestrator:
         return self._route_role_fallback(
             worker,
             route,
+            detector_result=detector_result,
             block_reason=block_reason,
             outcome_reason=outcome_reason,
         )
@@ -1245,12 +1250,36 @@ class Orchestrator:
         worker: WorkerState,
         route: dict[str, Any],
         *,
+        detector_result: DetectorResult,
         block_reason: str,
         outcome_reason: str,
     ) -> dict[str, Any]:
         graph = self.config.role_graph
         if graph is None or worker.role_name is None or worker.role_state is None:
             return route
+        if _is_incomplete_review_approval_gate(
+            worker=worker,
+            route=route,
+            detector_result=detector_result,
+        ):
+            if worker.role_claim is not None:
+                reverse = plan_reverse_claim(
+                    graph,
+                    worker.role_claim,
+                    reason="review_gate_incomplete",
+                )
+                if self._apply_role_transition(
+                    worker,
+                    reverse,
+                    route,
+                    evidence_summary=(
+                        "fallback_reason=review_gate_incomplete; "
+                        f"{_review_gate_summary(detector_result)}; "
+                        f"outcome_reason={outcome_reason}"
+                    ),
+                    fallback=True,
+                ):
+                    return route
         fallback_name = _first_role_transition(
             graph,
             worker.role_name,
@@ -1484,6 +1513,7 @@ class Orchestrator:
         retry: RetryState | None,
         lane: LaneConfig | None = None,
         role_info: dict[str, str | None] | None = None,
+        role_claim: TransitionPlan | None = None,
     ) -> WorkerState:
         workspace = self.workspaces.prepare(issue)
 
@@ -1610,6 +1640,7 @@ class Orchestrator:
             role_state=role_info.get("state") if role_info else None,
             role_actor=role_info.get("actor") if role_info else None,
             gate_owner=role_info.get("gate_owner") if role_info else None,
+            role_claim=role_claim,
         )
 
     async def _run_worker(
@@ -2238,7 +2269,12 @@ def _transition_evidence_for_outcome(
         detector_result.task_outcome == OUTCOME_COMPLETED_ROLE_OUTCOME
         and detector_result.role_outcome == transition_name
     ):
-        evidence.extend(_role_outcome_evidence_for_transition(transition_name))
+        evidence.extend(
+            _role_outcome_evidence_for_transition(
+                transition_name,
+                detector_result=detector_result,
+            )
+        )
     if (
         transition_name in {"design_needed", "operator_blocked", "no_work_needed"}
         or detector_result.no_pr_reason
@@ -2248,7 +2284,11 @@ def _transition_evidence_for_outcome(
     return tuple(dict.fromkeys(evidence))
 
 
-def _role_outcome_evidence_for_transition(transition_name: str) -> tuple[str, ...]:
+def _role_outcome_evidence_for_transition(
+    transition_name: str,
+    *,
+    detector_result: DetectorResult,
+) -> tuple[str, ...]:
     """Evidence attested by a role-outcome sentinel.
 
     The agent must produce the GitHub-visible artifact described in the
@@ -2257,7 +2297,10 @@ def _role_outcome_evidence_for_transition(transition_name: str) -> tuple[str, ..
     not all audit artifacts are machine-verifiable yet.
     """
     if transition_name == "approved":
-        return ("pr_approval", "review_comment")
+        evidence = ["review_comment"]
+        if _has_verified_pr_approval(detector_result):
+            evidence.append("pr_approval")
+        return tuple(evidence)
     if transition_name == "changes_requested":
         return ("review_comment",)
     if transition_name in {"decision_to_impl", "verified", "verification_failed"}:
@@ -2269,6 +2312,76 @@ def _role_outcome_evidence_for_transition(transition_name: str) -> tuple[str, ..
 
 def _task_evidence_has(detector_result: DetectorResult, evidence_type: str) -> bool:
     return any(entry.get("type") == evidence_type for entry in detector_result.task_evidence)
+
+
+def _has_verified_pr_approval(detector_result: DetectorResult) -> bool:
+    has_independent_approval = any(
+        entry.get("type") == "pr_review_state"
+        and bool(entry.get("has_independent_approval"))
+        for entry in detector_result.task_evidence
+    )
+    has_symphony_approval = any(
+        entry.get("type") in {"review_approval_label", "review_approval_comment"}
+        for entry in detector_result.task_evidence
+    )
+    has_unresolved_current_thread = any(
+        entry.get("type") == "pr_review_threads"
+        and int(entry.get("unresolved_current_count") or 0) > 0
+        for entry in detector_result.task_evidence
+    )
+    return (has_independent_approval or has_symphony_approval) and not has_unresolved_current_thread
+
+
+def _is_incomplete_review_approval_gate(
+    *,
+    worker: WorkerState,
+    route: dict[str, Any],
+    detector_result: DetectorResult,
+) -> bool:
+    error = route.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    return (
+        route.get("requested") == "approved"
+        and code == "missing_evidence"
+        and not _has_verified_pr_approval(detector_result)
+    )
+
+
+def _review_gate_summary(detector_result: DetectorResult) -> str:
+    parts: list[str] = []
+    review_states = [
+        entry for entry in detector_result.task_evidence if entry.get("type") == "pr_review_state"
+    ]
+    if not review_states:
+        parts.append("review_gate=missing_review_state")
+    elif not any(entry.get("has_independent_approval") for entry in review_states) and not any(
+        entry.get("type") in {"review_approval_label", "review_approval_comment"}
+        for entry in detector_result.task_evidence
+    ):
+        parts.append("review_gate=missing_approval")
+
+    current = sum(
+        int(entry.get("unresolved_current_count") or 0)
+        for entry in detector_result.task_evidence
+        if entry.get("type") == "pr_review_threads"
+    )
+    outdated = sum(
+        int(entry.get("unresolved_outdated_count") or 0)
+        for entry in detector_result.task_evidence
+        if entry.get("type") == "pr_review_threads"
+    )
+    if current:
+        parts.append(f"unresolved_current_threads={current}")
+    if outdated:
+        parts.append(f"unresolved_outdated_threads={outdated}")
+    failures = [
+        str(entry.get("error"))
+        for entry in detector_result.task_evidence
+        if entry.get("type") == "pr_review_gate_query_failed" and entry.get("error")
+    ]
+    if failures:
+        parts.append(f"review_gate_query_failed={failures[0]}")
+    return "; ".join(parts) if parts else "review_gate=unverified"
 
 
 def _transition_evidence_summary(

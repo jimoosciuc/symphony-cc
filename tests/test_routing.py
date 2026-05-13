@@ -597,6 +597,22 @@ async def test_role_graph_reviewer_approval_outcome_transitions_to_approved(
                 "type": "role_outcome",
                 "transition": "approved",
                 "marker_source": "assistant_message",
+            },
+            {
+                "type": "pr_review_state",
+                "number": 7,
+                "has_independent_approval": True,
+                "independent_approved_by": ["maintainer"],
+            },
+            {
+                "type": "pr_review_threads",
+                "number": 7,
+                "unresolved_current_count": 0,
+            },
+            {
+                "type": "review_approval_label",
+                "number": 7,
+                "label": "symphony-review-approved",
             }
         ],
         role_outcome="approved",
@@ -613,6 +629,96 @@ async def test_role_graph_reviewer_approval_outcome_transitions_to_approved(
     assert transition["requested"] == "approved"
     assert transition["applied"] == "approved"
     assert transition["to_state"] == "approved"
+
+
+async def test_role_graph_reviewer_approval_allows_symphony_approval_label(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "approved",
+                "marker_source": "assistant_message",
+            },
+            {
+                "type": "pr_review_state",
+                "number": 7,
+                "has_independent_approval": False,
+                "independent_approved_by": [],
+            },
+            {
+                "type": "pr_review_threads",
+                "number": 7,
+                "unresolved_current_count": 0,
+            },
+            {
+                "type": "review_approval_label",
+                "number": 7,
+                "label": "symphony-review-approved",
+            },
+        ],
+        role_outcome="approved",
+        issue=_review_issue(),
+        reviewer_actor="agent",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-approved" in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["applied"] == "approved"
+    assert transition["to_state"] == "approved"
+
+
+async def test_role_graph_reviewer_approval_requires_machine_review_gate(
+    tmp_path: Path,
+) -> None:
+    orch, tracker = _make_role_orch(
+        tmp_path,
+        OUTCOME_COMPLETED_ROLE_OUTCOME,
+        evidence=[
+            {
+                "type": "role_outcome",
+                "transition": "approved",
+                "marker_source": "assistant_message",
+            },
+            {
+                "type": "pr_review_state",
+                "number": 7,
+                "has_independent_approval": False,
+                "independent_approved_by": [],
+            },
+            {
+                "type": "pr_review_threads",
+                "number": 7,
+                "unresolved_current_count": 1,
+            },
+            {
+                "type": "review_approval_label",
+                "number": 7,
+                "label": "symphony-review-approved",
+            },
+        ],
+        role_outcome="approved",
+        issue=_review_issue(),
+        reviewer_actor="agent",
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-approved" not in state.issue.labels
+    assert "symphony-ready-review" in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "approved"
+    assert transition["error"]["code"] == "missing_evidence"
+    assert transition["fallback"] == "release:reviewer:review_gate_incomplete"
+    assert transition["applied"] == "release:reviewer:review_gate_incomplete"
+    assert transition["to_state"] == "ready_review"
 
 
 async def test_role_graph_reviewer_changes_requested_outcome_routes_to_implementer(
