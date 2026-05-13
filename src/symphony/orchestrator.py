@@ -2581,10 +2581,32 @@ def _task_evidence_has(detector_result: DetectorResult, evidence_type: str) -> b
     return any(
         entry.get("type") == evidence_type
         and (
-            evidence_type not in {"review_checklist", "design_checklist"}
-            or bool(entry.get("passed"))
+            (
+                evidence_type not in {"review_checklist", "design_checklist"}
+                and bool(entry)
+            )
+            or (
+                evidence_type == "review_checklist"
+                and bool(entry.get("passed"))
+            )
+            or (
+                evidence_type == "design_checklist"
+                and _design_checklist_is_complete(entry)
+            )
         )
         for entry in detector_result.task_evidence
+    )
+
+
+def _design_checklist_is_complete(entry: dict[str, Any]) -> bool:
+    return (
+        bool(entry.get("passed"))
+        and bool(entry.get("has_problem_framing"))
+        and bool(entry.get("has_existing_mechanism_fit"))
+        and bool(entry.get("has_minimal_surface_area"))
+        and bool(entry.get("has_data_model_fit"))
+        and bool(entry.get("has_test_strategy"))
+        and bool(entry.get("has_drift_assessment"))
     )
 
 
