@@ -110,6 +110,20 @@ ROLE_OUTCOME_SENTINEL = re.compile(
     re.IGNORECASE,
 )
 
+ROLE_ACTION_TYPES: frozenset[str] = frozenset(
+    {
+        "decision_to_impl",
+        "decision_to_review",
+        "approved",
+        "changes_requested",
+        "needs_leader",
+        "design_needed",
+        "operator_blocked",
+        "no_work_needed",
+        "pr_delivered",
+    }
+)
+
 REVIEW_APPROVAL_SENTINEL = re.compile(
     r"Symphony-Review-Approval\s*:\s*(?P<decision>approved|approve|yes)(?:\n|$)",
     re.IGNORECASE,
@@ -153,6 +167,8 @@ class DetectorResult:
     task_outcome: str
     task_evidence: list[dict[str, Any]] = field(default_factory=list)
     role_outcome: str | None = None
+    role_action: dict[str, Any] | None = None
+    role_action_error: dict[str, Any] | None = None
     no_pr_reason: str | None = None
     outcome_decided_by: str = DECIDED_BY_DETECTOR
     task_outcome_recorded_at: datetime = field(
@@ -165,6 +181,8 @@ class DetectorResult:
             "task_outcome": self.task_outcome,
             "task_evidence": list(self.task_evidence),
             "role_outcome": self.role_outcome,
+            "role_action": self.role_action,
+            "role_action_error": self.role_action_error,
             "no_pr_reason": self.no_pr_reason,
             "outcome_decided_by": self.outcome_decided_by,
             "task_outcome_recorded_at": self.task_outcome_recorded_at.isoformat(),
@@ -282,8 +300,20 @@ class EvidenceDetector:
         if prs:
             evidence.extend(self._detect_pull_request_review_gates(issue, prs))
 
-        # 2. Role outcome sentinel (assistant text + last event payload).
-        role_outcome = self._detect_role_outcome_sentinel(last_event, recent_assistant_text)
+        # 2. Typed role action first, legacy sentinel second.
+        role_action, role_action_evidence, role_action_error = _detect_typed_role_action(
+            last_event
+        )
+        evidence.extend(role_action_evidence)
+        evidence.extend(_typed_role_action_evidence_entries(role_action))
+        role_outcome = (
+            str(role_action["type"]) if role_action is not None else None
+        )
+        if role_outcome is None:
+            role_outcome = self._detect_role_outcome_sentinel(
+                last_event,
+                recent_assistant_text,
+            )
         if role_outcome == "approved":
             review_prs = self._detect_pull_requests(issue, state="all")
             if review_prs:
@@ -319,7 +349,7 @@ class EvidenceDetector:
                         self._detect_pull_request_review_gates(issue, missing_gate_prs)
                     )
                 evidence.extend(_pr_merged_evidence(pr) for pr in merged_prs)
-        if role_outcome is not None:
+        if role_outcome is not None and role_action is None:
             evidence.append(
                 {
                     "type": "role_outcome",
@@ -394,6 +424,15 @@ class EvidenceDetector:
                 task_outcome=OUTCOME_COMPLETED_ROLE_OUTCOME,
                 task_evidence=evidence,
                 role_outcome=role_outcome,
+                role_action=role_action,
+                role_action_error=role_action_error,
+                outcome_decided_by=DECIDED_BY_DETECTOR,
+            )
+        if role_action_error is not None:
+            return DetectorResult(
+                task_outcome=OUTCOME_COMPLETED_ROLE_OUTCOME,
+                task_evidence=evidence,
+                role_action_error=role_action_error,
                 outcome_decided_by=DECIDED_BY_DETECTOR,
             )
         if prs:
@@ -845,6 +884,109 @@ class EvidenceDetector:
 
 
 # -- Helpers -----------------------------------------------------------------
+
+
+def _detect_typed_role_action(
+    last_event: AgentEvent | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
+    if last_event is None:
+        return None, [], None
+    raw = (last_event.payload or {}).get("role_action")
+    if raw is None:
+        return None, [], None
+    if not isinstance(raw, dict):
+        error = {
+            "code": "malformed_role_action",
+            "message": "role_action must be an object",
+            "raw_type": type(raw).__name__,
+        }
+        return None, [{"type": "role_action_invalid", **error}], error
+    action_type = raw.get("type")
+    if not isinstance(action_type, str) or not action_type.strip():
+        error = {
+            "code": "missing_role_action_type",
+            "message": "role_action.type is required",
+        }
+        return None, [{"type": "role_action_invalid", **error}], error
+    action_type = action_type.strip()
+    if action_type not in ROLE_ACTION_TYPES:
+        error = {
+            "code": "unknown_role_action",
+            "message": f"unknown role_action.type {action_type!r}",
+            "action_type": action_type,
+        }
+        return None, [{"type": "role_action_invalid", **error}], error
+    action = {
+        "type": action_type,
+        "role": raw.get("role") if isinstance(raw.get("role"), str) else None,
+        "summary": raw.get("summary") if isinstance(raw.get("summary"), str) else None,
+        "evidence": raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {},
+        "references": (
+            raw.get("references") if isinstance(raw.get("references"), dict) else {}
+        ),
+    }
+    return action, [
+        {
+            "type": "role_action",
+            "transition": action_type,
+            "role": action["role"],
+            "summary": action["summary"],
+            "marker_source": "typed_role_action",
+        }
+    ], None
+
+
+def _typed_role_action_evidence_entries(action: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if action is None:
+        return []
+    raw_evidence = action.get("evidence")
+    if not isinstance(raw_evidence, dict):
+        return []
+    entries: list[dict[str, Any]] = []
+    design = raw_evidence.get("design_checklist")
+    if isinstance(design, dict):
+        entries.append(
+            {
+                "type": "design_checklist",
+                "status": "pass" if bool(design.get("passed")) else "fail",
+                "passed": bool(design.get("passed")),
+                "marker_source": "typed_role_action",
+                "has_problem_framing": bool(design.get("problem_framing")),
+                "has_existing_mechanism_fit": bool(
+                    design.get("existing_mechanism_fit")
+                ),
+                "has_minimal_surface_area": bool(design.get("minimal_surface_area")),
+                "has_data_model_fit": bool(design.get("data_model_fit")),
+                "has_test_strategy": bool(design.get("test_strategy")),
+                "has_drift_assessment": bool(design.get("drift_assessment")),
+            }
+        )
+    review = raw_evidence.get("review_checklist")
+    if isinstance(review, dict):
+        entries.append(
+            {
+                "type": "review_checklist",
+                "status": "pass" if bool(review.get("passed")) else "fail",
+                "passed": bool(review.get("passed")),
+                "marker_source": "typed_role_action",
+                "has_spec_compliance": bool(review.get("spec_compliance")),
+                "has_issue_fit": bool(review.get("issue_fit")),
+                "has_existing_design_fit": bool(review.get("existing_design_fit")),
+                "has_tests": bool(review.get("tests")),
+                "has_review_threads": bool(review.get("review_threads")),
+            }
+        )
+    approval = raw_evidence.get("review_approval")
+    if approval is True or (
+        isinstance(approval, dict) and bool(approval.get("approved"))
+    ):
+        entries.append(
+            {
+                "type": "review_approval",
+                "marker_source": "typed_role_action",
+            }
+        )
+    return entries
 
 
 def _extract_denied_tools(event: AgentEvent | None) -> list[str]:

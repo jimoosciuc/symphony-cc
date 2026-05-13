@@ -1310,6 +1310,44 @@ class Orchestrator:
             "fallback": None,
             "error": None,
         }
+        if detector_result.role_action_error is not None:
+            route["error"] = detector_result.role_action_error
+            if worker.role_claim is not None:
+                reverse = plan_reverse_claim(
+                    graph,
+                    worker.role_claim,
+                    reason="invalid_role_action",
+                )
+                self._apply_role_transition(
+                    worker,
+                    reverse,
+                    route,
+                    evidence_summary=(
+                        "fallback_reason=invalid_role_action; "
+                        f"error={detector_result.role_action_error.get('message')}"
+                    ),
+                    fallback=True,
+                )
+            else:
+                try:
+                    self.tracker.mark_issue_blocked(
+                        worker.issue,
+                        "invalid_role_action: "
+                        f"{detector_result.role_action_error.get('message')}",
+                    )
+                    route["fallback"] = "mark_issue_blocked"
+                except Exception as exc:  # noqa: BLE001 - tracker errors must not mask outcome
+                    route["error"] = {
+                        "code": "invalid_role_action_block_failed",
+                        "message": str(exc),
+                        "previous": route.get("error"),
+                    }
+                    _LOG.warning(
+                        "invalid role action fallback failed for %s: %s",
+                        worker.issue.identifier,
+                        exc,
+                    )
+            return route
         if requested is None:
             route["error"] = "no_transition_for_outcome"
             return self._route_role_fallback(
@@ -2304,6 +2342,8 @@ class Orchestrator:
                 "task_outcome": detector_result.task_outcome,
                 "outcome_decided_by": detector_result.outcome_decided_by,
                 "task_evidence": detector_result.task_evidence,
+                "role_action": detector_result.role_action,
+                "role_action_error": detector_result.role_action_error,
                 "no_pr_reason": detector_result.no_pr_reason,
                 "permission_denials_count": permission_denials_count,
                 "last_event_at": (
@@ -2625,7 +2665,8 @@ def _review_gate_has_approval_evidence(detector_result: DetectorResult) -> bool:
         for entry in detector_result.task_evidence
     )
     has_symphony_approval = any(
-        entry.get("type") in {"review_approval_label", "review_approval_comment"}
+        entry.get("type")
+        in {"review_approval_label", "review_approval_comment", "review_approval"}
         for entry in detector_result.task_evidence
     )
     return has_independent_approval or has_symphony_approval
