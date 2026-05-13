@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -173,9 +174,22 @@ def _client_with_review_gate(
     return GitHubClient("ghp_test_xxxx", transport=httpx.MockTransport(handler))
 
 
-def _last_event(payload: dict[str, Any]) -> AgentEvent:
-    from datetime import datetime, timezone
+def _client_with_issue_comments(
+    *,
+    prs: list[dict[str, Any]] | None = None,
+    issue_comments: list[dict[str, Any]],
+) -> GitHubClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/pulls"):
+            return httpx.Response(200, json=list(prs or []))
+        if request.url.path.endswith("/issues/1/comments"):
+            return httpx.Response(200, json=list(issue_comments))
+        return httpx.Response(404, json={"message": "not found"})
 
+    return GitHubClient("ghp_test_xxxx", transport=httpx.MockTransport(handler))
+
+
+def _last_event(payload: dict[str, Any]) -> AgentEvent:
     return AgentEvent(
         event="turn_completed",
         timestamp=datetime.now(timezone.utc),
@@ -431,6 +445,58 @@ def test_completed_role_outcome_collects_design_checklist_evidence(tmp_path: Pat
 
     checklist = [e for e in result.task_evidence if e["type"] == "design_checklist"]
     assert checklist[0]["passed"] is True
+    assert checklist[0]["has_existing_mechanism_fit"] is True
+
+
+def test_completed_role_outcome_collects_github_design_checklist_comment(
+    tmp_path: Path,
+) -> None:
+    client = _client_with_issue_comments(
+        issue_comments=[
+            {
+                "created_at": "2026-05-13T11:59:59Z",
+                "html_url": "https://github.com/acme/proj/issues/1#old",
+                "body": "Symphony-Design-Checklist: fail\n- [x] problem_framing: old",
+                "user": {"login": "jimoosciuc"},
+            },
+            {
+                "created_at": "2026-05-13T12:01:00Z",
+                "html_url": "https://github.com/acme/proj/issues/1#new",
+                "body": "\n".join(
+                    [
+                        "Leader decision: route to review.",
+                        "Symphony-Design-Checklist: pass",
+                        "- [x] problem_framing: clear",
+                        "- [x] existing_mechanism_fit: reuse current model",
+                        "- [x] minimal_surface_area: no extra API",
+                        "- [x] data_model_fit: compatible",
+                        "- [x] test_strategy: covered",
+                        "- [x] drift_assessment: no drift",
+                    ]
+                ),
+                "user": {"login": "jimoosciuc"},
+            },
+        ]
+    )
+    detector = EvidenceDetector(_github(), client=client)
+
+    result = detector.detect(
+        issue=_issue(),
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=_last_event({"result": "Symphony-Role-Outcome: decision_to_review"}),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+        session_started_at=datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
+    )
+
+    checklist = [e for e in result.task_evidence if e["type"] == "design_checklist"]
+    assert len(checklist) == 1
+    assert checklist[0]["passed"] is True
+    assert checklist[0]["surface"] == "issue"
+    assert checklist[0]["url"] == "https://github.com/acme/proj/issues/1#new"
     assert checklist[0]["has_existing_mechanism_fit"] is True
 
 

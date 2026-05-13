@@ -208,6 +208,7 @@ class EvidenceDetector:
         last_event: AgentEvent | None,
         recent_assistant_text: str,
         workspace_path: Path | None,
+        session_started_at: datetime | None = None,
     ) -> DetectorResult:
         """Classify the worker's task outcome.
 
@@ -274,6 +275,13 @@ class EvidenceDetector:
         design_checklist = _design_checklist_evidence_from_texts(
             self._sentinel_haystacks(last_event, recent_assistant_text)
         )
+        if role_outcome in {"decision_to_impl", "decision_to_review"}:
+            design_checklist.extend(
+                self._detect_design_checklist_comments(
+                    issue,
+                    session_started_at=session_started_at,
+                )
+            )
         evidence.extend(design_checklist)
 
         # 3. No-PR sentinel (assistant text + last event payload).
@@ -595,6 +603,51 @@ class EvidenceDetector:
                 item["_symphony_url"] = url or None
                 comments_out.append(item)
         return comments_out
+
+    def _query_issue_comments(self, issue: Issue) -> list[dict[str, Any]]:
+        if self._client is None:
+            return []
+        try:
+            comments = self._client.get(
+                f"/repos/{issue.owner}/{issue.repo}/issues/{issue.number}/comments"
+            )
+        except GitHubError as exc:
+            _LOG.warning(
+                "evidence detector: issue comment lookup failed for %s: %s",
+                issue.identifier,
+                exc,
+            )
+            return []
+        if not isinstance(comments, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for comment in comments:
+            item = dict(comment)
+            url = str(comment.get("html_url") or comment.get("url") or "")
+            item["_symphony_surface"] = "issue"
+            item["_symphony_url"] = url or None
+            out.append(item)
+        return out
+
+    def _detect_design_checklist_comments(
+        self,
+        issue: Issue,
+        *,
+        session_started_at: datetime | None,
+    ) -> list[dict[str, Any]]:
+        comments = self._query_issue_comments(issue)
+        if session_started_at is not None:
+            comments = [
+                comment
+                for comment in comments
+                if _comment_created_at_or_min(comment) >= session_started_at
+            ]
+        latest: list[dict[str, Any]] = []
+        for comment in sorted(comments, key=_comment_created_at_or_min):
+            evidence = _design_checklist_evidence_from_comments([comment])
+            if evidence:
+                latest = evidence
+        return latest
 
     def _detect_no_pr_sentinel(
         self,
@@ -926,6 +979,35 @@ def _design_checklist_evidence_from_texts(texts: list[str]) -> list[dict[str, An
             }
         )
     return evidence
+
+
+def _design_checklist_evidence_from_comments(
+    comments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        for entry in _design_checklist_evidence_from_texts([body]):
+            entry.update(
+                {
+                    "surface": comment.get("_symphony_surface"),
+                    "url": comment.get("_symphony_url"),
+                    "author": ((comment.get("user") or {}).get("login")),
+                    "created_at": comment.get("created_at"),
+                }
+            )
+            evidence.append(entry)
+    return evidence
+
+
+def _comment_created_at_or_min(comment: dict[str, Any]) -> datetime:
+    raw = str(comment.get("created_at") or "")
+    if not raw:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _pr_author(pr: PullRequest) -> str:

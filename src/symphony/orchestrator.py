@@ -1899,6 +1899,7 @@ class Orchestrator:
                 last_event=worker.last_event,
                 recent_assistant_text=_assistant_text_tail(worker),
                 workspace_path=worker.workspace.path,
+                session_started_at=worker.session.started_at,
             )
             no_pr_operator_required = _no_pr_reason_requires_operator(
                 detector_result.no_pr_reason
