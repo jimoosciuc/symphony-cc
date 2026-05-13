@@ -210,6 +210,44 @@ async def test_codex_provider_nonzero_exit_overrides_turn_completed(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_codex_provider_intermediate_error_does_not_override_final_completion(
+    tmp_path: Path,
+) -> None:
+    async def runner(session, message, config, provider_session_id):
+        return CodexRunResult(
+            returncode=0,
+            events=[
+                {"type": "thread.started", "thread_id": "thread-1"},
+                {"type": "turn.started"},
+                {"type": "error", "message": "Reconnecting... 1/5"},
+                {
+                    "type": "item.completed",
+                    "item": {"id": "item_0", "type": "agent_message", "text": "done"},
+                },
+                {"type": "turn.completed", "usage": {"input_tokens": 1}},
+            ],
+            last_message="done",
+        )
+
+    provider = CodexProvider(runner=runner)
+    record = await provider.start_session(_issue(), tmp_path / "ws", _config(tmp_path))
+
+    events = await _drain(provider.send_input(record, "go"))
+
+    assert [event.event for event in events] == [
+        "session_started",
+        "heartbeat",
+        "heartbeat",
+        "message_delta",
+        "message_completed",
+        "usage",
+        "turn_completed",
+    ]
+    assert events[2].payload["kind"] == "error"
+    assert events[-1].event == "turn_completed"
+
+
+@pytest.mark.asyncio
 async def test_codex_provider_malformed_jsonl_fails_turn(tmp_path: Path) -> None:
     async def runner(session, message, config, provider_session_id):
         return CodexRunResult(

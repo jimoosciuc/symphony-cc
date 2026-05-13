@@ -83,12 +83,15 @@ def render_dashboard_html(snapshot: dict[str, Any]) -> str:
     table {{
       width: 100%;
       border-collapse: collapse;
+      table-layout: fixed;
     }}
     th, td {{
       padding: 8px 10px;
       border-top: 1px solid var(--line);
       text-align: left;
       vertical-align: top;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }}
     th {{
       color: var(--muted);
@@ -121,6 +124,8 @@ def render_dashboard_html(snapshot: dict[str, Any]) -> str:
     code {{
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }}
     .grid {{
       display: grid;
@@ -154,6 +159,9 @@ def render_dashboard_html(snapshot: dict[str, Any]) -> str:
     .warn {{ color: var(--warn); }}
     .bad {{ color: var(--bad); }}
     .muted {{ color: var(--muted); }}
+    .table-wrap {{
+      overflow-x: auto;
+    }}
   </style>
 </head>
 <body>
@@ -222,16 +230,21 @@ def render_run_detail_html(snapshot: dict[str, Any], issue_identifier: str) -> s
       border-radius: 8px;
     }}
     table {{ width: 100%; border-collapse: collapse; }}
+    table {{ table-layout: fixed; }}
     th, td {{
       padding: 8px 10px;
       border-top: 1px solid #d6dae1;
       text-align: left;
       vertical-align: top;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }}
     th {{ color: #667085; white-space: nowrap; }}
     code, pre {{
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }}
     pre {{
       overflow: auto;
@@ -244,6 +257,7 @@ def render_run_detail_html(snapshot: dict[str, Any], issue_identifier: str) -> s
     .bad {{ color: #b42318; }}
     .warn {{ color: #b45309; }}
     .ok {{ color: #137333; }}
+    .table-wrap {{ overflow-x: auto; }}
   </style>
 </head>
 <body>
@@ -457,12 +471,14 @@ def _table(title: str, headers: tuple[str, ...], rows: list[str]) -> str:
     return f"""
 <section>
   <h2>{escape(title)}</h2>
-  <table>
-    <thead><tr>{head}</tr></thead>
-    <tbody>
-      {"".join(rows)}
-    </tbody>
-  </table>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>{head}</tr></thead>
+      <tbody>
+        {"".join(rows)}
+      </tbody>
+    </table>
+  </div>
 </section>
 """
 
