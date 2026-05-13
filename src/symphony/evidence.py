@@ -253,6 +253,10 @@ class EvidenceDetector:
         if role_outcome == "approved":
             review_prs = self._detect_pull_requests(issue, state="all")
             if review_prs:
+                merged_prs = [pr for pr in review_prs if _pr_is_merged(pr)]
+                review_prs = merged_prs or [
+                    pr for pr in review_prs if pr.state.lower() == "open"
+                ]
                 existing_pr_numbers = {
                     int(entry.get("number") or 0)
                     for entry in evidence
@@ -280,7 +284,7 @@ class EvidenceDetector:
                     evidence.extend(
                         self._detect_pull_request_review_gates(issue, missing_gate_prs)
                     )
-                evidence.extend(_pr_merged_evidence(pr) for pr in review_prs if _pr_is_merged(pr))
+                evidence.extend(_pr_merged_evidence(pr) for pr in merged_prs)
         if role_outcome is not None:
             evidence.append(
                 {

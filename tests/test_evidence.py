@@ -559,6 +559,100 @@ def test_approved_role_outcome_collects_merged_pr_evidence(tmp_path: Path) -> No
     )
 
 
+def test_approved_role_outcome_ignores_old_closed_unmerged_pr_threads(
+    tmp_path: Path,
+) -> None:
+    issue = _issue()
+    merged_pr = _fake_pr_payload(
+        number=42,
+        head_ref="symphony/acme-proj-1",
+        state="closed",
+        merged_at="2026-05-13T12:45:00Z",
+    )
+    old_closed_pr = _fake_pr_payload(
+        number=41,
+        head_ref="symphony/acme-proj-1",
+        state="closed",
+        merged_at=None,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/pulls"):
+            if request.url.params.get("state") == "all":
+                return httpx.Response(200, json=[merged_pr, old_closed_pr])
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/pulls/42/reviews"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/pulls/41/reviews"):
+            raise AssertionError("old closed unmerged PR review gate should be ignored")
+        if request.url.path.endswith("/issues/1/comments"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/issues/42/comments"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "html_url": "https://github.com/acme/proj/pull/42#approval",
+                        "body": "Symphony-Review-Approval: approved",
+                        "user": {"login": "jimoosciuc"},
+                    },
+                    {
+                        "html_url": "https://github.com/acme/proj/pull/42#checklist",
+                        "body": "\n".join(
+                            [
+                                "Symphony-Review-Checklist: pass",
+                                "- [x] spec_compliance: matches issue intent",
+                                "- [x] issue_fit: solves requested behavior",
+                                "- [x] existing_design_fit: reuses current mechanism",
+                                "- [x] tests: relevant tests passed",
+                                "- [x] review_threads: no open unaddressed threads",
+                            ]
+                        ),
+                        "user": {"login": "jimoosciuc"},
+                    },
+                ],
+            )
+        if request.url.path.endswith("/graphql"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [],
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+        return httpx.Response(404, json={"message": "not found"})
+
+    detector = EvidenceDetector(
+        _github(),
+        client=GitHubClient("ghp_test_xxxx", transport=httpx.MockTransport(handler)),
+    )
+
+    result = detector.detect(
+        issue=issue,
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=_last_event({"result": "Symphony-Role-Outcome: approved"}),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    assert [e["number"] for e in result.task_evidence if e["type"] == "pr_merged"] == [42]
+    assert all(
+        e.get("number") != 41
+        for e in result.task_evidence
+        if e["type"] in {"pr_review_state", "pr_review_threads"}
+    )
+
+
 # -- COMPLETED + no-PR sentinel ---------------------------------------------
 
 
