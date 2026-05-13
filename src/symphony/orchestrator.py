@@ -1929,6 +1929,8 @@ class Orchestrator:
                     if worker.last_event is not None
                     else None
                 ),
+                "last_event": _event_summary(worker.last_event),
+                "recent_events": [_event_summary(event) for event in worker.recent_events],
                 "error": worker.error,
                 "usage": worker.usage.to_json() if worker.usage.has_usage else None,
             }
@@ -1962,6 +1964,17 @@ def _lane_summary(lane: LaneConfig | None) -> dict[str, Any] | None:
         "max_concurrency": lane.max_concurrency,
         "prompt_prefix": bool(lane.prompt_prefix),
         "prompt_suffix": bool(lane.prompt_suffix),
+    }
+
+
+def _event_summary(event: AgentEvent | None) -> dict[str, Any] | None:
+    if event is None:
+        return None
+    return {
+        "event": event.event,
+        "timestamp": event.timestamp.isoformat(),
+        "provider_session_id": event.provider_session_id,
+        "payload": event.payload or {},
     }
 
 

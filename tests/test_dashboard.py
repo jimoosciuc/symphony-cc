@@ -97,6 +97,26 @@ def _snapshot() -> dict:
                 "security_profile": "trusted_unattended",
                 "artifact_dir": "/tmp/artifacts/acme_proj_3/1",
                 "last_event_at": "2026-05-08T00:02:00+00:00",
+                "last_event": {
+                    "event": "turn_completed",
+                    "timestamp": "2026-05-08T00:02:00+00:00",
+                    "payload": {},
+                },
+                "recent_events": [
+                    {
+                        "event": "heartbeat",
+                        "timestamp": "2026-05-08T00:01:58+00:00",
+                        "payload": {
+                            "kind": "error",
+                            "raw": {"message": "Reconnecting... 1/5"},
+                        },
+                    },
+                    {
+                        "event": "message_delta",
+                        "timestamp": "2026-05-08T00:01:59+00:00",
+                        "payload": {"text": "Opened the PR"},
+                    },
+                ],
             },
             {
                 "issue_identifier": "acme/proj#4",
@@ -155,6 +175,8 @@ def test_dashboard_renders_core_operator_states() -> None:
     assert "permission denials: 1" in html
     assert "temporary failure" in html
     assert "completed_with_pr" in html
+    assert "codex warning: Reconnecting... 1/5" in html
+    assert "Opened the PR" in html
     assert "incomplete_permission_denied" in html
     assert "permission denials: 1" in html
     assert "AskUserQuestion" in html
@@ -223,6 +245,15 @@ def test_render_run_detail_html_shows_operator_debug_fields() -> None:
     assert "Recent Session Events" in html
     assert "Working on PR checks" in html
     assert "Back to dashboard" in html
+
+
+def test_render_run_detail_html_shows_finished_session_events() -> None:
+    html = render_run_detail_html(_snapshot(), "acme/proj#3")
+
+    assert html is not None
+    assert "Recent Session Events" in html
+    assert "codex warning: Reconnecting... 1/5" in html
+    assert "Opened the PR" in html
 
 
 def test_render_run_detail_html_shows_finished_evidence() -> None:

@@ -432,6 +432,11 @@ def _recent_finished(items: list[dict[str, Any]]) -> str:
             f"<td>{_text(item.get('last_event_at'))}</td>"
             "</tr>"
         )
+        rows.append(
+            "<tr class=\"session-row\">"
+            f"<td colspan=\"12\">{_session_timeline(item)}</td>"
+            "</tr>"
+        )
     return _table(
         "Recent Finished",
         (
@@ -597,6 +602,11 @@ def _session_event_summary(event: dict[str, Any]) -> str:
             result = payload.get("content") or payload.get("tool_use_result")
             return f"tool_completed: {_truncate(_text(result), 140)}"
         if name == "heartbeat":
+            kind = payload.get("kind")
+            if kind == "error":
+                raw = payload.get("raw") if isinstance(payload.get("raw"), dict) else {}
+                message = raw.get("message") if isinstance(raw, dict) else None
+                return f"codex warning: {_truncate(_text(message), 140)}"
             data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
             description = data.get("description") if isinstance(data, dict) else None
             task_id = data.get("task_id") if isinstance(data, dict) else None
@@ -787,7 +797,7 @@ def _detail_events(detail: dict[str, Any]) -> str:
     active = detail.get("active_worker") or {}
     finished = detail.get("finished_run") or {}
     retry = detail.get("retry_state") or {}
-    event = active.get("last_event") or {}
+    event = active.get("last_event") or finished.get("last_event") or {}
     rows = [
         ("Last Event", event.get("event")),
         ("Last Event At", event.get("timestamp") or finished.get("last_event_at")),
@@ -809,7 +819,7 @@ def _detail_events(detail: dict[str, Any]) -> str:
             "<h2>Last Event Payload</h2>"
             f"<pre>{escape(json.dumps(payload, indent=2, sort_keys=True))}</pre>"
         )
-    recent_events = active.get("recent_events")
+    recent_events = active.get("recent_events") or finished.get("recent_events")
     recent_html = ""
     if isinstance(recent_events, list) and recent_events:
         rows = []
