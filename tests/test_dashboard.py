@@ -54,6 +54,23 @@ def _snapshot() -> dict:
                         "payload": {"tool_name": "Bash"},
                     },
                 ],
+                "provider_timeline": [
+                    {
+                        "index": 1,
+                        "event": "item.completed",
+                        "kind": "message",
+                        "summary": "I will inspect the issue first",
+                    },
+                    {
+                        "index": 2,
+                        "event": "item.completed",
+                        "kind": "command",
+                        "summary": "completed: gh issue view 1",
+                        "status": "completed",
+                        "exit_code": 0,
+                    },
+                ],
+                "provider_last_message": "Symphony-Role-Outcome: decision_to_impl",
             }
         ],
         "waiting_items": [
@@ -180,6 +197,9 @@ def test_dashboard_renders_core_operator_states() -> None:
     assert "provider-1" in html
     assert "implementer" in html
     assert "Working on PR checks" in html
+    assert "I will inspect the issue first" in html
+    assert "completed: gh issue view 1" in html
+    assert "Symphony-Role-Outcome: decision_to_impl" in html
     assert "tool_started: Bash" in html
     assert "session-row" in html
     assert 'class="table-wrap"' in html

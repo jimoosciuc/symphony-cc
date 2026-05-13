@@ -177,6 +177,91 @@ def test_status_snapshot_includes_active_worker_and_redacted_event_payload(
     assert "<redacted>" in active["recent_events"][1]["payload"]["input"]["command"]
 
 
+def test_status_snapshot_enriches_active_worker_with_codex_timeline(
+    tmp_path: Path,
+) -> None:
+    orch = _orchestrator(tmp_path)
+    issue = _issue(1)
+    workspace = Workspace(
+        issue_identifier=issue.identifier,
+        workspace_key="acme_proj_1",
+        path=tmp_path / "ws" / "acme_proj_1",
+        repo_path=tmp_path / "ws" / "acme_proj_1",
+        created_at=datetime(2026, 5, 8, tzinfo=timezone.utc),
+        reused=False,
+    )
+    artifacts = ArtifactWriter.for_attempt(
+        orch.config.claude.artifact_store,
+        owner=issue.owner,
+        repo=issue.repo,
+        issue_number=issue.number,
+        attempt=1,
+        redact_keys=orch.config.logging.redact_keys,
+    )
+    artifacts.root.mkdir(parents=True, exist_ok=True)
+    (artifacts.root / "codex-events.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "turn.started"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
+                            "text": "I am reading the issue and existing code.",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "command_execution",
+                            "command": "gh issue view 405",
+                            "status": "completed",
+                            "exit_code": 0,
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (artifacts.root / "codex-last-message.txt").write_text(
+        "Symphony-Role-Outcome: decision_to_impl",
+        encoding="utf-8",
+    )
+    worker = WorkerState(
+        issue=issue,
+        workspace=workspace,
+        session=SessionRecord(
+            session_id="sym-active",
+            provider="codex",
+            issue_identifier=issue.identifier,
+            issue_number=issue.number,
+            workspace_path=workspace.path,
+            artifact_dir=artifacts.root,
+            started_at=datetime(2026, 5, 8, tzinfo=timezone.utc),
+            provider_session_id="codex-thread",
+        ),
+        artifacts=artifacts,
+        config=orch.config,
+    )
+    orch.active[issue.identifier] = worker
+
+    snapshot = orch.status_snapshot()
+
+    active = snapshot["active_workers"][0]
+    assert active["provider_last_message"] == "Symphony-Role-Outcome: decision_to_impl"
+    assert active["provider_timeline"][0]["kind"] == "session"
+    assert active["provider_timeline"][1]["summary"] == (
+        "I am reading the issue and existing code."
+    )
+    assert active["provider_timeline"][2]["summary"] == (
+        "completed: gh issue view 405 (exit 0)"
+    )
+
+
 def test_status_snapshot_includes_retry_queue(tmp_path: Path) -> None:
     orch = _orchestrator(tmp_path)
     retry = RetryState(issue_identifier="acme/proj#1")

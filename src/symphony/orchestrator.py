@@ -1356,6 +1356,24 @@ class Orchestrator:
         graph = self.config.role_graph
         if graph is None or worker.role_name is None or worker.role_state is None:
             return route
+        if _is_incomplete_design_gate(route=route):
+            if worker.role_claim is not None:
+                reverse = plan_reverse_claim(
+                    graph,
+                    worker.role_claim,
+                    reason="design_gate_incomplete",
+                )
+                if self._apply_role_transition(
+                    worker,
+                    reverse,
+                    route,
+                    evidence_summary=(
+                        "fallback_reason=design_gate_incomplete; "
+                        f"outcome_reason={outcome_reason}"
+                    ),
+                    fallback=True,
+                ):
+                    return route
         if _is_incomplete_review_approval_gate(
             worker=worker,
             route=route,
@@ -2428,10 +2446,10 @@ def _role_outcome_evidence_for_transition(
         return tuple(evidence)
     if transition_name == "changes_requested":
         return ("review_comment",)
-    if transition_name in {"decision_to_impl", "verified", "verification_failed"}:
+    if transition_name in {"decision_to_impl", "decision_to_review"}:
         return ("decision_comment", "review_comment")
-    if transition_name == "decision_to_review":
-        return ("decision_comment", "review_comment", "design_checklist")
+    if transition_name in {"verified", "verification_failed"}:
+        return ("decision_comment", "review_comment")
     if transition_name in {"needs_leader", "design_needed", "operator_blocked", "no_work_needed"}:
         return ("issue_comment",)
     return ("issue_comment", "review_comment", "decision_comment")
@@ -2516,6 +2534,15 @@ def _is_incomplete_review_approval_gate(
         route.get("requested") == "approved"
         and code == "missing_evidence"
         and not _has_verified_pr_approval(detector_result)
+    )
+
+
+def _is_incomplete_design_gate(*, route: dict[str, Any]) -> bool:
+    error = route.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    return (
+        route.get("requested") in {"decision_to_impl", "decision_to_review"}
+        and code == "missing_evidence"
     )
 
 

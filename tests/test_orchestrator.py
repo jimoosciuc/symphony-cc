@@ -233,7 +233,7 @@ def _role_graph() -> RoleGraphConfig:
                 role="leader",
                 from_states=("leader_reviewing",),
                 to_state="ready_impl",
-                requires=("decision_comment",),
+                requires=("design_checklist",),
             ),
         },
     )
@@ -430,7 +430,7 @@ async def test_role_contract_for_leader_lists_gate_audit_rules(tmp_path: Path) -
     assert "- Actor: hybrid" in message
     assert "- Current state: leader_reviewing" in message
     assert "decision_to_impl: leader_reviewing -> ready_impl" in message
-    assert "requires: decision_comment" in message
+    assert "requires: design_checklist" in message
     assert "Gate decisions require a GitHub-visible audit comment before handoff." in message
 
 

@@ -183,7 +183,7 @@ def _graph() -> RoleGraphConfig:
                 "leader",
                 ("leader_reviewing",),
                 "ready_impl",
-                ("decision_comment",),
+                ("design_checklist",),
             ),
         },
     )
@@ -300,7 +300,7 @@ async def test_fake_role_e2e_design_gate_returns_to_implementer(tmp_path: Path) 
         issue_id=issue.identifier,
         role_name="leader",
         transition_name="decision_to_impl",
-        evidence=("decision_comment",),
+        evidence=("design_checklist",),
     )
     assert tracker.states[issue.identifier].issue.labels == ("symphony-ready-impl",)
 
@@ -347,9 +347,39 @@ async def test_role_outcome_from_recent_message_routes_leader_decision(
             events=[
                 (
                     "message_delta",
-                    {"text": "Decision posted.\nSymphony-Role-Outcome: decision_to_impl"},
+                    {
+                        "text": "\n".join(
+                            [
+                                "Decision posted.",
+                                "Symphony-Design-Checklist: pass",
+                                "- [x] problem_framing: clear",
+                                "- [x] existing_mechanism_fit: yes",
+                                "- [x] minimal_surface_area: yes",
+                                "- [x] data_model_fit: yes",
+                                "- [x] test_strategy: yes",
+                                "- [x] drift_assessment: none",
+                                "Symphony-Role-Outcome: decision_to_impl",
+                            ]
+                        )
+                    },
                 ),
-                ("message_completed", {"text": "Symphony-Role-Outcome: decision_to_impl"}),
+                (
+                    "message_completed",
+                    {
+                        "text": "\n".join(
+                            [
+                                "Symphony-Design-Checklist: pass",
+                                "- [x] problem_framing: clear",
+                                "- [x] existing_mechanism_fit: yes",
+                                "- [x] minimal_surface_area: yes",
+                                "- [x] data_model_fit: yes",
+                                "- [x] test_strategy: yes",
+                                "- [x] drift_assessment: none",
+                                "Symphony-Role-Outcome: decision_to_impl",
+                            ]
+                        )
+                    },
+                ),
                 ("turn_completed", {"usage": {}}),
             ],
         )
