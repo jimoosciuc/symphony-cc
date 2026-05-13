@@ -451,6 +451,86 @@ def test_completed_role_outcome_collects_design_checklist_evidence(tmp_path: Pat
     assert checklist[0]["has_existing_mechanism_fit"] is True
 
 
+def test_typed_role_action_precedes_legacy_role_outcome_sentinel(tmp_path: Path) -> None:
+    detector = EvidenceDetector(_github(), client=_client_returning([]))
+
+    result = detector.detect(
+        issue=_issue(),
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=_last_event(
+            {
+                "role_action": {
+                    "type": "decision_to_impl",
+                    "role": "leader",
+                    "summary": "route to implementation",
+                    "evidence": {
+                        "design_checklist": {
+                            "passed": True,
+                            "problem_framing": True,
+                            "existing_mechanism_fit": True,
+                            "minimal_surface_area": True,
+                            "data_model_fit": True,
+                            "test_strategy": True,
+                            "drift_assessment": True,
+                        }
+                    },
+                    "references": {"issue": "https://github.com/acme/proj/issues/1"},
+                },
+                "result": "Symphony-Role-Outcome: decision_to_review",
+            }
+        ),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    assert result.task_outcome == OUTCOME_COMPLETED_ROLE_OUTCOME
+    assert result.role_outcome == "decision_to_impl"
+    assert result.role_action is not None
+    assert result.role_action["summary"] == "route to implementation"
+    role_actions = [e for e in result.task_evidence if e["type"] == "role_action"]
+    assert role_actions == [
+        {
+            "type": "role_action",
+            "transition": "decision_to_impl",
+            "role": "leader",
+            "summary": "route to implementation",
+            "marker_source": "typed_role_action",
+        }
+    ]
+    checklist = [e for e in result.task_evidence if e["type"] == "design_checklist"]
+    assert checklist[0]["marker_source"] == "typed_role_action"
+    assert checklist[0]["has_drift_assessment"] is True
+
+
+def test_unknown_typed_role_action_is_reported_as_invalid(tmp_path: Path) -> None:
+    detector = EvidenceDetector(_github(), client=_client_returning([]))
+
+    result = detector.detect(
+        issue=_issue(),
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=_last_event({"role_action": {"type": "teleport"}}),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    assert result.task_outcome == OUTCOME_COMPLETED_ROLE_OUTCOME
+    assert result.role_outcome is None
+    assert result.role_action is None
+    assert result.role_action_error == {
+        "code": "unknown_role_action",
+        "message": "unknown role_action.type 'teleport'",
+        "action_type": "teleport",
+    }
+    invalid = [e for e in result.task_evidence if e["type"] == "role_action_invalid"]
+    assert invalid[0]["code"] == "unknown_role_action"
+
+
 def test_completed_role_outcome_collects_github_design_checklist_comment(
     tmp_path: Path,
 ) -> None:
@@ -1091,6 +1171,8 @@ def test_detector_result_to_terminal_fields_shape() -> None:
         "task_outcome",
         "task_evidence",
         "role_outcome",
+        "role_action",
+        "role_action_error",
         "no_pr_reason",
         "outcome_decided_by",
         "task_outcome_recorded_at",

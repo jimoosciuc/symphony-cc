@@ -50,7 +50,7 @@ from symphony.evidence import (
 from symphony.github.tracker import FakeGitHubTracker
 from symphony.models import Issue
 from symphony.orchestrator import Orchestrator
-from symphony.provider.fake import FakeProvider
+from symphony.provider.fake import FakeProvider, FakeTurnScript
 from symphony.workspace import WorkspaceManager
 
 # -- Helpers -----------------------------------------------------------------
@@ -1194,6 +1194,122 @@ async def test_role_graph_leader_decision_to_impl_requires_passing_design_checkl
     assert transition["requested"] == "decision_to_impl"
     assert transition["error"]["code"] == "missing_evidence"
     assert transition["fallback"] == "release:leader:design_gate_incomplete"
+
+
+async def test_role_graph_leader_typed_action_routes_to_implementation(
+    tmp_path: Path,
+) -> None:
+    graph = _role_graph()
+    graph.transitions["decision_to_impl"] = RoleTransitionConfig(
+        name="decision_to_impl",
+        role="leader",
+        from_states=("leader_reviewing",),
+        to_state="ready_impl",
+        requires=("design_checklist",),
+    )
+    graph.roles["leader"] = replace(
+        graph.roles["leader"],
+        actor="agent",
+        can_claim=("needs_design", "blocked_operator"),
+    )
+    cfg = replace(_config(tmp_path), role_graph=graph)
+    provider = FakeProvider(
+        default_script=FakeTurnScript(
+            events=[
+                ("message_delta", {"text": "typed decision", "block_index": 0}),
+                ("message_completed", {"stop_reason": "end_turn"}),
+                (
+                    "turn_completed",
+                    {
+                        "duration_ms": 1,
+                        "role_action": {
+                            "type": "decision_to_impl",
+                            "role": "leader",
+                            "summary": "route to implementation",
+                            "evidence": {
+                                "design_checklist": {
+                                    "passed": True,
+                                    "problem_framing": True,
+                                    "existing_mechanism_fit": True,
+                                    "minimal_surface_area": True,
+                                    "data_model_fit": True,
+                                    "test_strategy": True,
+                                    "drift_assessment": True,
+                                }
+                            },
+                        },
+                    },
+                ),
+            ],
+        )
+    )
+    tracker = FakeGitHubTracker(
+        issues=[replace(_issue(), labels=("symphony-needs-design",))],
+        ready_label="",
+    )
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=provider,
+        workspace_manager=WorkspaceManager(cfg.workspace),
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-ready-impl" in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] == "decision_to_impl"
+    assert transition["applied"] == "decision_to_impl"
+    assert orch.recent_finished[0]["role_action"]["type"] == "decision_to_impl"
+
+
+async def test_role_graph_invalid_typed_action_is_rejected_without_role_fallback(
+    tmp_path: Path,
+) -> None:
+    graph = _role_graph()
+    graph.roles["leader"] = replace(
+        graph.roles["leader"],
+        actor="agent",
+        can_claim=("needs_design", "blocked_operator"),
+    )
+    cfg = replace(_config(tmp_path), role_graph=graph)
+    provider = FakeProvider(
+        default_script=FakeTurnScript(
+            events=[
+                (
+                    "turn_completed",
+                    {
+                        "duration_ms": 1,
+                        "role_action": {"type": "teleport", "role": "leader"},
+                    },
+                ),
+            ],
+        )
+    )
+    tracker = FakeGitHubTracker(
+        issues=[replace(_issue(), labels=("symphony-needs-design",))],
+        ready_label="",
+    )
+    orch = Orchestrator(
+        cfg,
+        tracker=tracker,
+        provider=provider,
+        workspace_manager=WorkspaceManager(cfg.workspace),
+    )
+
+    await orch.run_once()
+
+    state = tracker.states["acme/proj#1"]
+    assert "symphony-ready-impl" not in state.issue.labels
+    assert "symphony-leader-reviewing" not in state.issue.labels
+    assert "symphony-needs-design" in state.issue.labels
+    assert "symphony-blocked" not in state.issue.labels
+    transition = orch.recent_finished[0]["role_transition"]
+    assert transition["requested"] is None
+    assert transition["fallback"] == "release:leader:invalid_role_action"
+    assert transition["error"]["code"] == "unknown_role_action"
+    assert orch.recent_finished[0]["role_action_error"]["code"] == "unknown_role_action"
 
 
 async def test_role_graph_leader_decision_requires_complete_design_checklist_items(
