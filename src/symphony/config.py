@@ -91,10 +91,12 @@ ALLOWED_TRANSITION_REQUIREMENTS: frozenset[str] = frozenset(
     {
         "claim_comment",
         "decision_comment",
+        "design_checklist",
         "issue_comment",
         "none",
         "pr_approval",
         "pr_link",
+        "review_checklist",
         "review_comment",
     }
 )

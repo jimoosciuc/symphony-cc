@@ -1201,6 +1201,15 @@ class Orchestrator:
                 outcome_reason=outcome_reason,
             )
 
+        review_gate_route = self._route_review_gate_needs_leader_override(
+            worker,
+            route,
+            detector_result=detector_result,
+            outcome_reason=outcome_reason,
+        )
+        if review_gate_route is not None:
+            return review_gate_route
+
         evidence = _transition_evidence_for_outcome(
             detector_result,
             transition_name=requested,
@@ -1245,6 +1254,96 @@ class Orchestrator:
             outcome_reason=outcome_reason,
         )
 
+    def _route_review_gate_needs_leader_override(
+        self,
+        worker: WorkerState,
+        route: dict[str, Any],
+        *,
+        detector_result: DetectorResult,
+        outcome_reason: str,
+    ) -> dict[str, Any] | None:
+        graph = self.config.role_graph
+        if (
+            graph is None
+            or worker.role_name is None
+            or worker.role_state != "reviewing"
+            or route.get("requested") != "needs_leader"
+            or not _review_gate_has_linked_pr(detector_result)
+        ):
+            return None
+
+        unaddressed = _review_gate_unaddressed_thread_count(detector_result)
+        if unaddressed > 0:
+            planned = plan_transition(
+                graph,
+                role_name=worker.role_name,
+                transition_name="changes_requested",
+                from_state_name=worker.role_state,
+                evidence=("review_comment",),
+            )
+            if isinstance(planned, TransitionPlan) and self._apply_role_transition(
+                worker,
+                planned,
+                route,
+                evidence_summary=(
+                    "system_review_gate=unaddressed_review_threads; "
+                    f"{_review_gate_summary(detector_result)}; "
+                    f"outcome_reason={outcome_reason}"
+                ),
+                fallback=True,
+            ):
+                route["requested"] = "needs_leader"
+                route["override_reason"] = "review_gate_unaddressed_threads"
+                return route
+
+        if not _review_gate_has_passing_checklist(detector_result):
+            planned = plan_transition(
+                graph,
+                role_name=worker.role_name,
+                transition_name="changes_requested",
+                from_state_name=worker.role_state,
+                evidence=("review_comment",),
+            )
+            if isinstance(planned, TransitionPlan) and self._apply_role_transition(
+                worker,
+                planned,
+                route,
+                evidence_summary=(
+                    "system_review_gate=missing_passing_checklist; "
+                    f"{_review_gate_summary(detector_result)}; "
+                    f"outcome_reason={outcome_reason}"
+                ),
+                fallback=True,
+            ):
+                route["requested"] = "needs_leader"
+                route["override_reason"] = "review_gate_missing_passing_checklist"
+                return route
+
+        if (
+            not _review_gate_has_approval_evidence(detector_result)
+            and worker.role_claim is not None
+        ):
+            reverse = plan_reverse_claim(
+                graph,
+                worker.role_claim,
+                reason="review_gate_missing_approval",
+            )
+            if self._apply_role_transition(
+                worker,
+                reverse,
+                route,
+                evidence_summary=(
+                    "system_review_gate=missing_approval_evidence; "
+                    f"{_review_gate_summary(detector_result)}; "
+                    f"outcome_reason={outcome_reason}"
+                ),
+                fallback=True,
+            ):
+                route["requested"] = "needs_leader"
+                route["override_reason"] = "review_gate_missing_approval"
+                return route
+        return None
+
     def _route_role_fallback(
         self,
         worker: WorkerState,
@@ -1262,6 +1361,30 @@ class Orchestrator:
             route=route,
             detector_result=detector_result,
         ):
+            if (
+                _review_gate_unaddressed_thread_count(detector_result) > 0
+                or _review_gate_has_failing_checklist(detector_result)
+                or not _review_gate_has_passing_checklist(detector_result)
+            ):
+                planned = plan_transition(
+                    graph,
+                    role_name=worker.role_name,
+                    transition_name="changes_requested",
+                    from_state_name=worker.role_state,
+                    evidence=("review_comment",),
+                )
+                if isinstance(planned, TransitionPlan) and self._apply_role_transition(
+                    worker,
+                    planned,
+                    route,
+                    evidence_summary=(
+                        "fallback_reason=review_gate_failed; "
+                        f"{_review_gate_summary(detector_result)}; "
+                        f"outcome_reason={outcome_reason}"
+                    ),
+                    fallback=True,
+                ):
+                    return route
             if worker.role_claim is not None:
                 reverse = plan_reverse_claim(
                     graph,
@@ -2275,6 +2398,8 @@ def _transition_evidence_for_outcome(
                 detector_result=detector_result,
             )
         )
+        if _task_evidence_has(detector_result, "design_checklist"):
+            evidence.append("design_checklist")
     if (
         transition_name in {"design_needed", "operator_blocked", "no_work_needed"}
         or detector_result.no_pr_reason
@@ -2305,16 +2430,33 @@ def _role_outcome_evidence_for_transition(
         return ("review_comment",)
     if transition_name in {"decision_to_impl", "verified", "verification_failed"}:
         return ("decision_comment", "review_comment")
+    if transition_name == "decision_to_review":
+        return ("decision_comment", "review_comment", "design_checklist")
     if transition_name in {"needs_leader", "design_needed", "operator_blocked", "no_work_needed"}:
         return ("issue_comment",)
     return ("issue_comment", "review_comment", "decision_comment")
 
 
 def _task_evidence_has(detector_result: DetectorResult, evidence_type: str) -> bool:
-    return any(entry.get("type") == evidence_type for entry in detector_result.task_evidence)
+    return any(
+        entry.get("type") == evidence_type
+        and (
+            evidence_type not in {"review_checklist", "design_checklist"}
+            or bool(entry.get("passed"))
+        )
+        for entry in detector_result.task_evidence
+    )
 
 
 def _has_verified_pr_approval(detector_result: DetectorResult) -> bool:
+    return (
+        _review_gate_has_approval_evidence(detector_result)
+        and _review_gate_unaddressed_thread_count(detector_result) == 0
+        and _review_gate_has_passing_checklist(detector_result)
+    )
+
+
+def _review_gate_has_approval_evidence(detector_result: DetectorResult) -> bool:
     has_independent_approval = any(
         entry.get("type") == "pr_review_state"
         and bool(entry.get("has_independent_approval"))
@@ -2324,12 +2466,42 @@ def _has_verified_pr_approval(detector_result: DetectorResult) -> bool:
         entry.get("type") in {"review_approval_label", "review_approval_comment"}
         for entry in detector_result.task_evidence
     )
-    has_unresolved_current_thread = any(
-        entry.get("type") == "pr_review_threads"
-        and int(entry.get("unresolved_current_count") or 0) > 0
+    return has_independent_approval or has_symphony_approval
+
+
+def _review_gate_unaddressed_thread_count(detector_result: DetectorResult) -> int:
+    return sum(
+        int(entry.get("unresolved_unaddressed_count", entry.get("unresolved_current_count")) or 0)
+        for entry in detector_result.task_evidence
+        if entry.get("type") == "pr_review_threads"
+    )
+
+
+def _review_gate_has_linked_pr(detector_result: DetectorResult) -> bool:
+    return any(
+        entry.get("type") == "pr_linked"
         for entry in detector_result.task_evidence
     )
-    return (has_independent_approval or has_symphony_approval) and not has_unresolved_current_thread
+
+
+def _review_gate_has_passing_checklist(detector_result: DetectorResult) -> bool:
+    return any(
+        entry.get("type") == "review_checklist"
+        and bool(entry.get("passed"))
+        and bool(entry.get("has_spec_compliance"))
+        and bool(entry.get("has_issue_fit"))
+        and bool(entry.get("has_existing_design_fit"))
+        and bool(entry.get("has_tests"))
+        and bool(entry.get("has_review_threads"))
+        for entry in detector_result.task_evidence
+    )
+
+
+def _review_gate_has_failing_checklist(detector_result: DetectorResult) -> bool:
+    return any(
+        entry.get("type") == "review_checklist" and not bool(entry.get("passed"))
+        for entry in detector_result.task_evidence
+    )
 
 
 def _is_incomplete_review_approval_gate(
@@ -2360,11 +2532,10 @@ def _review_gate_summary(detector_result: DetectorResult) -> str:
     ):
         parts.append("review_gate=missing_approval")
 
-    current = sum(
-        int(entry.get("unresolved_current_count") or 0)
-        for entry in detector_result.task_evidence
-        if entry.get("type") == "pr_review_threads"
-    )
+    if not _review_gate_has_passing_checklist(detector_result):
+        parts.append("review_gate=missing_passing_checklist")
+
+    current = _review_gate_unaddressed_thread_count(detector_result)
     outdated = sum(
         int(entry.get("unresolved_outdated_count") or 0)
         for entry in detector_result.task_evidence

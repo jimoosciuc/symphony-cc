@@ -707,6 +707,10 @@ roles:
         from: [leader_reviewing]
         to: ready_impl
         requires: decision_comment
+      decision_to_review:
+        from: [leader_reviewing]
+        to: ready_review
+        requires: design_checklist
 {production_roles}
 states:
   ready_impl:
@@ -775,11 +779,23 @@ Rules:
 - When addressing PR review feedback, reply in the relevant PR review thread
   or otherwise leave a precise PR comment that names the addressed feedback.
   A generic status comment is not enough.
+- Reviewers must close the review loop before approving: inspect unresolved
+  current PR review threads, request changes when any thread is still
+  unaddressed, or reply to the exact thread when the concern has already been
+  handled. Do not route missing approval evidence to leader.
+- Reviewer approval also requires a passing structured checklist comment:
+  `Symphony-Review-Checklist: pass` with checked items for `spec_compliance`,
+  `issue_fit`, `existing_design_fit`, `tests`, and `review_threads`. If any
+  item fails, request changes instead of approving.
 - Reviewer approval requires a real GitHub PR approval review and no unresolved
   current PR review threads. If all roles share one GitHub identity and native
   approval is impossible, use `Symphony-Review-Approval: approved` in a precise
   issue/PR comment or the non-state `symphony-review-approved` label; unresolved
   current PR review threads still block approval.
+- Leader handoff to review requires a passing structured design checklist:
+  `Symphony-Design-Checklist: pass` with checked items for `problem_framing`,
+  `existing_mechanism_fit`, `minimal_surface_area`, `data_model_fit`,
+  `test_strategy`, and `drift_assessment`.
 - Run relevant tests/checks when feasible and summarize them in the PR.
 - Do not edit Symphony state labels yourself; Symphony applies role-state
   transitions after validating your evidence.

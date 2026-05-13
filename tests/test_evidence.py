@@ -342,6 +342,98 @@ def test_completed_with_pr_collects_review_approval_override_evidence(
     ]
 
 
+def test_completed_with_pr_collects_review_checklist_evidence(tmp_path: Path) -> None:
+    issue = _issue()
+    github = _github()
+    pr = _fake_pr_payload(number=42, head_ref="symphony/acme-proj-1")
+    client = _client_with_review_gate(
+        pr=pr,
+        reviews=[],
+        threads=[],
+        pr_comments=[
+            {
+                "id": 1,
+                "html_url": "https://github.com/acme/proj/pull/42#issuecomment-1",
+                "body": "\n".join(
+                    [
+                        "Symphony-Review-Checklist: pass",
+                        "- [x] spec_compliance: matches issue intent",
+                        "- [x] issue_fit: solves requested behavior",
+                        "- [x] existing_design_fit: reuses current mechanism",
+                        "- [x] tests: relevant tests passed",
+                        "- [x] review_threads: no open unaddressed threads",
+                    ]
+                ),
+                "user": {"login": "jimoosciuc"},
+            }
+        ],
+    )
+    detector = EvidenceDetector(github, client=client)
+
+    result = detector.detect(
+        issue=issue,
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=_last_event({"result": "all done"}),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    checklist = [e for e in result.task_evidence if e["type"] == "review_checklist"]
+    assert checklist == [
+        {
+            "type": "review_checklist",
+            "number": 42,
+            "status": "pass",
+            "passed": True,
+            "surface": "pull_request",
+            "url": "https://github.com/acme/proj/pull/42#issuecomment-1",
+            "author": "jimoosciuc",
+            "has_spec_compliance": True,
+            "has_issue_fit": True,
+            "has_existing_design_fit": True,
+            "has_tests": True,
+            "has_review_threads": True,
+        }
+    ]
+
+
+def test_completed_role_outcome_collects_design_checklist_evidence(tmp_path: Path) -> None:
+    detector = EvidenceDetector(_github(), client=_client_returning([]))
+
+    result = detector.detect(
+        issue=_issue(),
+        terminal_state=Terminal.COMPLETED,
+        retryable=False,
+        blocked=False,
+        permission_denials_count=0,
+        last_event=_last_event(
+            {
+                "result": "\n".join(
+                    [
+                        "Symphony-Design-Checklist: pass",
+                        "- [x] problem_framing: clear",
+                        "- [x] existing_mechanism_fit: reuse current model",
+                        "- [x] minimal_surface_area: no extra API",
+                        "- [x] data_model_fit: compatible",
+                        "- [x] test_strategy: covered",
+                        "- [x] drift_assessment: no drift",
+                        "Symphony-Role-Outcome: decision_to_review",
+                    ]
+                )
+            }
+        ),
+        recent_assistant_text="",
+        workspace_path=tmp_path,
+    )
+
+    checklist = [e for e in result.task_evidence if e["type"] == "design_checklist"]
+    assert checklist[0]["passed"] is True
+    assert checklist[0]["has_existing_mechanism_fit"] is True
+
+
 # -- COMPLETED + no-PR sentinel ---------------------------------------------
 
 
